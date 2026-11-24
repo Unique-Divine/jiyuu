@@ -42,6 +42,30 @@ struct Options {
     resource_violation: *mut c_void,
 }
 
+#[derive(Default)]
+#[repr(C)]
+struct ResourceLimit {
+    enabled: bool,
+    value: u64,
+}
+
+#[derive(Default)]
+#[repr(C)]
+struct ResourcePolicy {
+    max_files: ResourceLimit,
+    max_source_bytes: ResourceLimit,
+    max_rss_bytes: ResourceLimit,
+    max_duration_ms: ResourceLimit,
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+#[repr(C)]
+struct ResourceViolation {
+    resource: c_int,
+    observed: u64,
+    limit: u64,
+}
+
 #[repr(C)]
 struct FileInfo {
     path: *mut c_char,
@@ -58,12 +82,13 @@ struct IgnoredFile {
 }
 
 unsafe extern "C" {
-    fn cbm_discover_count_bounded(
+    fn cbm_discover_count_bounded_with_walk(
         repo_path: *const c_char,
         opts: *const Options,
         max_files: c_int,
         deadline_ms: u64,
         count: *mut c_int,
+        walker: Option<Walker>,
     ) -> c_int;
     fn cbm_discover_ex2_with_walk(
         repo_path: *const c_char,
@@ -756,32 +781,56 @@ impl Drop for Scratch {
     }
 }
 
-fn native_admission(
+fn linked_admission(
     root: &Path,
     mode: Mode,
     max_files: c_int,
     deadline_ms: u64,
-) -> (c_int, c_int) {
+    walker: Option<Walker>,
+    policy: Option<&ResourcePolicy>,
+) -> (c_int, c_int, ResourceViolation) {
     let path = c_path(root);
+    let mut violation = ResourceViolation::default();
     let options = Options {
         mode,
         ignore_file: null(),
         max_file_size: 0,
-        resource_policy: null(),
-        resource_violation: null_mut(),
+        resource_policy: policy
+            .map_or(null(), |policy| std::ptr::from_ref(policy).cast()),
+        resource_violation: std::ptr::from_mut(&mut violation).cast(),
     };
     let mut count = -2;
     // SAFETY: the path, options, and count remain live for the native call.
     let status = unsafe {
-        cbm_discover_count_bounded(
+        cbm_discover_count_bounded_with_walk(
             path.as_ptr(),
             &options,
             max_files,
             deadline_ms,
             &mut count,
+            walker,
         )
     };
-    (status, count)
+    (status, count, violation)
+}
+
+fn compare_admission(
+    root: &Path,
+    mode: Mode,
+    max_files: c_int,
+    deadline_ms: u64,
+) -> (c_int, c_int) {
+    let c = linked_admission(root, mode, max_files, deadline_ms, None, None);
+    let rust = linked_admission(
+        root,
+        mode,
+        max_files,
+        deadline_ms,
+        Some(discover_walk::walk_bounded),
+        None,
+    );
+    assert_eq!(rust, c);
+    (c.0, c.1)
 }
 
 #[test]
@@ -797,7 +846,7 @@ fn admission_counts_indexable_files_up_to_the_ceiling() {
     for mode in Mode::ALL {
         for (max_files, expected) in [(0, (1, 0)), (1, (1, 1)), (2, (0, 2))] {
             assert_eq!(
-                native_admission(&scratch.0, mode, max_files, 0),
+                compare_admission(&scratch.0, mode, max_files, 0),
                 expected
             );
             let count = max_files as usize;
@@ -811,9 +860,76 @@ fn admission_counts_indexable_files_up_to_the_ceiling() {
                 expected
             );
         }
-        assert_eq!(native_admission(&scratch.0, mode, 2, 1), (-1, -1));
+        assert_eq!(compare_admission(&scratch.0, mode, 2, 1), (-1, -1));
         let expired = admission::count_bounded(&scratch.0, mode, 2, 1);
         assert_eq!(expired.unwrap_err().kind(), io::ErrorKind::TimedOut);
+    }
+}
+
+#[test]
+fn admission_reports_resource_limit_details() {
+    let scratch = Scratch::new();
+    let body = "fn entry() {}\n";
+    scratch.write("first.rs", body);
+    scratch.write("child/second.rs", body);
+    let bytes = body.len() as u64;
+    let max_files = ResourcePolicy {
+        max_files: ResourceLimit {
+            enabled: true,
+            value: 1,
+        },
+        ..ResourcePolicy::default()
+    };
+    let max_source_bytes = ResourcePolicy {
+        max_source_bytes: ResourceLimit {
+            enabled: true,
+            value: bytes,
+        },
+        ..ResourcePolicy::default()
+    };
+    for walker in [None, Some(discover_walk::walk_bounded as Walker)] {
+        for (policy, violation) in [
+            (
+                &max_files,
+                ResourceViolation {
+                    resource: 1,
+                    observed: 2,
+                    limit: 1,
+                },
+            ),
+            (
+                &max_source_bytes,
+                ResourceViolation {
+                    resource: 2,
+                    observed: 2 * bytes,
+                    limit: bytes,
+                },
+            ),
+        ] {
+            assert_eq!(
+                linked_admission(
+                    &scratch.0,
+                    Mode::Full,
+                    2,
+                    0,
+                    walker,
+                    Some(policy)
+                ),
+                (1, 1, violation)
+            );
+            // The admission ceiling takes precedence on the same candidate.
+            assert_eq!(
+                linked_admission(
+                    &scratch.0,
+                    Mode::Full,
+                    1,
+                    0,
+                    walker,
+                    Some(policy)
+                ),
+                (1, 1, ResourceViolation::default())
+            );
+        }
     }
 }
 
@@ -837,10 +953,10 @@ fn admission_refuses_an_unobservable_child() {
             fs::symlink_metadata(child.join("hidden.rs")).err()
         };
         let outcomes =
-            Mode::ALL.map(|mode| native_admission(&scratch.0, mode, 2, 0));
+            Mode::ALL.map(|mode| compare_admission(&scratch.0, mode, 2, 0));
         let rust_outcomes = Mode::ALL
             .map(|mode| admission::count_bounded(&scratch.0, mode, 2, 0));
-        let native_limit = native_admission(&scratch.0, Mode::Full, 0, 0);
+        let native_limit = compare_admission(&scratch.0, Mode::Full, 0, 0);
         let rust_limit = admission::count_bounded(&scratch.0, Mode::Full, 0, 0);
         fs::set_permissions(&child, fs::Permissions::from_mode(0o700)).unwrap();
 

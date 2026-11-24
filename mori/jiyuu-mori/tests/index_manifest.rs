@@ -33,7 +33,9 @@ impl Drop for Fixture {
 
 struct IndexSession {
     root: PathBuf,
-    routing: &'static str,
+    routing_override: Option<&'static str>,
+    rust_manifest: bool,
+    rust_fts: bool,
     driver_override: Option<&'static str>,
     seen_logs: HashSet<PathBuf>,
 }
@@ -41,7 +43,7 @@ struct IndexSession {
 impl IndexSession {
     fn new(
         root: PathBuf,
-        routing: &'static str,
+        routing_override: Option<&'static str>,
         driver_override: Option<&'static str>,
     ) -> Self {
         let mut dirs = fs::DirBuilder::new();
@@ -50,7 +52,9 @@ impl IndexSession {
         dirs.create(root.join("rt")).unwrap();
         Self {
             root,
-            routing,
+            routing_override,
+            rust_manifest: false,
+            rust_fts: false,
             driver_override,
             seen_logs: HashSet::new(),
         }
@@ -66,9 +70,16 @@ impl IndexSession {
             .env("CBM_CACHE_DIR", self.root.join("cache"))
             .env("CBM_RUNTIME_DIR", self.root.join("rt"))
             .env("CBM_PROFILE", "1")
-            .env("CBM_LOG_LEVEL", "info")
-            .env("MORI_IMPL_INDEX_MANIFEST", self.routing)
-            .env("MORI_IMPL_INDEX_ROUTE", self.routing);
+            .env("CBM_LOG_LEVEL", "info");
+        if let Some(routing) = self.routing_override {
+            command.env("MORI_IMPL_INDEX_ROUTE", routing);
+        }
+        if self.rust_manifest {
+            command.env("MORI_IMPL_INDEX_MANIFEST", "rust");
+        }
+        if self.rust_fts {
+            command.env("MORI_IMPL_FTS_WRITER", "rust");
+        }
         if let Some(drivers) = self.driver_override {
             command
                 .env("MORI_IMPL_FULL_BUILD_DRIVER", drivers)
@@ -109,7 +120,7 @@ impl IndexSession {
             })
             .collect();
         if let Some((generation, decision)) =
-            outcome.filter(|_| self.routing == "rust")
+            outcome.filter(|_| self.routing_override.is_none())
         {
             assert_eq!(witnesses.len(), 1, "{logs}");
             assert!(
@@ -154,6 +165,20 @@ impl IndexSession {
             "{logs}"
         );
         assert!(logs.contains(step.log), "{logs}");
+        let fts_mode = match step.decision {
+            None | Some(("staged", "full")) => Some("full"),
+            Some(("staged", "closure")) => Some("closure"),
+            _ => None,
+        };
+        let fts_witness = "msg=store.fts_rebuild implementation=rust";
+        if let Some(mode) = fts_mode.filter(|_| self.rust_fts) {
+            assert!(
+                logs.contains(&format!("{fts_witness} mode={mode}")),
+                "{logs}"
+            );
+        } else {
+            assert!(!logs.contains(fts_witness), "{logs}");
+        }
         let importance_pass = match step.decision {
             None | Some(("staged", "full")) => Some("pass.importance"),
             Some(("staged", "closure")) => Some("pass.importance_store"),
@@ -172,7 +197,7 @@ impl IndexSession {
             .contains("msg=incremental.manifest_compare implementation=rust");
         assert_eq!(
             used_rust,
-            step.decision.is_some() && self.routing == "rust",
+            step.decision.is_some() && self.rust_manifest,
             "{logs}"
         );
 
@@ -226,6 +251,42 @@ impl IndexSession {
         String::from_utf8(output.stdout).unwrap()
     }
 
+    fn fts(&self, name: &str) -> FtsContents {
+        let connection = Connection::open_with_flags(
+            self.db_path(name),
+            OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        connection
+            .execute_batch("CREATE VIRTUAL TABLE temp.vocabulary USING fts5vocab(main, nodes_fts, instance)")
+            .unwrap();
+        let tokens = connection
+            .prepare(
+                "SELECT json_array(v.term, n.qualified_name, v.col, v.offset)
+                 FROM vocabulary v JOIN nodes n ON n.id=v.doc ORDER BY 1",
+            )
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        let mut search = connection
+            .prepare(
+                "SELECT n.qualified_name, bm25(nodes_fts) AS rank
+                 FROM nodes_fts JOIN nodes n ON n.id=nodes_fts.rowid
+                 WHERE nodes_fts MATCH ?1 ORDER BY rank, n.qualified_name",
+            )
+            .unwrap();
+        let rankings = ["name:value", "body:retention"].map(|term| {
+            search
+                .query_map([term], |row| Ok((row.get(0)?, row.get(1)?)))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+        });
+        FtsContents { tokens, rankings }
+    }
+
     fn check_adr_failure(&mut self, repo: &Path, name: &str) {
         let db_path = self.db_path(name);
         let adr_path = db_path.with_extension("db.adr.db");
@@ -273,7 +334,7 @@ impl IndexSession {
         );
         eprintln!(
             "{} route kept the serving generation after ADR migration failed",
-            self.routing
+            self.routing_override.unwrap_or("default")
         );
     }
 }
@@ -282,6 +343,12 @@ impl Drop for IndexSession {
     fn drop(&mut self) {
         let _ = self.command().args(["daemon", "stop"]).output();
     }
+}
+
+#[derive(Debug, PartialEq)]
+struct FtsContents {
+    tokens: Vec<String>,
+    rankings: [Vec<(String, f64)>; 2],
 }
 
 #[derive(Clone, Copy)]
@@ -294,7 +361,7 @@ struct Step {
 }
 
 #[test]
-fn rust_routing_preserves_native_update_paths_and_generation() {
+fn default_rust_routing_preserves_native_update_paths_and_generation() {
     let fixture = Fixture::new();
     let repo = fixture.0.join("source");
     fs::create_dir_all(repo.join("server")).unwrap();
@@ -310,6 +377,10 @@ fn rust_routing_preserves_native_update_paths_and_generation() {
             "package server\ntype queryResolver struct{}\nfunc (q *queryResolver) Value() int { return 1 }\n",
         ),
         ("op.graphql", "query Operation { value }\n"),
+        (
+            "README.md",
+            "# Guide\n\nThe retention ledger remains readable.\n",
+        ),
     ] {
         fs::write(repo.join(path), contents).unwrap();
     }
@@ -349,8 +420,9 @@ fn rust_routing_preserves_native_update_paths_and_generation() {
     ];
 
     let mut native =
-        IndexSession::new(fixture.0.join("control"), "c", Some("c"));
-    let mut rust = IndexSession::new(fixture.0.join("candidate"), "rust", None);
+        IndexSession::new(fixture.0.join("control"), Some("c"), Some("c"));
+    let mut rust = IndexSession::new(fixture.0.join("candidate"), None, None);
+    rust.rust_fts = true;
     let mut previous_native = String::new();
     let mut previous_rust = String::new();
     let mut project: Option<String> = None;
@@ -367,15 +439,21 @@ fn rust_routing_preserves_native_update_paths_and_generation() {
             native.index(&repo, &step);
         let (rust_name, rust_generation, rust_routes) = rust.index(&repo, &step);
         assert_eq!(rust_name, name);
+        let native_fts = native.fts(&name);
+        assert!(!native_fts.tokens.is_empty());
+        assert!(native_fts.rankings.iter().all(|rows| !rows.is_empty()));
+        assert_eq!(rust.fts(&name), native_fts);
         if step.decision == Some(("staged", "closure")) {
             // Unrecognized driver settings continue to select the C implementations.
             let mut clean = IndexSession::new(
                 fixture.0.join("clean"),
-                "c",
+                Some("unrecognized"),
                 Some("unrecognized"),
             );
-            let (clean_name, _, _) = clean.index(&repo, &fresh);
+            let (clean_name, clean_generation, _) = clean.index(&repo, &fresh);
             assert_eq!(clean_name, name);
+            let (_, clean_after_noop, _) = clean.index(&repo, &steps[1]);
+            assert_eq!(clean_after_noop, clean_generation);
             let expected = clean.graph(&name);
             assert_eq!(native.graph(&name), expected);
             assert_eq!(rust.graph(&name), expected);
@@ -398,6 +476,7 @@ fn rust_routing_preserves_native_update_paths_and_generation() {
     let stopped = rust.command().args(["daemon", "stop"]).output().unwrap();
     assert!(stopped.status.success(), "{stopped:?}");
     rust.driver_override = Some("c");
+    rust.rust_manifest = true;
     fs::write(
         repo.join("schema.graphqls"),
         "type Query { value: Int another: Int latest: Int }\n",

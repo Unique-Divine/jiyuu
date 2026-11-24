@@ -18,6 +18,7 @@
 #include "foundation/compat_fs.h"
 #include "foundation/hash_table.h"
 #include "foundation/limits.h"
+#include "foundation/log.h"
 #include "foundation/mem_core.h"
 #include "foundation/str_util.h"
 #include "foundation/subprocess.h"
@@ -1441,6 +1442,9 @@ static void walk_dir(const char *dir_path, const cbm_discover_opts_t *opts,
             return;
         }
     }
+    if (out->count_only) {
+        cbm_log_debug("discover.admission_backend", "implementation", walker ? "rust" : "c");
+    }
     if (!(walker ? walker(&walk, &root) : walk_native(&walk, &root))) {
         out->failed = true;
     }
@@ -2030,9 +2034,22 @@ int cbm_discover_ex2_with_walk(const char *repo_path, const cbm_discover_opts_t 
                          ignored_count_out, ignored_total_out, false, 0, 0, walker);
 }
 
+static cbm_discover_walk_fn admission_walk;
+
+void cbm_discover_set_admission_walk(cbm_discover_walk_fn walker) {
+    admission_walk = walker;
+}
+
 cbm_discover_status_t cbm_discover_count_bounded(const char *repo_path,
                                                  const cbm_discover_opts_t *opts, int max_files,
                                                  uint64_t deadline_ms, int *count_out) {
+    return cbm_discover_count_bounded_with_walk(repo_path, opts, max_files, deadline_ms, count_out,
+                                                admission_walk);
+}
+
+cbm_discover_status_t cbm_discover_count_bounded_with_walk(
+    const char *repo_path, const cbm_discover_opts_t *opts, int max_files, uint64_t deadline_ms,
+    int *count_out, cbm_discover_walk_fn walker) {
     if (count_out) {
         *count_out = -1;
     }
@@ -2042,7 +2059,7 @@ cbm_discover_status_t cbm_discover_count_bounded(const char *repo_path,
     cbm_file_info_t *files = NULL;
     int count = 0;
     cbm_discover_status_t status = discover_impl(repo_path, opts, &files, &count, NULL, NULL, NULL,
-                                                 NULL, NULL, true, max_files, deadline_ms, NULL);
+                                                 NULL, NULL, true, max_files, deadline_ms, walker);
     cbm_discover_free(files, count);
     *count_out = status == CBM_DISCOVER_ERROR ? -1 : count;
     return status;

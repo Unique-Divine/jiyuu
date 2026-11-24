@@ -600,6 +600,11 @@ pub unsafe extern "C" fn main(argc: c_int, argv: *mut *mut c_char) -> c_int {
         crate::index_manifest::register();
         crate::index_route::register();
         crate::full_build_driver::register();
+        if std::env::var_os("MORI_IMPL_FTS_WRITER").as_deref()
+            == Some(OsStr::new("rust"))
+        {
+            jiyuu_mori::mori_register_fts_writer();
+        }
         if std::env::var_os("MORI_IMPL_TS_STATIC_IMPORTS").as_deref()
             == Some(OsStr::new("rust"))
         {
@@ -611,6 +616,7 @@ pub unsafe extern "C" fn main(argc: c_int, argv: *mut *mut c_char) -> c_int {
             jiyuu_mori::mori_register_source_publish();
         }
         crate::importance::register();
+        crate::go_results::register();
         crate::query_cli::c_args::register();
         crate::cli_output::register();
         crate::initialize::c_initialize::register();

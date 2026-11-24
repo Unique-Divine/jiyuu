@@ -645,19 +645,32 @@ static bool fts_has_body_column(cbm_store_t *s) {
     return true;
 }
 
+static bool fts_build_query(char *sql, size_t capacity, bool partial, bool with_body,
+                            bool camel) {
+    int n = snprintf(sql, capacity,
+                     "INSERT INTO nodes_fts (rowid, name, qualified_name, label, file_path%s)"
+                     " SELECT id, %s, " FTS_QN_EXPR ", label, file_path%s FROM nodes%s;",
+                     with_body ? ", body" : "", camel ? "cbm_camel_split(name)" : "name",
+                     with_body ? ", " FTS_BODY_EXPR : "",
+                     partial ? " WHERE project = ?1 AND id > ?2" : "");
+    return n > 0 && (size_t)n < capacity;
+}
+
+static void fts_report_exec_error(cbm_store_t *s, const char *message) {
+    snprintf(s->errbuf, sizeof(s->errbuf), "exec: %s", message ? message : "unknown");
+}
+
+static void fts_report_step_error(cbm_store_t *s) {
+    store_set_error_sqlite(s, "fts_backfill");
+}
+
 /* One backfill attempt.  CBM_STORE_NOT_FOUND means the statement would not
  * even prepare (missing table, column or SQL function) so the caller may retry
  * with a narrower shape; CBM_STORE_ERR means the write itself failed. */
 static int fts_backfill_try(cbm_store_t *s, const char *project, int64_t after_id, bool with_body,
                             bool camel) {
     char sql[FTS_SQL_BUF];
-    int n = snprintf(sql, sizeof(sql),
-                     "INSERT INTO nodes_fts (rowid, name, qualified_name, label, file_path%s)"
-                     " SELECT id, %s, " FTS_QN_EXPR ", label, file_path%s FROM nodes%s;",
-                     with_body ? ", body" : "", camel ? "cbm_camel_split(name)" : "name",
-                     with_body ? ", " FTS_BODY_EXPR : "",
-                     project ? " WHERE project = ?1 AND id > ?2" : "");
-    if (n <= 0 || (size_t)n >= sizeof(sql)) {
+    if (!fts_build_query(sql, sizeof(sql), project != NULL, with_body, camel)) {
         return CBM_STORE_ERR;
     }
     sqlite3_stmt *stmt = NULL;
@@ -670,15 +683,32 @@ static int fts_backfill_try(cbm_store_t *s, const char *project, int64_t after_i
     }
     int rc = sqlite3_step(stmt) == SQLITE_DONE ? CBM_STORE_OK : CBM_STORE_ERR;
     if (rc != CBM_STORE_OK) {
-        store_set_error_sqlite(s, "fts_backfill");
+        fts_report_step_error(s);
     }
     sqlite3_finalize(stmt);
     return rc;
 }
 
+static cbm_store_fts_writer_fn fts_writer;
+
+void cbm_store_set_fts_writer(cbm_store_fts_writer_fn writer) {
+    fts_writer = writer;
+}
+
 int cbm_store_fts_rebuild(cbm_store_t *s, const char *project, int64_t after_id) {
     if (!s || !s->db) {
         return CBM_STORE_ERR;
+    }
+    if (fts_writer) {
+        static const cbm_store_fts_writer_ops_t ops = {
+            .build_query = fts_build_query,
+            .report_exec_error = fts_report_exec_error,
+            .report_step_error = fts_report_step_error,
+        };
+        char sql[FTS_SQL_BUF];
+        cbm_log_info("store.fts_rebuild", "implementation", "rust", "mode",
+                     project ? "closure" : "full");
+        return fts_writer(s, s->db, project, after_id, &ops, sql, sizeof(sql));
     }
     /* Wholesale only: the incremental caller adds rows to a live index. */
     if (!project &&
