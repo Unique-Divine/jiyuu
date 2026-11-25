@@ -854,6 +854,8 @@ mod tests {
             index_resource_key(&mut index, bundle, name.to_bytes(), id);
         }
         assert_eq!(upsert(c"Route", c"example.com/api"), id);
+        let label = unsafe { string((*cbm_gbuf_find_by_id(graph, id)).label) };
+        assert_eq!(label, Some(c"Route"));
         unsafe { cbm_gbuf_free(graph) };
         assert_eq!(
             index[&bundle].get(b"Service/api".as_slice()),
