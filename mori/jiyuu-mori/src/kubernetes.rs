@@ -4,7 +4,7 @@ use super::native_graph_buffer::{
     Node, cbm_gbuf_find_by_id, cbm_gbuf_find_by_label,
 };
 use std::collections::{HashMap, TryReserveError};
-use std::ffi::{CStr, CString, c_char, c_int, c_void};
+use std::ffi::{CStr, c_char, c_int, c_void};
 use std::ptr;
 use std::slice;
 
@@ -136,22 +136,41 @@ struct Counts {
 }
 
 type Index<K, T> = HashMap<*const c_char, HashMap<K, Vec<T>>>;
-type ResourceIndex = Index<Vec<u8>, i64>;
+type ObjectPostings = HashMap<Vec<u8>, Vec<i64>>;
+type ResourceIndex = HashMap<*const c_char, ObjectPostings>;
+
+fn push_object_id(
+    names: &mut ObjectPostings,
+    name: &[u8],
+    id: i64,
+    deduplicate: bool,
+) -> Result<(), TryReserveError> {
+    if let Some(ids) = names.get_mut(name) {
+        if !deduplicate || ids.last() != Some(&id) {
+            ids.try_reserve(1)?;
+            ids.push(id);
+        }
+    } else {
+        names.try_reserve(1)?;
+        let mut key = Vec::new();
+        key.try_reserve_exact(name.len())?;
+        key.extend_from_slice(name);
+        let mut ids = Vec::new();
+        ids.try_reserve(1)?;
+        ids.push(id);
+        names.insert(key, ids);
+    }
+    Ok(())
+}
 
 fn index_resource_key(
     index: &mut ResourceIndex,
     bundle: *const c_char,
     name: &[u8],
     id: i64,
-) {
-    let names = index.entry(bundle).or_default();
-    if let Some(ids) = names.get_mut(name) {
-        if ids.last() != Some(&id) {
-            ids.push(id);
-        }
-    } else {
-        names.insert(name.to_vec(), vec![id]);
-    }
+) -> Result<(), TryReserveError> {
+    index.try_reserve(1)?;
+    push_object_id(index.entry(bundle).or_default(), name, id, true)
 }
 
 // Callers supply validated C facts and graph-owned strings. Keep bytes as
@@ -318,19 +337,17 @@ impl Pass<'_> {
             let mut one = Member::default();
             let members =
                 self.members(node.file_path, Scope::ExplicitBuild, &mut one);
-            if members.iter().all(|m| m.namespace.is_null()) {
+            let Some(explicit) =
+                members.iter().find_map(|m| unsafe { string(m.namespace) })
+            else {
                 continue;
-            }
+            };
             let declared = node.namespace(false);
-            let first = scope_namespace(&members[0], declared);
-            let agree = !first.is_empty()
-                && members
-                    .iter()
-                    .all(|m| scope_namespace(m, declared) == first);
-            let ns = if agree { first } else { b"?" };
-            if let Ok(ns) = CString::new(ns) {
-                unsafe { (self.ops.set_namespace)(raw, ns.as_ptr()) };
-            }
+            let name = explicit.to_bytes();
+            let agree = !name.is_empty()
+                && members.iter().all(|m| scope_namespace(m, declared) == name);
+            let ns = if agree { explicit } else { c"?" };
+            unsafe { (self.ops.set_namespace)(raw, ns.as_ptr()) };
         }
     }
 
@@ -521,7 +538,7 @@ impl Pass<'_> {
         node: &Node,
         name: &[u8],
         deploys: bool,
-    ) {
+    ) -> Result<(), TryReserveError> {
         let mut one = Member::default();
         let scopes = self.members(node.file_path, Scope::Build, &mut one);
         let mut deploy_one = Member::default();
@@ -536,8 +553,9 @@ impl Pass<'_> {
                 scope.bundle,
                 self.scope_key(scope, name),
                 node.id,
-            );
+            )?;
         }
+        Ok(())
     }
 
     fn find(
@@ -547,7 +565,7 @@ impl Pass<'_> {
         name: &[u8],
         deploys: bool,
         found: &mut Vec<i64>,
-    ) {
+    ) -> Result<(), TryReserveError> {
         let mut one = Member::default();
         let scopes = self.members(file, Scope::Build, &mut one);
         let mut deploy_one = Member::default();
@@ -562,10 +580,12 @@ impl Pass<'_> {
                 .get(&scope.bundle)
                 .and_then(|names| names.get(self.scope_key(scope, name)))
             {
+                found.try_reserve(ids.len())?;
                 found.extend_from_slice(ids);
             }
         }
         unique(found);
+        Ok(())
     }
 
     fn ref_matches(
@@ -598,15 +618,19 @@ impl Pass<'_> {
         })
     }
 
-    fn references(&self, refs: &[Reference], counts: &mut Counts) {
+    fn references(
+        &self,
+        refs: &[Reference],
+        counts: &mut Counts,
+    ) -> Result<(), TryReserveError> {
         if refs.is_empty() {
-            return;
+            return Ok(());
         }
         let mut index = Index::new();
         for &raw in self.resources() {
             let node = unsafe { &*raw };
             if let Some(name) = unsafe { string(node.name) } {
-                self.index_add(&mut index, node, name.to_bytes(), true);
+                self.index_add(&mut index, node, name.to_bytes(), true)?;
             }
         }
         let mut found = Vec::new();
@@ -652,19 +676,23 @@ impl Pass<'_> {
                 counts.unresolved += 1;
                 continue;
             };
-            let name = type_key(kind, name, 1023);
-            self.find(&index, source.file_path, &name, true, &mut found);
+            let mut key = [0; 1023];
+            let name = type_key(kind, name, &mut key);
+            self.find(&index, source.file_path, name, true, &mut found)?;
             let cluster = unsafe { (self.ops.cluster_scoped)(reference.kind) };
             let source_file = unsafe { CStr::from_ptr(source.file_path) };
             matches.clear();
+            let mut candidates = 0;
             for target in found.iter().filter_map(|&id| self.node(id)) {
-                counts.candidates += 1;
+                candidates += 1;
                 if self.ref_matches(reference, source, target, cluster) {
                     let own = unsafe { CStr::from_ptr(target.file_path) }
                         == source_file;
+                    matches.try_reserve(1)?;
                     matches.push((target.id, own));
                 }
             }
+            counts.candidates += candidates;
             if matches.is_empty() {
                 counts.unresolved += 1;
                 continue;
@@ -682,28 +710,33 @@ impl Pass<'_> {
                 }
             }
         }
+        Ok(())
     }
 
-    fn crds(&self, crds: &[Crd], counts: &mut Counts) {
+    fn crds(
+        &self,
+        crds: &[Crd],
+        counts: &mut Counts,
+    ) -> Result<(), TryReserveError> {
         if crds.is_empty() {
-            return;
+            return Ok(());
         }
-        let keys: Vec<_> = crds
-            .iter()
-            .filter_map(|crd| unsafe {
-                Some((crd, type_key(string(crd.group)?, string(crd.kind)?, 511)))
-            })
-            .collect();
-        for (crd, _) in &keys {
+        let definitions = crds.iter().filter_map(|crd| unsafe {
+            Some((crd, string(crd.group)?, string(crd.kind)?))
+        });
+        // Annotate definitions before allocating the optional instance index.
+        for (crd, _, _) in definitions.clone() {
             let node = unsafe { cbm_gbuf_find_by_id(self.graph, crd.id) };
-            unsafe { (self.ops.mark_crd)(node, *crd) };
+            unsafe { (self.ops.mark_crd)(node, crd) };
         }
-        let mut all: HashMap<&[u8], Vec<_>> = HashMap::new();
+        let mut all = ObjectPostings::new();
         let mut beside = Index::new();
-        for (crd, key) in &keys {
-            all.entry(key).or_default().push(crd.id);
+        let mut key = [0; 511];
+        for (crd, group, kind) in definitions {
+            let key = type_key(group, kind, &mut key);
+            push_object_id(&mut all, key, crd.id, false)?;
             if let Some(node) = self.node(crd.id) {
-                self.index_add(&mut beside, node, key, false);
+                self.index_add(&mut beside, node, key, false)?;
             }
         }
         let mut found = Vec::new();
@@ -724,7 +757,7 @@ impl Pass<'_> {
             if node.file_path.is_null() {
                 continue;
             }
-            self.find(&beside, node.file_path, key, false, &mut found);
+            self.find(&beside, node.file_path, key, false, &mut found)?;
             let candidates = if found.is_empty() { every } else { &found };
             counts.candidates += candidates.len() as u64;
             for &id in candidates {
@@ -734,6 +767,7 @@ impl Pass<'_> {
                 }
             }
         }
+        Ok(())
     }
 
     fn resolve(&self) {
@@ -742,15 +776,16 @@ impl Pass<'_> {
         unsafe { (self.ops.resolution)(self.state, &mut facts) };
         self.apply_namespaces();
         unsafe {
-            // Selector scratch is optional. Keep completed selectors and
-            // continue into references and CRDs if a reservation fails.
+            // Each link phase owns its scratch. A failed reservation drops
+            // that phase's index and keeps the completed graph work.
             let _ = self.selectors(
                 items(facts.records, facts.record_count),
                 items(facts.pairs, facts.pair_count),
                 &mut counts,
             );
-            self.references(items(facts.refs, facts.ref_count), &mut counts);
-            self.crds(items(facts.crds, facts.crd_count), &mut counts);
+            let _ =
+                self.references(items(facts.refs, facts.ref_count), &mut counts);
+            let _ = self.crds(items(facts.crds, facts.crd_count), &mut counts);
             (self.ops.report)(
                 counts.candidates,
                 counts.selectors,
@@ -763,10 +798,14 @@ impl Pass<'_> {
     }
 }
 
-fn type_key(group: &CStr, kind: &CStr, limit: usize) -> Vec<u8> {
-    let mut key = [group.to_bytes(), b"/", kind.to_bytes()].concat();
-    key.truncate(limit);
-    key
+fn type_key<'a>(first: &CStr, second: &CStr, key: &'a mut [u8]) -> &'a [u8] {
+    let mut len = 0;
+    for part in [first.to_bytes(), b"/", second.to_bytes()] {
+        let count = part.len().min(key.len() - len);
+        key[len..len + count].copy_from_slice(&part[..count]);
+        len += count;
+    }
+    &key[..len]
 }
 
 // SAFETY: C supplies a live synchronous pass, a positive chunk size, and
@@ -859,7 +898,7 @@ mod tests {
         {
             let node = unsafe { &*cbm_gbuf_find_by_id(graph, id) };
             let name = unsafe { CStr::from_ptr(node.name) };
-            index_resource_key(&mut index, bundle, name.to_bytes(), id);
+            index_resource_key(&mut index, bundle, name.to_bytes(), id).unwrap();
         }
         assert_eq!(upsert(c"Route", c"example.com/api"), id);
         let label = unsafe { string((*cbm_gbuf_find_by_id(graph, id)).label) };
