@@ -6,6 +6,7 @@ use std::cmp::Ordering;
 use std::collections::{HashMap, hash_map::RandomState};
 use std::ffi::{CString, c_char, c_int, c_long};
 use std::hash::BuildHasher;
+#[cfg(test)]
 use std::time::{Duration, Instant};
 
 use rusqlite::types::ValueRef;
@@ -29,6 +30,7 @@ use with_clause::{ReturnGroups, WithPlan, WithRows};
 
 const ENGINE_LIMIT: usize = 100_000;
 const ORDERED_COUNT_GROUP_LIMIT: usize = 16_384;
+#[cfg(test)]
 const DEADLINE: Duration = Duration::from_secs(30);
 const CHECK_INTERVAL: usize = 1024;
 const PROPERTY_LIMIT: usize = 511;
@@ -1582,24 +1584,47 @@ impl From<rusqlite::Error> for ExecutionError {
     }
 }
 
+enum BudgetCheck<'a> {
+    #[cfg(test)]
+    Local {
+        deadline: Instant,
+        now: &'a dyn Fn() -> Instant,
+        cancelled: &'a dyn Fn() -> bool,
+    },
+    #[cfg(feature = "c-backend")]
+    Shared(&'a dyn Fn() -> Result<(), ExecutionError>),
+}
+
 pub(crate) struct ExecutionBudget<'a> {
-    deadline: Instant,
-    now: &'a dyn Fn() -> Instant,
-    cancelled: &'a dyn Fn() -> bool,
+    check: BudgetCheck<'a>,
     remaining: usize,
     ordered_count_group_limit: usize,
     pub(crate) path_depth_cap: u32,
 }
 
 impl<'a> ExecutionBudget<'a> {
+    #[cfg(test)]
     pub(crate) fn new(
         now: &'a dyn Fn() -> Instant,
         cancelled: &'a dyn Fn() -> bool,
     ) -> Self {
-        Self {
+        Self::with_check(BudgetCheck::Local {
             deadline: now() + DEADLINE,
             now,
             cancelled,
+        })
+    }
+
+    #[cfg(feature = "c-backend")]
+    pub(crate) fn shared(
+        check: &'a dyn Fn() -> Result<(), ExecutionError>,
+    ) -> Self {
+        Self::with_check(BudgetCheck::Shared(check))
+    }
+
+    fn with_check(check: BudgetCheck<'a>) -> Self {
+        Self {
+            check,
             remaining: CHECK_INTERVAL,
             ordered_count_group_limit: ORDERED_COUNT_GROUP_LIMIT,
             path_depth_cap: 10,
@@ -1614,14 +1639,25 @@ impl<'a> ExecutionBudget<'a> {
         self.ordered_count_group_limit = limit.min(ORDERED_COUNT_GROUP_LIMIT);
     }
 
-    fn check(&self) -> Result<(), ExecutionError> {
-        if (self.cancelled)() {
-            return Err(ExecutionError::Cancelled);
+    pub(crate) fn check(&self) -> Result<(), ExecutionError> {
+        match self.check {
+            #[cfg(test)]
+            BudgetCheck::Local {
+                deadline,
+                now,
+                cancelled,
+            } => {
+                if cancelled() {
+                    return Err(ExecutionError::Cancelled);
+                }
+                if now() >= deadline {
+                    return Err(ExecutionError::Deadline);
+                }
+                Ok(())
+            }
+            #[cfg(feature = "c-backend")]
+            BudgetCheck::Shared(check) => check(),
         }
-        if (self.now)() >= self.deadline {
-            return Err(ExecutionError::Deadline);
-        }
-        Ok(())
     }
 
     fn step(&mut self) -> Result<(), ExecutionError> {
@@ -1646,6 +1682,13 @@ impl MatchQuery<'_> {
         let reversed = self.paths.as_ref().is_none_or(paths::Plan::can_reverse)
             && self.hops.len() == 1
             && self.selectivity(1) > self.selectivity(0);
+        // Native MATCH derives star column order from the bindings it emits.
+        if self.return_star
+            && self.with.is_none()
+            && (reversed || self.paths.is_some())
+        {
+            return Err(ExecutionError::Unsupported);
+        }
         let start_index = usize::from(reversed);
         let second_index = usize::from(!reversed);
         let context = ExpressionContext {
@@ -1720,12 +1763,25 @@ impl MatchQuery<'_> {
              nodes: &[Option<&Node>],
              edges: &[Option<&Edge>],
              budget: &mut ExecutionBudget<'_>| {
-                if projection_done
-                    || self.collect_row(
-                        result, collector, nodes, edges, &context, budget,
-                    )?
-                {
+                if projection_done {
                     return Ok::<bool, ExecutionError>(true);
+                }
+                let more = self.collect_row(
+                    result, collector, nodes, edges, &context, budget,
+                )?;
+                // This result already hits the final cap. Another start-node
+                // read cannot change the standalone query's answer.
+                if standalone
+                    && self.skip == 0
+                    && limit == ENGINE_LIMIT
+                    && matches!(collector, RowCollector::All)
+                    && result.rows.len() == ENGINE_LIMIT
+                {
+                    budget.check()?;
+                    return Err(ExecutionError::RowCeiling);
+                }
+                if more {
+                    return Ok(true);
                 }
                 projection_done = scan_for_regex;
                 Ok(projection_done)

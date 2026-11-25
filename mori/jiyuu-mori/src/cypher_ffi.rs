@@ -2,7 +2,6 @@
 
 use std::ffi::{CStr, c_char, c_int, c_void};
 use std::panic;
-use std::time::Instant;
 
 use rusqlite::{Connection, ffi::sqlite3};
 
@@ -48,12 +47,12 @@ enum Status {
     Error,
 }
 
-type Cancel = unsafe extern "C" fn(*mut c_void) -> bool;
+type BudgetStatus = unsafe extern "C" fn(*mut c_void) -> c_int;
 type Evaluate = unsafe extern "C" fn(
     *mut sqlite3,
     *const c_char,
     *const c_char,
-    Cancel,
+    BudgetStatus,
     *mut c_void,
     *const Sink,
 ) -> c_int;
@@ -72,15 +71,23 @@ unsafe extern "C" fn evaluate(
     db: *mut sqlite3,
     query: *const c_char,
     project: *const c_char,
-    cancelled: Cancel,
-    cancel_context: *mut c_void,
+    budget_status: BudgetStatus,
+    budget_context: *mut c_void,
     sink: *const Sink,
 ) -> c_int {
     panic::catch_unwind(|| {
         // SAFETY: C provides the live read-batched handle, NUL-terminated
         // strings, and callbacks with contexts valid for this invocation.
-        let cancelled = || unsafe { cancelled(cancel_context) };
-        let mut budget = ExecutionBudget::new(&Instant::now, &cancelled);
+        let check = || match unsafe { budget_status(budget_context) } {
+            status if status == Status::Deadline as c_int => {
+                Err(ExecutionError::Deadline)
+            }
+            status if status == Status::Cancelled as c_int => {
+                Err(ExecutionError::Cancelled)
+            }
+            _ => Ok(()),
+        };
+        let mut budget = ExecutionBudget::shared(&check);
         #[cfg(debug_assertions)]
         if let Some(limit) = std::env::var("MORI_TEST_ORDERED_COUNT_GROUP_LIMIT")
             .ok()
@@ -97,7 +104,15 @@ unsafe extern "C" fn evaluate(
             return Status::Unsupported;
         };
         let sink = unsafe { &*sink };
-        let query = match cypher_linear::classify(source) {
+        let query = cypher_linear::classify(source);
+        if let Err(error) = budget.check() {
+            return match error {
+                ExecutionError::Deadline => Status::Deadline,
+                ExecutionError::Cancelled => Status::Cancelled,
+                _ => Status::Error,
+            };
+        }
+        let query = match query {
             Ok(query) => query,
             Err(error) => {
                 return if let Some(detail) = error.diagnostic() {

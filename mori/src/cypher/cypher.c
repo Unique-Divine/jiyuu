@@ -3258,8 +3258,8 @@ static bool rb_add_row_capped(result_builder_t *rb, rb_distinct_t *d, const char
 #define CYPHER_DEADLINE_BUDGET_MS 30000  /* 30s: generous for legit heavy queries */
 #define CYPHER_DEADLINE_CHECK_MASK 0x3FF /* sample the clock every 1024 iterations */
 
-static _Thread_local uint64_t g_cypher_deadline_ms = 0; /* absolute; 0 = disarmed */
-static _Thread_local bool g_cypher_timed_out = false;
+static _Thread_local const cbm_cypher_budget_t *g_cypher_budget;
+static _Thread_local cbm_cypher_budget_status_t g_cypher_stop;
 /* Sticky for one cbm_cypher_execute call. Unlike row_count, this survives caps
  * that happen before DISTINCT, aggregation, ORDER BY, or the final projection. */
 static _Thread_local bool g_cypher_truncated = false;
@@ -3285,27 +3285,31 @@ static uint64_t cypher_deadline_now(void) {
     return cbm_now_ms();
 }
 
-static void cypher_deadline_arm(void) {
-    g_cypher_timed_out = false;
-    int64_t budget = g_cypher_deadline_override_ms >= 0 ? g_cypher_deadline_override_ms
-                                                        : CYPHER_DEADLINE_BUDGET_MS;
-    g_cypher_deadline_ms = cypher_deadline_now() + (uint64_t)budget;
+cbm_cypher_budget_t cbm_cypher_budget_start(bool (*cancelled)(void *), void *context) {
+    uint64_t duration = g_cypher_deadline_override_ms >= 0 ? (uint64_t)g_cypher_deadline_override_ms
+                                                           : CYPHER_DEADLINE_BUDGET_MS;
+    return (cbm_cypher_budget_t){cypher_deadline_now() + duration, cancelled, context};
 }
 
-/* True once the query has run past its wall-clock budget. Sticky: after the
- * first trip every subsequent call returns true, so later loops short-circuit. */
-static bool cypher_deadline_exceeded(void) {
-    if (g_cypher_timed_out) {
-        return true;
+cbm_cypher_budget_status_t cbm_cypher_budget_status(const cbm_cypher_budget_t *budget) {
+    if (!budget) {
+        return CBM_CYPHER_BUDGET_ACTIVE;
     }
-    if (g_cypher_deadline_ms == 0) {
-        return false;
+    if (budget->cancelled && budget->cancelled(budget->cancel_context)) {
+        return CBM_CYPHER_BUDGET_CANCELLED;
     }
-    if (cypher_deadline_now() >= g_cypher_deadline_ms) {
-        g_cypher_timed_out = true;
-        return true;
+    if (cypher_deadline_now() >= budget->deadline_ms) {
+        return CBM_CYPHER_BUDGET_DEADLINE;
     }
-    return false;
+    return CBM_CYPHER_BUDGET_ACTIVE;
+}
+
+/* Sticky so scan, expansion, and aggregation stop after the first abort. */
+static bool cypher_should_stop(void) {
+    if (g_cypher_stop == CBM_CYPHER_BUDGET_ACTIVE) {
+        g_cypher_stop = cbm_cypher_budget_status(g_cypher_budget);
+    }
+    return g_cypher_stop != CBM_CYPHER_BUDGET_ACTIVE;
 }
 
 /* Test-only: force the execution budget (ms) for subsequent queries on this
@@ -3756,7 +3760,7 @@ static void expand_pattern_rels(cbm_store_t *store, cbm_pattern_t *pat, binding_
     for (int ri = 0; ri < pat->rel_count; ri++) {
         /* #601: stop expanding further hops once the wall-clock budget is spent
          * (an unbounded expansion is exactly what blows up here). */
-        if (cypher_deadline_exceeded()) {
+        if (cypher_should_stop()) {
             return;
         }
         cbm_rel_pattern_t *rel = &pat->rels[ri];
@@ -3779,7 +3783,7 @@ static void expand_pattern_rels(cbm_store_t *store, cbm_pattern_t *pat, binding_
         int new_count = 0;
 
         for (int bi = 0; bi < *bind_count; bi++) {
-            if ((bi & CYPHER_DEADLINE_CHECK_MASK) == 0 && cypher_deadline_exceeded()) {
+            if ((bi & CYPHER_DEADLINE_CHECK_MASK) == 0 && cypher_should_stop()) {
                 break;
             }
             binding_t *b = &(*bindings)[bi];
@@ -5471,7 +5475,7 @@ static void ret_sink_feed_agg(ret_sink_t *s, binding_t *bindings, int bind_count
     for (int bi = 0; bi < bind_count && !s->done; bi++) {
         /* #601: a whole-graph GROUP BY visits every binding. Abort if we blow
          * the wall-clock budget. */
-        if (((s->fed + bi) & CYPHER_DEADLINE_CHECK_MASK) == 0 && cypher_deadline_exceeded()) {
+        if (((s->fed + bi) & CYPHER_DEADLINE_CHECK_MASK) == 0 && cypher_should_stop()) {
             s->done = true;
             break;
         }
@@ -6310,7 +6314,7 @@ static int execute_chunk(cbm_store_t *store, cbm_query_t *q, const char *project
 
     int first = *start_index;
     for (int i = 0; i < node_count; i++) {
-        if (((first + i) & CYPHER_DEADLINE_CHECK_MASK) == 0 && cypher_deadline_exceeded()) {
+        if (((first + i) & CYPHER_DEADLINE_CHECK_MASK) == 0 && cypher_should_stop()) {
             break;
         }
         binding_t b = {0};
@@ -6372,7 +6376,7 @@ static int execute_single(cbm_store_t *store, cbm_query_t *q, const char *projec
     int start_index = 0;
     do {
         rc = execute_chunk(store, q, project, max_rows, &src, chunk, &start_index, &sink);
-    } while (rc == 0 && !src.done && !g_cypher_timed_out);
+    } while (rc == 0 && !src.done && g_cypher_stop == CBM_CYPHER_BUDGET_ACTIVE);
     start_source_close(&src);
 
     if (rc == 0) {
@@ -6631,6 +6635,12 @@ static char *check_projection_scope(const cbm_query_t *q) {
 /* The error of an execution execute_single aborted: a failed start-node scan
  * names the store's error, anything else was an allocation. */
 static char *cypher_abort_error(void) {
+    if (g_cypher_stop == CBM_CYPHER_BUDGET_CANCELLED) {
+        return heap_strdup(CBM_CYPHER_CANCELLED_ERROR);
+    }
+    if (g_cypher_stop == CBM_CYPHER_BUDGET_DEADLINE) {
+        return heap_strdup(CBM_CYPHER_DEADLINE_ERROR);
+    }
     if (g_cypher_scan_error[0]) {
         char buf[CBM_SZ_1K];
         snprintf(buf, sizeof(buf), "query aborted: reading the graph failed (%s)",
@@ -6640,15 +6650,18 @@ static char *cypher_abort_error(void) {
     return heap_strdup("query aborted: out of memory or an allocation limit was reached");
 }
 
-int cbm_cypher_execute(cbm_store_t *store, const char *query, const char *project, int max_rows,
-                       cbm_cypher_result_t *out) {
+static int cypher_execute(cbm_store_t *store, const char *query, const char *project, int max_rows,
+                          cbm_cypher_result_t *out) {
     memset(out, 0, sizeof(*out));
     g_cypher_depth_clamped = 0;
     g_cypher_trail_truncated = 0;
     g_cypher_truncated = false;
     g_cypher_regex_refused = false;
     g_cypher_scan_error[0] = '\0';
-    cypher_deadline_arm(); /* #601: start the wall-clock budget for this query */
+    if (cypher_should_stop()) {
+        out->error = cypher_abort_error();
+        return CBM_NOT_FOUND;
+    }
     /* max_rows sizes the initial binding array: non-positive means the
      * ceiling, and nothing above the ceiling is ever materialized anyway. */
     if (max_rows <= 0 || max_rows > CYPHER_RESULT_CEILING) {
@@ -6708,11 +6721,11 @@ int cbm_cypher_execute(cbm_store_t *store, const char *query, const char *projec
 
     /* #601: abort a runaway query that blew the wall-clock budget before it can
      * return a misleading partial result. Checked before the row ceiling. */
-    if (g_cypher_timed_out) {
+    if (cypher_should_stop()) {
         rb_free(&rb);
         cbm_query_free(q);
         out->truncated = g_cypher_truncated;
-        out->error = heap_strdup(CBM_CYPHER_DEADLINE_ERROR);
+        out->error = cypher_abort_error();
         return CBM_NOT_FOUND;
     }
 
@@ -6764,6 +6777,22 @@ int cbm_cypher_execute(cbm_store_t *store, const char *query, const char *projec
 
     cbm_query_free(q);
     return 0;
+}
+
+int cbm_cypher_execute_with_budget(cbm_store_t *store, const char *query, const char *project,
+                                   int max_rows, cbm_cypher_result_t *out,
+                                   const cbm_cypher_budget_t *budget) {
+    g_cypher_stop = CBM_CYPHER_BUDGET_ACTIVE;
+    g_cypher_budget = budget;
+    int rc = cypher_execute(store, query, project, max_rows, out);
+    g_cypher_budget = NULL;
+    return rc;
+}
+
+int cbm_cypher_execute(cbm_store_t *store, const char *query, const char *project, int max_rows,
+                       cbm_cypher_result_t *out) {
+    const cbm_cypher_budget_t budget = cbm_cypher_budget_start(NULL, NULL);
+    return cbm_cypher_execute_with_budget(store, query, project, max_rows, out, &budget);
 }
 
 void cbm_cypher_result_free(cbm_cypher_result_t *r) {

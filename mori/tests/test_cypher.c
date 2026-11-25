@@ -5454,6 +5454,48 @@ TEST(cypher_exec_deadline_expires_at_positive_budget_boundary) {
     PASS();
 }
 
+/* A fallback checks the deadline that the first evaluator already spent. */
+TEST(cypher_exec_reuses_an_expired_request_budget) {
+    cbm_store_t *s = setup_cypher_store();
+    cbm_cypher_result_t r = {0};
+    cypher_deadline_clock_reads = 0;
+    cbm_cypher_test_set_deadline_clock(cypher_expiring_deadline_clock);
+    const cbm_cypher_budget_t budget = cbm_cypher_budget_start(NULL, NULL);
+    cbm_cypher_budget_status_t first_attempt = cbm_cypher_budget_status(&budget);
+    int rc = cbm_cypher_execute_with_budget(s, "MATCH (n) RETURN n.name", "test", 0, &r, &budget);
+    cbm_cypher_test_set_deadline_clock(NULL);
+
+    ASSERT_EQ(first_attempt, CBM_CYPHER_BUDGET_DEADLINE);
+    ASSERT_TRUE(rc != 0);
+    ASSERT_NOT_NULL(r.error);
+    ASSERT_STR_EQ(r.error, CBM_CYPHER_DEADLINE_ERROR);
+    ASSERT_EQ(r.row_count, 0);
+    cbm_cypher_result_free(&r);
+    cbm_store_close(s);
+    PASS();
+}
+
+static bool cancel_cypher_after_entry(void *context) {
+    unsigned *checks = context;
+    return ++*checks >= 2;
+}
+
+TEST(cypher_exec_stops_inside_a_cancelled_request) {
+    cbm_store_t *s = setup_cypher_store();
+    cbm_cypher_result_t r = {0};
+    unsigned checks = 0;
+    const cbm_cypher_budget_t budget = cbm_cypher_budget_start(cancel_cypher_after_entry, &checks);
+    int rc = cbm_cypher_execute_with_budget(s, "MATCH (n) RETURN n.name", "test", 0, &r, &budget);
+
+    ASSERT_TRUE(rc != 0);
+    ASSERT_NOT_NULL(r.error);
+    ASSERT_STR_EQ(r.error, CBM_CYPHER_CANCELLED_ERROR);
+    ASSERT_EQ(r.row_count, 0);
+    cbm_cypher_result_free(&r);
+    cbm_store_close(s);
+    PASS();
+}
+
 /* #601 companion: the default (ample) budget must NOT false-positive on a
  * normal small query — it still returns its rows. */
 TEST(cypher_exec_deadline_allows_normal_query_issue601) {
@@ -6498,6 +6540,8 @@ SUITE(cypher) {
     RUN_TEST(cypher_exec_deadline_aborts_runaway_query_issue601);
     RUN_TEST(cypher_exec_deadline_expires_at_positive_budget_boundary);
     RUN_TEST(cypher_exec_deadline_allows_normal_query_issue601);
+    RUN_TEST(cypher_exec_reuses_an_expired_request_budget);
+    RUN_TEST(cypher_exec_stops_inside_a_cancelled_request);
     RUN_TEST(cypher_deep_nesting_rejected_not_crash);
     RUN_TEST(cypher_exec_match_all_functions);
     RUN_TEST(cypher_exec_optional_empty_label_no_overflow);
