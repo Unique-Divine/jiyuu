@@ -730,10 +730,24 @@ static int th_server_start_with_mutation_guard(th_server_t *ts, cbm_watcher_t *w
     return 0;
 }
 
+static bool th_server_wait_free(cbm_http_server_t *server) {
+    uint64_t deadline = cbm_now_ms() + 2000;
+    while (!cbm_http_server_free(server)) {
+        if (cbm_now_ms() >= deadline)
+            return false;
+        cbm_usleep(1000);
+    }
+    return true;
+}
+
 static void th_server_stop(th_server_t *ts) {
     cbm_http_server_stop(ts->srv);
-    (void)cbm_thread_join(&ts->tid);
-    (void)cbm_http_server_free(ts->srv);
+    /* The listener can stop while the index worker is still finishing.
+     * A timed-out worker may still hold the test's stack-backed context. */
+    if (cbm_thread_join(&ts->tid) != 0 || !th_server_wait_free(ts->srv)) {
+        fprintf(stderr, "HTTP test server failed to stop and free\n");
+        abort();
+    }
 }
 
 typedef struct {
@@ -1193,14 +1207,7 @@ TEST(ui_server_free_never_joins_active_index_worker) {
     ASSERT_LT(cbm_now_ms() - started, 1000);
 
     atomic_store(&executor.release, 1);
-    bool freed = false;
-    uint64_t deadline = cbm_now_ms() + 2000;
-    while (!freed && cbm_now_ms() < deadline) {
-        freed = cbm_http_server_free(ts.srv);
-        if (!freed)
-            cbm_usleep(1000);
-    }
-    ASSERT_TRUE(freed);
+    ASSERT_TRUE(th_server_wait_free(ts.srv));
     th_cleanup(root);
     PASS();
 }
