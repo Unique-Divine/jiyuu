@@ -1641,7 +1641,7 @@ fn coalesce_checks_the_first_return_argument_scope() {
         "variable 'n' is not in scope for RETURN — the WITH clause did not carry it through",
     ));
 
-    let valid = "MATCH (n:Function) WITH n.name AS name RETURN coalesce(name, n.name) AS value";
+    let valid = "MATCH (n:Function) WHERE n.name = 'placeholder' WITH n.name AS name RETURN coalesce(name, n.name) AS value";
     let pages = fixture.compare_query_pages(&[(valid, 0, true)]);
     assert_eq!(pages[0]["rows"], json!([["placeholder"]]));
 }
