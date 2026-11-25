@@ -1696,8 +1696,7 @@ impl MatchQuery<'_> {
             regex_refused: Cell::new(false),
         };
         // Regex refusals are observable even after RETURN fills its window.
-        let where_has_regex = self.filter.as_ref().is_some_and(Expr::has_regex);
-        let scan_for_regex = where_has_regex
+        let scan_for_regex = self.filter.as_ref().is_some_and(Expr::has_regex)
             || self.nodes.iter().any(|node| {
                 node.inline.iter().any(|(_, value)| looks_like_regex(value))
             });
@@ -1874,10 +1873,10 @@ impl MatchQuery<'_> {
                     };
                     path.nodes[second_index] = Some(&next);
                     path.edges[0] = Some(&edge);
-                    // Native only evaluates WHERE at the seed and the completed
-                    // two-hop binding. Defer regex predicates so a partial path
-                    // cannot set a warning the native evaluator never emits.
-                    if (self.hops.len() == 1 || !where_has_regex)
+                    // For two-hop queries with regexes, preserve the native
+                    // order: check the terminal node before evaluating WHERE.
+                    // Both checks can emit warnings.
+                    if (self.hops.len() == 1 || !scan_for_regex)
                         && !self.matches_where(&path, &context)
                     {
                         continue;
