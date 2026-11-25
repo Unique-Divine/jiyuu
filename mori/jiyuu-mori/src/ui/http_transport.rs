@@ -238,7 +238,11 @@ async fn serve_connection(
 ) {
     activity.store(READING, Ordering::Release);
     let begin = Instant::now();
-    let mut head_bytes = Box::new([0; MAX_HEAD]);
+    let mut head_bytes = Vec::new();
+    if head_bytes.try_reserve_exact(MAX_HEAD).is_err() {
+        return;
+    }
+    head_bytes.resize(MAX_HEAD, 0);
     let received = tokio::select! {
         biased;
         _ = stop.changed() => return,
@@ -308,7 +312,7 @@ enum ReadError {
 
 async fn read_request<'a>(
     stream: &mut (impl AsyncRead + Unpin),
-    bytes: &'a mut [u8; MAX_HEAD],
+    bytes: &'a mut [u8],
 ) -> Result<(RequestHead<'a>, Vec<u8>), ReadError> {
     let mut have = 0;
     let mut scanner = HeadScanner::default();
@@ -333,6 +337,8 @@ async fn read_request<'a>(
     let length = head.content_length;
     let mut body = Vec::new();
     if length > 0 {
+        body.try_reserve_exact(length + 1)
+            .map_err(|_| ReadError::Closed)?;
         body.resize(length + 1, 0);
         let prefix = &bytes[head.body_offset..have];
         let copied = prefix.len().min(length);
