@@ -581,7 +581,11 @@ jobs:
           scripts/test.sh --suites
           "edge_types_probe lang_contract cross_repo extraction graph_buffer pipeline yaml language
           config_text_edit doclinks doc_links_pdf watcher daemon_ipc
-          store_graph_digest pipeline_frozen"
+          store_graph_digest pipeline_frozen httpd"
+      - name: Run Rust, JVM, and C# documentation-link suites
+        if: needs.changes.outputs.mori == 'true'
+        working-directory: mori
+        run: scripts/test.sh --suites "doc_mentions_rs doc_mentions_jvm doc_mentions"
       - name: Smoke-test the candidate standalone executable
         if: needs.changes.outputs.mori == 'true'
         working-directory: mori

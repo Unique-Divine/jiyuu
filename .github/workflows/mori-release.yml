@@ -296,7 +296,7 @@ jobs:
           # The embedded graph UI: a daemon on a free port serves its index.
           port="$(python3 -c 'import socket; s = socket.socket(); \
             s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')"
-          "$BIN" daemon start --port="$port"
+          CBM_LOG_LEVEL=debug "$BIN" daemon start --port="$port"
           trap '"$BIN" daemon stop || true' EXIT
           for _ in $(seq 1 30); do
             if curl -fsS "http://127.0.0.1:$port/" -o "$scratch/ui.html" \
@@ -307,6 +307,12 @@ jobs:
           done
           head -c 300 "$scratch/ui.html"; echo
           grep -qi '<!doctype html>' "$scratch/ui.html"
+          # Exercise the warning callback through the stripped release binary.
+          "$BIN" cli query_graph --project "$project" --format json \
+            --query "MATCH (a {name: 'greet'})-[:CALLS*1..20]->(b) RETURN b.name" \
+            | tee "$scratch/query.json"
+          jq -e '.warning | contains("variable-length hop range clamped")' "$scratch/query.json"
+          grep -F 'msg=query_graph.evaluator backend=rust' "$CBM_CACHE_DIR/logs/cbm-daemon.log"
       - name: Build pinned C binary for CLI parity
         env:
           C_REFERENCE_SHA: 8bdd8fc20327fcfea4d920138fef77a3b00ca1ef

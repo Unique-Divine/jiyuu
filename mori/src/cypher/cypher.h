@@ -343,6 +343,27 @@ typedef struct {
     "filter, use a directed MATCH instead of an unbounded OPTIONAL MATCH, or add LIMIT"
 #define CBM_CYPHER_ROW_CEILING_ERROR "result exceeded 100k rows — use narrower filters or add LIMIT"
 
+#define CBM_CYPHER_CANCELLED_ERROR "query_graph cancelled for this request"
+
+typedef struct {
+    uint64_t deadline_ms;
+    bool (*cancelled)(void *);
+    void *cancel_context;
+} cbm_cypher_budget_t;
+
+typedef enum {
+    CBM_CYPHER_BUDGET_ACTIVE,
+    CBM_CYPHER_BUDGET_DEADLINE,
+    CBM_CYPHER_BUDGET_CANCELLED,
+} cbm_cypher_budget_status_t;
+
+/* Start once per request and reuse across evaluator attempts. */
+cbm_cypher_budget_t cbm_cypher_budget_start(bool (*cancelled)(void *), void *context);
+cbm_cypher_budget_status_t cbm_cypher_budget_status(const cbm_cypher_budget_t *budget);
+int cbm_cypher_execute_with_budget(cbm_store_t *store, const char *query, const char *project,
+                                   int max_rows, cbm_cypher_result_t *out,
+                                   const cbm_cypher_budget_t *budget);
+
 /* Execute a Cypher query against a store.
  * max_rows: limit on output rows; 0 or any value above the 100k ceiling uses
  *   the ceiling.

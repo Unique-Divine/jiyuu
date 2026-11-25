@@ -90,8 +90,7 @@ SQLITE_LOADEXT_NEEDLES=(
 # capability in the standard composition. Needles are split across
 # both UI translation units and are independent of each other, so a refactor of
 # any single one cannot silently disarm the assertion:
-#   'HTTP/1.1 %d %s'                  httpd.c response-status writer
-#   'Request Header Fields Too Large'  httpd.c status-text table
+#   'Request Header Fields Too Large'  Rust transport status-text table
 #   '/api/ui-config', '/api/processes' http_server.c route dispatch
 #   'ps -eo …' / '[c]odebase-memory-mcp'  the popen() process enumerator's
 #                                     shell pipeline, both halves
@@ -99,7 +98,7 @@ SQLITE_LOADEXT_NEEDLES=(
 # other occurrences in the repo are tests/test_httpd.c and scripts/, neither of
 # which is ever linked into a release binary.
 UI_HTTP_NEEDLES=(
-    'HTTP/1.1 %d %s'
+    'Content Too Large'
     'Request Header Fields Too Large'
     '/api/ui-config'
     '/api/processes'

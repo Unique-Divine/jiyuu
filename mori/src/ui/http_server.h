@@ -10,7 +10,7 @@
 #ifndef CBM_UI_HTTP_SERVER_H
 #define CBM_UI_HTTP_SERVER_H
 
-#include "ui/httpd.h"
+#include "ui/http_transport.h"
 #include "foundation/sha256.h"
 
 #include <stdbool.h>
@@ -34,6 +34,12 @@
 
 typedef struct cbm_http_server cbm_http_server_t;
 struct cbm_watcher;
+
+/* Dispatch a parsed request on the server's single run thread. A non-empty
+ * request body must be NUL-terminated in addition to carrying its byte length.
+ * A stopped server or a cancelled request may return without replying. */
+void cbm_http_server_dispatch(cbm_http_server_t *srv, const cbm_http_req_t *req,
+                              cbm_ui_http_reply_fn reply, void *context);
 
 /* Daemon-owned index boundary. The callback blocks until the coordinated
  * operation finishes; the HTTP server runs it on a tracked, joinable thread. */

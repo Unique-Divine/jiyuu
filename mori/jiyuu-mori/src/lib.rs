@@ -7,13 +7,31 @@ mod architecture_projection;
 #[cfg(any(feature = "native-engine-abi", test))]
 mod complexity;
 #[cfg(feature = "native-engine-abi")]
+mod csharp_doc_links;
+#[cfg(feature = "native-engine-abi")]
 mod doc_file_links;
+#[cfg(feature = "native-engine-abi")]
+mod docker_image;
 #[cfg(any(feature = "native-engine-abi", test))]
 mod explicit_override;
 #[cfg(feature = "native-engine-abi")]
 mod ffi_output;
 #[cfg(feature = "native-engine-abi")]
+mod jvm_doc_links;
+#[cfg(feature = "native-engine-abi")]
+mod kubernetes;
+#[cfg(feature = "native-engine-abi")]
+mod native_graph_buffer;
+#[cfg(feature = "native-engine-abi")]
+mod native_hash_table;
+#[cfg(feature = "native-engine-abi")]
 mod pdf_doc_links;
+#[cfg(feature = "native-engine-abi")]
+mod rust_doc_cargo;
+#[cfg(feature = "native-engine-abi")]
+mod rust_doc_path;
+#[cfg(feature = "native-engine-abi")]
+mod shell_pass;
 #[cfg(any(feature = "native-engine-abi", test))]
 mod similarity;
 #[cfg(feature = "native-engine-abi")]
@@ -28,6 +46,10 @@ mod mcp_methods;
 
 #[cfg(feature = "native-engine-abi")]
 pub mod startup;
+
+#[cfg(feature = "native-engine-abi")]
+#[path = "ui/http_transport.rs"]
+mod ui_http_transport;
 
 #[cfg(any(feature = "graphql-callbacks", test))]
 mod gqlgen;

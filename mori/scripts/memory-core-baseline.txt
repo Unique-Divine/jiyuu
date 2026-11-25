@@ -82,6 +82,5 @@ src/pipeline/worker_pool.c	2
 src/store/store.c	354
 src/ui/config.c	12
 src/ui/http_server.c	31
-src/ui/httpd.c	21
 src/ui/layout3d.c	61
 src/watcher/watcher.c	33
