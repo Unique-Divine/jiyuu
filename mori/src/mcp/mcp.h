@@ -275,9 +275,6 @@ typedef void (*cbm_mcp_read_override_free_fn)(char *payload);
 void cbm_mcp_set_read_override(cbm_mcp_read_override_fn handle,
                                cbm_mcp_read_override_free_fn release);
 
-typedef int (*cbm_mcp_method_selector_fn)(const char *method);
-void cbm_mcp_set_method_selector(cbm_mcp_method_selector_fn select);
-
 /* Decode validated parameters for tools/call. The callback can return
  * false to use the C decoder. C frees the returned name and arguments. */
 typedef bool (*cbm_mcp_tool_call_decoder_fn)(const char *params_json, char **name_out,

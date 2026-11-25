@@ -13,9 +13,6 @@ type MutationBegin = unsafe extern "C" fn(*mut c_void, *const c_char) -> bool;
 type MutationEnd = unsafe extern "C" fn(*mut c_void, *const c_char);
 
 unsafe extern "C" {
-    fn cbm_mcp_set_method_selector(
-        select: Option<unsafe extern "C" fn(*const c_char) -> c_int>,
-    );
     fn cbm_mcp_server_new(store_path: *const c_char) -> *mut Server;
     fn cbm_mcp_server_free(server: *mut Server);
     fn cbm_mcp_server_store(server: *mut Server) -> *mut c_void;
@@ -43,11 +40,8 @@ struct Fixture(*mut Server);
 
 impl Drop for Fixture {
     fn drop(&mut self) {
-        // SAFETY: The fixture owns the native server and the test's selector.
-        unsafe {
-            cbm_mcp_server_free(self.0);
-            cbm_mcp_set_method_selector(None);
-        }
+        // SAFETY: The fixture owns the native server.
+        unsafe { cbm_mcp_server_free(self.0) };
     }
 }
 
@@ -92,22 +86,21 @@ unsafe fn take_response(reply: *mut c_char) -> Option<Value> {
 
 #[test]
 fn native_cancellation_dispatch_respects_active_request_scope() {
-    unsafe extern "C" fn reject_in_c_reference(_: *const c_char) -> c_int {
-        0 // MCP_METHOD_UNKNOWN
-    }
-
-    // SAFETY: This is the only binary unit test that installs MCP dispatch
-    // callbacks. It owns the server and invokes all requests on this thread.
+    // SAFETY: This test owns the server and invokes all requests on this
+    // thread. It is the only binary unit test that installs the tool decoder.
     unsafe {
-        super::register();
-        // If the handler falls back to C, even the outer tool call fails.
-        cbm_mcp_set_method_selector(Some(reject_in_c_reference));
-
         // Use the embedded server's in-memory store. Other unit tests in
         // this process can already have initialized SQLite.
         let fixture = Fixture(cbm_mcp_server_new(ptr::null()));
         let server = fixture.0;
         assert!(!server.is_null());
+        let ping = c"{\"jsonrpc\":\"2.0\",\"id\":\"boot\",\"method\":\"ping\"}";
+        let ready =
+            take_response(cbm_mcp_server_handle(server, ping.as_ptr())).unwrap();
+        assert_eq!(ready["id"], "boot");
+        assert_eq!(ready["result"], serde_json::json!({}));
+        super::register();
+
         let store = cbm_mcp_server_store(server);
         assert!(!store.is_null());
         assert_eq!(

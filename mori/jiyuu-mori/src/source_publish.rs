@@ -24,7 +24,8 @@ struct Ops {
     commit: Action,
 }
 
-unsafe extern "C" fn publish(
+#[cfg_attr(feature = "native-engine-abi", unsafe(no_mangle))]
+unsafe extern "C" fn cbm_rust_source_publish(
     run: *mut Publish,
     ops: *const Ops,
     staged_rc: c_int,
@@ -66,27 +67,4 @@ unsafe extern "C" fn publish(
         }
         (ops.commit)(run)
     }
-}
-
-unsafe extern "C" {
-    fn cbm_pipeline_set_source_publish(
-        driver: unsafe extern "C" fn(
-            *mut Publish,
-            *const Ops,
-            c_int,
-            bool,
-            bool,
-        ) -> c_int,
-    );
-}
-
-/// Install Rust source publication for this process.
-///
-/// # Safety
-///
-/// Call before any pipeline starts or any indexing thread reads the callback.
-pub unsafe fn register() {
-    // SAFETY: the caller guarantees startup registration, and the callback
-    // lives for the life of the program.
-    unsafe { cbm_pipeline_set_source_publish(publish) };
 }

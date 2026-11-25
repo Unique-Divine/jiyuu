@@ -170,7 +170,6 @@ jobs:
       # the binary links libSystem, libz and libc++ from the OS.
       - name: Build mori
         env:
-          MORI_WITHOUT_C_INDEX_DRIVERS: "1"
           MORI_WITH_UI: "1"
         run: |
           set -euo pipefail

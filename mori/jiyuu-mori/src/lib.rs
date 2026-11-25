@@ -2,6 +2,8 @@
 
 pub mod ipc;
 
+#[cfg(feature = "native-engine-abi")]
+mod architecture_projection;
 #[cfg(any(feature = "native-engine-abi", test))]
 mod complexity;
 #[cfg(feature = "native-engine-abi")]
@@ -9,9 +11,23 @@ mod doc_file_links;
 #[cfg(any(feature = "native-engine-abi", test))]
 mod explicit_override;
 #[cfg(feature = "native-engine-abi")]
+mod ffi_output;
+#[cfg(feature = "native-engine-abi")]
 mod pdf_doc_links;
 #[cfg(any(feature = "native-engine-abi", test))]
 mod similarity;
+#[cfg(feature = "native-engine-abi")]
+mod test_impact_git;
+
+#[cfg(any(feature = "native-engine-abi", test))]
+mod config_cli;
+
+#[cfg(any(feature = "native-engine-abi", test))]
+#[path = "mcp_dispatch/methods.rs"]
+mod mcp_methods;
+
+#[cfg(feature = "native-engine-abi")]
+pub mod startup;
 
 #[cfg(any(feature = "graphql-callbacks", test))]
 mod gqlgen;
@@ -54,12 +70,9 @@ fn rusqlite_uses_the_c_backend_sqlite() {
 #[cfg(all(feature = "c-backend", test, unix))]
 mod discovery_spike;
 
-#[cfg(all(feature = "c-backend", unix))]
+#[cfg(feature = "native-engine-abi")]
 #[path = "discovery_spike/native.rs"]
 mod discover_walk;
-
-#[cfg(all(feature = "c-backend", not(test), unix))]
-pub use discover_walk::register as mori_register_discover_walk;
 
 #[cfg(all(feature = "c-backend", unix))]
 mod staged_graph;
@@ -104,18 +117,35 @@ mod ts_static_imports;
 pub use ts_static_imports::register as mori_register_ts_static_imports;
 
 #[cfg(feature = "native-engine-abi")]
+mod activation_transaction;
+#[cfg(feature = "native-engine-abi")]
+mod config_json_like;
+#[cfg(feature = "native-engine-abi")]
 mod config_text_edit;
 #[cfg(feature = "native-engine-abi")]
+mod config_toml_edit;
+#[cfg(feature = "native-engine-abi")]
+mod config_yaml_edit;
+#[cfg(feature = "native-engine-abi")]
 mod fts_writer;
+#[cfg(feature = "native-engine-abi")]
+mod store_digest;
 
-#[cfg(feature = "c-backend")]
+#[cfg(any(feature = "native-engine-abi", test))]
+mod full_build_driver;
+#[cfg(feature = "native-engine-abi")]
 mod source_publish;
-
-#[cfg(feature = "c-backend")]
-pub use source_publish::register as mori_register_source_publish;
+#[cfg(any(feature = "native-engine-abi", test))]
+mod stage_publish;
 
 #[cfg(feature = "c-backend")]
 mod python_imports;
 
 #[cfg(feature = "c-backend")]
 pub use python_imports::register as mori_register_python_imports;
+
+#[cfg(all(
+    feature = "native-engine-abi",
+    any(not(test), feature = "c-backend")
+))]
+mod hook_augment;

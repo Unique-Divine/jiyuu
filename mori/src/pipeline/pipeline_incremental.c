@@ -845,10 +845,12 @@ static int frozen_fresh_manifest(cbm_pipeline_t *p, cbm_file_hash_t **out, int *
     /* With a classified file list the reconciliation re-hashes exactly the
      * listed files: a file added to the source root since is not compared,
      * because it is not indexed either. */
-    int rc = cbm_pipeline_frozen_has_file_list(p)
-                 ? cbm_pipeline_frozen_listed_files(p, &files, &count)
-                 : cbm_discover_ex2(cbm_pipeline_repo_path(p), &opts, &files, &count, &excluded,
-                                    &excluded_count, &ignored, &ignored_count, &ignored_total);
+    const bool listed = cbm_pipeline_frozen_has_file_list(p);
+    cbm_log_debug("pipeline.discovery_backend", "phase", "fresh_manifest", "backend",
+                  listed ? "frozen_list" : "rust");
+    int rc = listed ? cbm_pipeline_frozen_listed_files(p, &files, &count)
+                    : cbm_discover_ex2(cbm_pipeline_repo_path(p), &opts, &files, &count, &excluded,
+                                       &excluded_count, &ignored, &ignored_count, &ignored_total);
     if (rc == 0)
         rc = cbm_pipeline_build_frozen_manifest(p, files, count, excluded, excluded_count, out,
                                                 out_count);
@@ -891,6 +893,7 @@ int cbm_pipeline_build_fresh_semantic_manifest(cbm_pipeline_t *p, const char *pr
                  : CBM_PIPELINE_ABORT_PRESERVE_DB;
     if (rc == 0) {
         cbm_set_user_lang_config(fresh_userconfig);
+        cbm_log_debug("pipeline.discovery_backend", "phase", "fresh_manifest", "backend", "rust");
         rc = cbm_discover_ex2(repo_path, &opts, &fresh_files, &fresh_file_count, &fresh_excluded,
                               &fresh_excluded_count, &fresh_ignored, &fresh_ignored_count,
                               &fresh_ignored_total);
