@@ -129,6 +129,98 @@ fn top_level_command_precedence_matches_c() {
 }
 
 #[test]
+fn config_cli_matches_c_with_isolated_settings() {
+    let c = c_binary();
+    let native = Scratch::new("c-config");
+    let rust = Scratch::new("rs-config");
+    for (args, status) in [
+        (&["config"][..], 0),
+        (&["config", "ls"], 0),
+        (&["config", "get", "auto_watch"], 0),
+        (&["config", "set", "auto_watch", "false"], 0),
+        (&["config", "get", "auto_watch"], 0),
+        (&["config", "reset", "auto_watch"], 0),
+        (&["config", "set", "ui_port", "08080"], 0),
+        (&["config", "get", "ui_port"], 0),
+        (&["config", "set", "ui_port", "0"], 1),
+        (&["config", "reset", "ui_port"], 0),
+        (&["config", "set", "index_max_files", "4321"], 0),
+        (&["config", "set", "index_max_files", "broken"], 1),
+        (&["config", "get", "index_max_files"], 0),
+        (&["config", "reset", "index_max_files"], 0),
+        (&["config", "get", "missing"], 1),
+        (&["config", "set", "auto_watch"], 1),
+        (&["config", "list"], 0),
+        (&["config", "unknown"], 1),
+    ] {
+        let run = |bin: &Path, scratch: &Scratch| {
+            command_in(bin, scratch)
+                .env("HOME", &scratch.0)
+                .args(args)
+                .output()
+                .unwrap()
+        };
+        let reference = run(&c, &native);
+        let candidate = run(Path::new(MORI), &rust);
+        assert_eq!(
+            reference.status.code(),
+            Some(status),
+            "{args:?}: {reference:?}"
+        );
+        assert_eq!(
+            candidate.status.code(),
+            Some(status),
+            "{args:?}: {candidate:?}"
+        );
+        assert_eq!(reference.stdout, candidate.stdout, "stdout for {args:?}");
+        assert_eq!(reference.stderr, candidate.stderr, "stderr for {args:?}");
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn config_cli_keeps_operation_status_when_stdout_fails() {
+    let reference = c_binary();
+    // A small result can fail while flushing. A value larger than the C
+    // stdio buffer can fail during the write itself.
+    let long_value = "x".repeat(32 * 1024);
+    for bin in [reference.as_path(), Path::new(MORI)] {
+        let scratch = Scratch::new("full-config");
+        for args in [
+            &["config", "--help"][..],
+            &["config", "get", "auto_watch"],
+            &["config", "set", "ui-lang", &long_value],
+            &["config", "get", "ui-lang"],
+        ] {
+            let full = fs::OpenOptions::new()
+                .write(true)
+                .open("/dev/full")
+                .unwrap();
+            let output = command_in(bin, &scratch)
+                .env("HOME", &scratch.0)
+                .args(args)
+                .stdout(full)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{bin:?}: {output:?}");
+        }
+        let db = Connection::open_with_flags(
+            scratch.0.join("cache/_config.db"),
+            OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        let saved: String = db
+            .query_row(
+                "SELECT value FROM config WHERE key = 'ui-lang'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(saved == long_value, "{bin:?}: config write did not persist");
+    }
+}
+
+#[test]
 fn malformed_internal_roles_are_rejected_before_dispatch() {
     let fingerprint = "0123456789abcdef".repeat(4);
     let worker = [

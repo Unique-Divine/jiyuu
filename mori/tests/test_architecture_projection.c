@@ -4,6 +4,7 @@
 #include "foundation/mem_core.h"
 #include "mcp/architecture_jobs.h"
 #include <store/architecture_projection.h>
+#include <store/architecture_projection_ffi.h>
 #include <foundation/platform.h>
 #include <yyjson/yyjson.h>
 #include <sqlite3.h>
@@ -198,6 +199,39 @@ TEST(projection_cancellation_deadline_and_store_reuse) {
     ASSERT_NOT_NULL(json);
     cbm_free(CBM_MEM_CLASS_OTHER, json);
     ASSERT_EQ(sqlite3_get_autocommit(cbm_store_get_db(store)), 1);
+    cbm_store_close(store);
+    PASS();
+}
+
+static bool projection_cancel_after_start(void *context) {
+    int *polls = context;
+    return ++*polls > 1;
+}
+
+TEST(projection_borrows_caller_transaction) {
+    cbm_store_t *store = projection_store();
+    ASSERT_NOT_NULL(store);
+    sqlite3 *db = cbm_store_get_db(store);
+    ASSERT_EQ(sqlite3_exec(db, "BEGIN", NULL, NULL, NULL), SQLITE_OK);
+    ASSERT_GT(projection_node(store, "Function", "projection.a", "a.c", true), 0);
+
+    char *json = NULL;
+    int polls = 0;
+    cbm_architecture_projection_options_t opts = {
+        .cancel = projection_cancel_after_start, .cancel_context = &polls};
+    ASSERT_EQ(cbm_store_architecture_projection(store, "projection", &opts, &json),
+              CBM_STORE_CANCELLED);
+    ASSERT_NULL(json);
+    ASSERT_EQ(sqlite3_get_autocommit(db), 0);
+    ASSERT_EQ(cbm_store_architecture_projection(store, "projection", NULL, &json), CBM_STORE_OK);
+    yyjson_doc *doc = yyjson_read(json, strlen(json), 0);
+    ASSERT_NOT_NULL(doc);
+    ASSERT_EQ(yyjson_get_int(yyjson_obj_get(projection_field(doc, "totals"), "nodes")), 1);
+    yyjson_doc_free(doc);
+    cbm_free(CBM_MEM_CLASS_OTHER, json);
+    ASSERT_EQ(sqlite3_get_autocommit(db), 0);
+    ASSERT_EQ(sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL), SQLITE_OK);
+    ASSERT_EQ(cbm_store_count_nodes(store, "projection"), 0);
     cbm_store_close(store);
     PASS();
 }
@@ -1363,6 +1397,72 @@ TEST(projection_route_handlers_are_entry_points) {
     PASS();
 }
 
+typedef struct {
+    ap_partition partition;
+    int polls;
+} projection_scratch_test;
+
+static bool projection_cancel_in_cluster(void *context) {
+    projection_scratch_test *test = context;
+    /* With two nodes, ownership polls once and clustering polls next. */
+    return ++test->polls == 2;
+}
+
+static bool projection_unexpected_group(void *context, const ap_overview_group *row,
+                                        size_t id_bytes, size_t label_bytes) {
+    (void)context;
+    (void)row;
+    (void)id_bytes;
+    (void)label_bytes;
+    abort();
+}
+
+static int projection_run_scratch_test(void *context) {
+    projection_scratch_test *test = context;
+    return mori_architecture_partition(&test->partition, test, projection_cancel_in_cluster,
+                                       projection_unexpected_group);
+}
+
+TEST(projection_scratch_contributes_to_peak_and_unwinds) {
+    cbm_store_t *store = projection_store();
+    ASSERT_NOT_NULL(store);
+    sqlite3 *db = cbm_store_get_db(store);
+    ap_node nodes[] = {
+        {.qn = "projection.a", .label = "Function", .file = "a.c"},
+        {.qn = "projection.b", .label = "Function", .file = "b.c"},
+    };
+    enum { EDGE_COUNT = 64 };
+    ap_edge edges[EDGE_COUNT];
+    for (int i = 0; i < EDGE_COUNT; i++)
+        edges[i] = (ap_edge){.source = 0, .target = 1, .type = 1}; /* CALLS */
+    ap_component components[2] = {0};
+    projection_scratch_test test = {
+        .partition = {.nodes = nodes,
+                      .edges = edges,
+                      .components = components,
+                      .node_count = 2,
+                      .edge_count = EDGE_COUNT,
+                      .text_budget = 1024},
+    };
+
+    size_t blocks = cbm_mem_class_live_blocks(CBM_MEM_CLASS_OTHER);
+    size_t bytes = cbm_mem_class_live_bytes(CBM_MEM_CLASS_OTHER);
+    cbm_mem_class_reset_peaks();
+    ASSERT_EQ(mori_architecture_snapshot(db, &test, projection_cancel_in_cluster,
+                                         projection_run_scratch_test),
+              CBM_STORE_ERR);
+    ASSERT_EQ(test.polls, 2);
+    ASSERT_EQ(sqlite3_get_autocommit(db), 1);
+    /* Each edge reserves two endpoint pairs. No callback reads the counters
+     * while scratch is live, so this also tests publishing a sub-flush peak. */
+    size_t pair_bytes = EDGE_COUNT * 4 * sizeof(size_t);
+    ASSERT_TRUE(cbm_mem_class_peak_bytes(CBM_MEM_CLASS_OTHER) >= bytes + pair_bytes);
+    ASSERT_EQ(cbm_mem_class_live_bytes(CBM_MEM_CLASS_OTHER), bytes);
+    ASSERT_EQ(cbm_mem_class_live_blocks(CBM_MEM_CLASS_OTHER), blocks);
+    cbm_store_close(store);
+    PASS();
+}
+
 TEST(projection_response_memory_returns_to_caller_baseline) {
     cbm_store_t *store = projection_store();
     ASSERT_NOT_NULL(store);
@@ -1447,11 +1547,13 @@ TEST(projection_completed_job_memory_returns_to_caller_baseline) {
 SUITE(architecture_projection) {
     RUN_TEST(projection_completed_job_memory_returns_to_caller_baseline);
     RUN_TEST(projection_response_memory_returns_to_caller_baseline);
+    RUN_TEST(projection_scratch_contributes_to_peak_and_unwinds);
     RUN_TEST(projection_accounts_for_isolated_nodes_and_files);
     RUN_TEST(projection_preserves_typed_edges_and_contiguous_paths);
     RUN_TEST(projection_reports_dependency_cycles_without_fabricated_execution);
     RUN_TEST(projection_graph_limits_abstain_instead_of_sampling);
     RUN_TEST(projection_cancellation_deadline_and_store_reuse);
+    RUN_TEST(projection_borrows_caller_transaction);
     RUN_TEST(projection_display_caps_preserve_total_accounting);
     RUN_TEST(projection_unknown_project_and_empty_project);
     RUN_TEST(projection_paths_depth_cap_is_explicit);

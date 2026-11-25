@@ -35,16 +35,11 @@ struct IndexSession {
     root: PathBuf,
     routing_override: Option<&'static str>,
     rust_manifest: bool,
-    driver_override: Option<&'static str>,
     seen_logs: HashSet<PathBuf>,
 }
 
 impl IndexSession {
-    fn new(
-        root: PathBuf,
-        routing_override: Option<&'static str>,
-        driver_override: Option<&'static str>,
-    ) -> Self {
+    fn new(root: PathBuf, routing_override: Option<&'static str>) -> Self {
         let mut dirs = fs::DirBuilder::new();
         dirs.recursive(true).mode(0o700);
         dirs.create(root.join("cache")).unwrap();
@@ -53,7 +48,6 @@ impl IndexSession {
             root,
             routing_override,
             rust_manifest: false,
-            driver_override,
             seen_logs: HashSet::new(),
         }
     }
@@ -74,11 +68,6 @@ impl IndexSession {
         }
         if self.rust_manifest {
             command.env("MORI_IMPL_INDEX_MANIFEST", "rust");
-        }
-        if let Some(drivers) = self.driver_override {
-            command
-                .env("MORI_IMPL_FULL_BUILD_DRIVER", drivers)
-                .env("MORI_IMPL_SOURCE_PUBLISH", drivers);
         }
         command
     }
@@ -144,19 +133,16 @@ impl IndexSession {
         assert_eq!(output["status"], "indexed", "{output}");
         let logs = self.take_worker_logs();
         self.check_route(&logs, step.decision);
-        let rust_drivers = self.driver_override.is_none();
-        let rust_full = rust_drivers
-            && matches!(step.decision, None | Some(("staged", "full")));
+        let rust_full = matches!(step.decision, None | Some(("staged", "full")));
         assert_eq!(
             logs.contains("msg=pipeline.full_build_driver implementation=rust"),
             rust_full,
             "{logs}"
         );
-        assert_eq!(
+        assert!(
             logs.contains(
                 "msg=pipeline.source_publish implementation=rust staged_rc=0"
             ),
-            rust_drivers,
             "{logs}"
         );
         assert!(logs.contains(step.log), "{logs}");
@@ -165,6 +151,22 @@ impl IndexSession {
             Some(("staged", "closure")) => Some("closure"),
             _ => None,
         };
+        let mut staged = logs.lines().filter(|line| {
+            line.contains("msg=pipeline.stage_publish implementation=rust")
+        });
+        if let Some(kind) = fts_mode.map(|mode| {
+            if mode == "full" {
+                "kind=dump"
+            } else {
+                "kind=patched"
+            }
+        }) {
+            assert!(
+                staged.next().is_some_and(|line| line.contains(kind)),
+                "{logs}"
+            );
+        }
+        assert!(staged.next().is_none(), "{logs}");
         let fts_witness = "msg=store.fts_rebuild implementation=rust";
         let fts_witnesses: Vec<_> = logs
             .lines()
@@ -333,11 +335,11 @@ impl IndexSession {
         self.check_route(&logs, Some(("staged", "full")));
         assert!(logs.contains("reason=adr_migrate_failed"), "{logs}");
         assert!(!logs.contains("msg=pipeline.full_build_driver"), "{logs}");
-        assert_eq!(
+        assert!(!logs.contains("msg=pipeline.stage_publish"), "{logs}");
+        assert!(
             logs.contains(
                 "msg=pipeline.source_publish implementation=rust staged_rc=-2"
             ),
-            self.driver_override.is_none(),
             "{logs}"
         );
         assert_eq!(self.state(name), before);
@@ -433,13 +435,8 @@ fn default_rust_routing_preserves_native_update_paths_and_generation() {
         },
     ];
 
-    // The release archive omits the legacy full-build and publication drivers.
-    // It can still compare C and Rust routing against the same Rust writers.
-    let c_driver = (option_env!("MORI_WITHOUT_C_INDEX_DRIVERS") != Some("1"))
-        .then_some("c");
-    let mut native =
-        IndexSession::new(fixture.0.join("control"), Some("c"), c_driver);
-    let mut rust = IndexSession::new(fixture.0.join("candidate"), None, None);
+    let mut native = IndexSession::new(fixture.0.join("control"), Some("c"));
+    let mut rust = IndexSession::new(fixture.0.join("candidate"), None);
     let mut previous_native = String::new();
     let mut previous_rust = String::new();
     let mut project: Option<String> = None;
@@ -462,11 +459,8 @@ fn default_rust_routing_preserves_native_update_paths_and_generation() {
         assert!(native_fts.rankings.iter().all(|rows| !rows.is_empty()));
         assert_eq!(rust.fts(&name, terms), native_fts);
         if step.decision == Some(("staged", "closure")) {
-            let mut clean = IndexSession::new(
-                fixture.0.join("clean"),
-                Some("unrecognized"),
-                c_driver.map(|_| "unrecognized"),
-            );
+            let mut clean =
+                IndexSession::new(fixture.0.join("clean"), Some("unrecognized"));
             let (clean_name, clean_generation, _) = clean.index(&repo, &fresh);
             assert_eq!(clean_name, name);
             let (_, clean_after_noop, _) = clean.index(&repo, &steps[1]);
@@ -490,13 +484,8 @@ fn default_rust_routing_preserves_native_update_paths_and_generation() {
         previous_rust = rust_generation;
     }
 
-    if c_driver.is_none() {
-        return;
-    }
-
     let stopped = rust.command().args(["daemon", "stop"]).output().unwrap();
     assert!(stopped.status.success(), "{stopped:?}");
-    rust.driver_override = c_driver;
     rust.rust_manifest = true;
     fs::write(
         repo.join("schema.graphqls"),
@@ -572,7 +561,7 @@ function total(xs: number[]): number { return sum(xs) }
             session.take_worker_logs(),
         )
     };
-    let mut warm = IndexSession::new(fixture.0.join("warm"), None, None);
+    let mut warm = IndexSession::new(fixture.0.join("warm"), None);
     let (project, _) = run(&mut warm);
     let terms = ["docs", "guide"];
 
@@ -593,7 +582,7 @@ function total(xs: number[]): number { return sum(xs) }
         );
 
         let mut clean =
-            IndexSession::new(fixture.0.join(format!("clean-{i}")), None, None);
+            IndexSession::new(fixture.0.join(format!("clean-{i}")), None);
         let (clean_project, _) = run(&mut clean);
         assert_eq!(project, clean_project);
         let expected = clean.fts(&project, terms);

@@ -1545,6 +1545,32 @@ TEST(pipeline_frozen_indexes_exactly_the_listed_files) {
     PASS();
 }
 
+TEST(pipeline_frozen_keeps_an_explicit_empty_file_list) {
+    pf_fixture_t f;
+    cbm_pipeline_frozen_t *owner = NULL;
+    ASSERT_TRUE(pf_open(&f));
+    static const cbm_pipeline_frozen_file_t empty_list_marker = {"ignored.c", CBM_LANG_C};
+    bool built = pf_source_write(&f, "unlisted.c", pf_ordinary) &&
+                 pf_create_listed(&f, &empty_list_marker, 0, &owner) == CBM_PIPELINE_FROZEN_OK &&
+                 cbm_pipeline_frozen_build(owner) == CBM_PIPELINE_FROZEN_OK;
+    cbm_store_t *store = built ? cbm_store_open_path_query(f.db) : NULL;
+    cbm_node_t *nodes = NULL;
+    int count = 0;
+    int scan_rc = store ? cbm_store_find_nodes_by_file(store, PF_PROJECT, "unlisted.c", &nodes,
+                                                       &count)
+                        : CBM_STORE_ERR;
+    cbm_store_free_nodes(nodes, count);
+    if (store) {
+        cbm_store_close(store);
+    }
+    cbm_pipeline_frozen_free(owner);
+    ASSERT_TRUE(pf_close(&f));
+    ASSERT_TRUE(built);
+    ASSERT_EQ(scan_rc, CBM_STORE_OK);
+    ASSERT_EQ(count, 0);
+    PASS();
+}
+
 /* A listed file that is not in the source root means the root is not the
  * snapshot the list came from. */
 TEST(pipeline_frozen_missing_listed_file_is_input_changed) {
@@ -1721,6 +1747,7 @@ SUITE(pipeline_frozen) {
     RUN_TEST(pipeline_frozen_diagnostic_allocation_failures);
     RUN_TEST(pipeline_frozen_diagnostic_state_and_cancel_precedence);
     RUN_TEST(pipeline_frozen_indexes_exactly_the_listed_files);
+    RUN_TEST(pipeline_frozen_keeps_an_explicit_empty_file_list);
     RUN_TEST(pipeline_frozen_missing_listed_file_is_input_changed);
     RUN_TEST(pipeline_frozen_rejects_malformed_file_lists);
     RUN_TEST(pipeline_frozen_base_repairs_or_rebuilds_to_the_full_graph);

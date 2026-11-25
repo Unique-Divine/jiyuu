@@ -472,14 +472,14 @@ PREPROCESSOR_SRC = $(CBM_DIR)/preprocessor.cpp
 SQLITE_WRITER_SRC = $(CBM_DIR)/sqlite_writer.c
 
 # Store module (new)
-STORE_SRCS = src/store/store.c src/store/graph_mem.c src/store/architecture_projection.c src/store/store_impact.c src/store/store_graph_digest.c src/store/store_content_digest.c
+STORE_SRCS = src/store/store.c src/store/graph_mem.c src/store/architecture_projection.c src/store/store_impact.c
 
 # Cypher module (new)
 CYPHER_SRCS = src/cypher/cypher.c
 
 # MCP server module (new)
 MCP_SRCS = src/mcp/mcp.c src/mcp/index_supervisor.c src/mcp/compact_out.c src/mcp/architecture_jobs.c \
-	src/mcp/test_impact.c src/mcp/test_impact_diff.c src/mcp/test_impact_classify.c src/mcp/test_impact_source.c src/mcp/test_impact_seed.c src/mcp/test_impact_engine.c src/mcp/test_impact_engine_snapshot.c src/mcp/test_impact_engine_reach.c src/mcp/test_impact_engine_artifact.c src/mcp/test_impact_cli.c src/mcp/test_impact_artifact.c src/mcp/test_impact_changes.c src/mcp/test_impact_origins.c src/mcp/test_impact_coverage.c src/mcp/test_impact_config.c src/mcp/test_impact_select.c src/mcp/test_impact_policy.c src/mcp/test_impact_git.c src/mcp/test_impact_inventory.c src/mcp/test_impact_inventory_input.c src/mcp/test_impact_tree.c src/mcp/test_impact_tree_audit.c src/mcp/test_impact_tree_read.c src/mcp/test_impact_tree_batch.c src/mcp/test_impact_tree_digest.c src/mcp/test_impact_tree_names.c src/mcp/test_impact_tree_plan.c src/mcp/test_impact_tree_posix.c src/mcp/test_impact_tree_posix_acl.c src/mcp/test_impact_tree_posix_io.c src/mcp/test_impact_tree_util.c src/mcp/test_impact_tree_windows.c src/mcp/test_impact_tree_windows_acl.c src/mcp/test_impact_tree_windows_io.c \
+	src/mcp/test_impact.c src/mcp/test_impact_diff.c src/mcp/test_impact_classify.c src/mcp/test_impact_source.c src/mcp/test_impact_seed.c src/mcp/test_impact_engine.c src/mcp/test_impact_engine_snapshot.c src/mcp/test_impact_engine_reach.c src/mcp/test_impact_engine_artifact.c src/mcp/test_impact_cli.c src/mcp/test_impact_artifact.c src/mcp/test_impact_changes.c src/mcp/test_impact_origins.c src/mcp/test_impact_coverage.c src/mcp/test_impact_config.c src/mcp/test_impact_select.c src/mcp/test_impact_policy.c src/mcp/test_impact_git_io.c src/mcp/test_impact_inventory.c src/mcp/test_impact_inventory_input.c src/mcp/test_impact_tree.c src/mcp/test_impact_tree_audit.c src/mcp/test_impact_tree_read.c src/mcp/test_impact_tree_batch.c src/mcp/test_impact_tree_digest.c src/mcp/test_impact_tree_names.c src/mcp/test_impact_tree_plan.c src/mcp/test_impact_tree_posix.c src/mcp/test_impact_tree_posix_acl.c src/mcp/test_impact_tree_posix_io.c src/mcp/test_impact_tree_util.c src/mcp/test_impact_tree_windows.c src/mcp/test_impact_tree_windows_acl.c src/mcp/test_impact_tree_windows_io.c \
 	src/mcp/test_impact_result.c src/mcp/test_impact_result_json.c src/mcp/test_impact_result_project.c src/mcp/test_impact_result_receipt.c src/mcp/test_impact_result_rows.c src/mcp/test_impact_result_util.c src/mcp/test_impact_result_validate.c src/mcp/test_impact_result_wire.c
 
 # Shared MCP daemon coordination and local transport
@@ -517,7 +517,6 @@ DISCOVER_SRCS = \
 GRAPH_BUFFER_SRCS = src/graph_buffer/graph_buffer.c
 
 # Pipeline module (new)
-C_INDEX_DRIVERS_SRC = src/pipeline/index_drivers_reference.c
 PIPELINE_SRCS = \
     src/pipeline/fqn.c \
     src/pipeline/lsp_surface.c \
@@ -526,7 +525,6 @@ PIPELINE_SRCS = \
     src/pipeline/laravel_routing.c \
     src/pipeline/registry.c \
     src/pipeline/pipeline.c \
-    $(C_INDEX_DRIVERS_SRC) \
     src/pipeline/pipeline_incremental.c \
     src/pipeline/worker_pool.c \
     src/pipeline/pass_parallel.c \
@@ -600,8 +598,7 @@ GIT_SRCS = src/git/git_context.c
 # CLI module (new)
 CLI_SRCS = src/cli/cli.c src/cli/runtime_settings.c src/cli/progress_sink.c src/cli/hook_augment.c src/cli/client_adapter.c \
 	src/cli/agent_clients.c src/cli/agent_profiles.c \
-	src/cli/config_json_like.c src/cli/config_toml_edit.c src/cli/config_yaml_edit.c \
-	src/cli/config_edit_path.c src/cli/activation_transaction.c
+	src/cli/config_edit_path.c
 
 # UI module (graph visualization)
 UI_SRCS = \
@@ -1096,7 +1093,7 @@ $(BUILD_DIR):
 $(NATIVE_ENGINE_ARCHIVE): NATIVE_ENGINE_CARGO_DIR := $(NATIVE_ENGINE_TARGET_DIR)
 $(NATIVE_ENGINE_ARCHIVE): NATIVE_ENGINE_CARGO_FEATURES := native-engine-abi
 $(NATIVE_ENGINE_TEST_ARCHIVE): NATIVE_ENGINE_CARGO_DIR := $(NATIVE_ENGINE_TEST_TARGET_DIR)
-$(NATIVE_ENGINE_TEST_ARCHIVE): NATIVE_ENGINE_CARGO_FEATURES := native-engine-fixtures
+$(NATIVE_ENGINE_TEST_ARCHIVE): NATIVE_ENGINE_CARGO_FEATURES := native-engine-test-seams
 $(NATIVE_ENGINE_ARCHIVE) $(NATIVE_ENGINE_TEST_ARCHIVE): $(NATIVE_ENGINE_TEST_SOURCES) Makefile.cbm | $(BUILD_DIR)
 	env -u CARGO_FEATURE_C_BACKEND -u CARGO_MAKEFLAGS -u MAKEFLAGS -u MFLAGS \
 		CARGO_BUILD_JOBS="$(or $(CARGO_BUILD_JOBS),$(patsubst -j%,%,$(filter-out -j,$(filter -j%,$(MAKEFLAGS)))),2)" \
@@ -1444,8 +1441,7 @@ MAIN_SRC = src/main.c
 # for trap debugging -- silently re-run the previously instrumented binary,
 # which during this bisect produced a "crashes without sanitizers too" result
 # that was pure artifact and sent the investigation down the wrong path.
-LIBMORI_WITHOUT_C_INDEX_DRIVERS ?= 0
-BUILD_CONFIG_SIG := TEST_SEAMS=$(TEST_SEAMS)|CFLAGS_EXTRA=$(CFLAGS_EXTRA)|SANITIZE=$(SANITIZE)|MEMWASTE=$(MEMWASTE)|MEMWASTE_ACCESS=$(MEMWASTE_ACCESS)|MEMWASTE_PROFILE=$(MEMWASTE_PROFILE)|TEST_COVERAGE=$(TEST_COVERAGE)|LIBMORI_WITH_UI=$(LIBMORI_WITH_UI)|LIBMORI_WITHOUT_C_INDEX_DRIVERS=$(LIBMORI_WITHOUT_C_INDEX_DRIVERS)
+BUILD_CONFIG_SIG := TEST_SEAMS=$(TEST_SEAMS)|CFLAGS_EXTRA=$(CFLAGS_EXTRA)|SANITIZE=$(SANITIZE)|MEMWASTE=$(MEMWASTE)|MEMWASTE_ACCESS=$(MEMWASTE_ACCESS)|MEMWASTE_PROFILE=$(MEMWASTE_PROFILE)|TEST_COVERAGE=$(TEST_COVERAGE)|LIBMORI_WITH_UI=$(LIBMORI_WITH_UI)
 .PHONY: build-config-check
 build-config-check:
 $(BUILD_DIR)/.build-config: build-config-check | $(BUILD_DIR)
@@ -1490,20 +1486,13 @@ else
 LIBMORI_PROD_SRCS = $(PROD_SRCS)
 LIBMORI_EMBED_OBJS =
 endif
-# Standalone C and its tests always keep the reference drivers.
-LIBMORI_INDEX_DRIVER_FLAGS =
-ifeq ($(LIBMORI_WITHOUT_C_INDEX_DRIVERS),1)
-LIBMORI_PROD_SRCS := $(filter-out $(C_INDEX_DRIVERS_SRC),$(LIBMORI_PROD_SRCS))
-LIBMORI_INDEX_DRIVER_FLAGS = $(if $(filter src/pipeline/pipeline.c,$<),-DCBM_WITHOUT_C_INDEX_DRIVERS=1)
-endif
 LIBMORI_SRCS = $(LIBMORI_PROD_SRCS) $(EXTRACTION_SRCS) $(AC_LZ4_SRCS) $(ZSTD_SRCS) $(SQLITE_WRITER_SRC)
 LIBMORI_OBJS = $(patsubst %.c,$(LIBMORI_DIR)/%.o,$(LIBMORI_SRCS))
 LIBMORI_MAIN_OBJ = $(LIBMORI_DIR)/cbm_c_main.o
 LIBMORI_A = $(BUILD_DIR)/libmori-c.a
-
 $(LIBMORI_DIR)/%.o: %.c $(BUILD_DIR)/.build-config $(PROJECT_HDRS) | $(BUILD_DIR)
 	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS_PROD) $(LIBMORI_INDEX_DRIVER_FLAGS) -c -o $@ $<
+	$(CC) $(CFLAGS_PROD) -c -o $@ $<
 
 $(LIBMORI_MAIN_OBJ): $(MAIN_SRC) $(BUILD_DIR)/.build-config $(PROJECT_HDRS) | $(BUILD_DIR)
 	@mkdir -p $(dir $@)
@@ -1514,7 +1503,8 @@ src/ui/embedded_assets.c: embed
 
 # LIBMORI_EMBED_OBJS is a wildcard, so it is read when this recipe runs,
 # after `embed` has written the objects.
-$(LIBMORI_A): $(LIBMORI_MAIN_OBJ) $(LIBMORI_OBJS) $(OBJS_VENDORED_PROD)
+# Invalidate warm archives when the source list drops a member.
+$(LIBMORI_A): $(LIBMORI_MAIN_OBJ) $(LIBMORI_OBJS) $(OBJS_VENDORED_PROD) Makefile.cbm
 	rm -f $@ $@.tmp
 	$(AR) qc $@.tmp $(LIBMORI_MAIN_OBJ) $(LIBMORI_OBJS) $(OBJS_VENDORED_PROD) \
 		$(LIBMORI_EMBED_OBJS)

@@ -815,6 +815,47 @@ TEST(config_json_like_preserves_jsonc_comments) {
     PASS();
 }
 
+TEST(config_json_like_replaces_only_raw_field_in_snapshot) {
+    jl_fixture_t fixture;
+    ASSERT_EQ(jl_fixture_open(&fixture), 0);
+    const char *path[] = {"mcp"};
+    const char *original =
+        "{mcp:{owned:{command: /* keep */ 'before', enabled: false,},},}\r\n";
+    const char *updated =
+        "{mcp:{owned:{command: /* keep */ [\"after\"], enabled: false,},},}\r\n";
+    ASSERT_EQ(jl_write(fixture.path, original), 0);
+
+    char *snapshot = NULL;
+    size_t snapshot_length = 0U;
+    ASSERT_EQ(cbm_json_like_read_document(fixture.path, &snapshot, &snapshot_length), 0);
+    ASSERT_NOT_NULL(snapshot);
+    ASSERT_EQ(snapshot_length, strlen(original));
+    ASSERT_EQ(cbm_json_like_replace_field_raw_if_unchanged(
+                  fixture.path, path, 1U, "owned", "command", "  [\"after\"]  ", snapshot,
+                  snapshot_length), 0);
+    ASSERT_EQ(cbm_json_like_replace_field_raw_if_unchanged(
+                  fixture.path, path, 1U, "owned", "command", "false", snapshot,
+                  snapshot_length), -1);
+    free(snapshot);
+
+    char *entry = NULL;
+    size_t entry_length = 0U;
+    const char *expected_entry = "{command: /* keep */ [\"after\"], enabled: false,}";
+    ASSERT_EQ(cbm_json_like_get_raw_entry(fixture.path, path, 1U, "owned", &entry, &entry_length),
+              0);
+    ASSERT_NOT_NULL(entry);
+    ASSERT_EQ(entry_length, strlen(expected_entry));
+    ASSERT_STR_EQ(entry, expected_entry);
+    free(entry);
+
+    char *content = jl_read(fixture.path);
+    ASSERT_NOT_NULL(content);
+    ASSERT_STR_EQ(content, updated);
+    free(content);
+    jl_fixture_close(&fixture);
+    PASS();
+}
+
 TEST(config_json_like_openclaw_json5_nested_servers) {
     jl_fixture_t fixture;
     ASSERT_EQ(jl_fixture_open(&fixture), 0);
@@ -1043,6 +1084,22 @@ TEST(config_json_like_top_level_array_unique_string) {
     ASSERT(strstr(removed, "// keep this user comment") != NULL);
     ASSERT(strstr(removed, "'~/rules/other.md'") != NULL);
     free(removed);
+    jl_fixture_close(&fixture);
+    PASS();
+}
+
+TEST(config_json_like_compares_lone_surrogate_escapes) {
+    jl_fixture_t fixture;
+    ASSERT_EQ(jl_fixture_open(&fixture), 0);
+    ASSERT_EQ(jl_write(fixture.path, "{\"\\ud800\":0,\"key\":[\"\\udc00\",\"\\u2603\"]}\n"), 0);
+
+    // Both lookups are at least three bytes, so the surrogate bytes reach
+    // the comparison rather than failing the prefix length check.
+    ASSERT_EQ(cbm_json_like_remove_string(fixture.path, "key", "\xe2\x98\x83"), 0);
+    char *content = jl_read(fixture.path);
+    ASSERT_NOT_NULL(content);
+    ASSERT_STR_EQ(content, "{\"\\ud800\":0,\"key\":[\"\\udc00\"]}\n");
+    free(content);
     jl_fixture_close(&fixture);
     PASS();
 }
@@ -1574,6 +1631,7 @@ SUITE(config_json_like) {
     RUN_TEST(config_json_like_rejects_json5_decimal_escapes_byte_identical);
     RUN_TEST(config_json_like_fresh_strict_upsert_replace_remove);
     RUN_TEST(config_json_like_preserves_jsonc_comments);
+    RUN_TEST(config_json_like_replaces_only_raw_field_in_snapshot);
     RUN_TEST(config_json_like_openclaw_json5_nested_servers);
     RUN_TEST(config_json_like_creates_missing_nested_path);
     RUN_TEST(config_json_like_rejects_duplicate_path_byte_identical);
@@ -1584,6 +1642,7 @@ SUITE(config_json_like) {
     RUN_TEST(config_json_like_removes_first_middle_last_and_only);
     RUN_TEST(config_json_like_removal_preserves_comments_and_siblings);
     RUN_TEST(config_json_like_top_level_array_unique_string);
+    RUN_TEST(config_json_like_compares_lone_surrogate_escapes);
     RUN_TEST(config_json_like_array_add_replaces_null_value_issue1826);
     RUN_TEST(config_json_like_match_object_entry_literal_shape_issue1826);
     RUN_TEST(config_json_like_single_line_array_round_trips_byte_for_byte_issue1826);

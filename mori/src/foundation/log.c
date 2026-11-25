@@ -340,6 +340,10 @@ void cbm_log_control_record(const char *msg, ...) {
     emit_line(line_buf);
 }
 
+void cbm_log_activation_ancestor_group_writable(const char *path, const char *mode) {
+    cbm_log_warn("activation.ancestor_group_writable", "path", path, "mode", mode);
+}
+
 void cbm_log_int(CBMLogLevel level, const char *msg, const char *key, int64_t value) {
     char value_buf[CBM_SZ_32];
     snprintf(value_buf, sizeof(value_buf), "%" PRId64, value);
