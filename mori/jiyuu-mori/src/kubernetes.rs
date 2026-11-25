@@ -3,7 +3,7 @@
 use super::native_graph_buffer::{
     Node, cbm_gbuf_find_by_id, cbm_gbuf_find_by_label,
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, TryReserveError};
 use std::ffi::{CStr, CString, c_char, c_int, c_void};
 use std::ptr;
 use std::slice;
@@ -339,14 +339,12 @@ impl Pass<'_> {
         records: &[Record],
         pairs: &[*const c_char],
         counts: &mut Counts,
-    ) {
-        let pairs: Vec<_> = pairs
-            .iter()
-            .map(|&p| unsafe { CStr::from_ptr(p) }.to_bytes())
-            .collect();
+    ) -> Result<(), TryReserveError> {
         let record_pairs = |r: &Record| {
             let off = r.pair_offset as usize;
-            &pairs[off..off + r.pair_count as usize]
+            pairs[off..off + r.pair_count as usize]
+                .iter()
+                .map(|&pair| unsafe { CStr::from_ptr(pair) }.to_bytes())
         };
         let mut index: Index<&[u8], usize> = HashMap::new();
         for (i, record) in records.iter().enumerate() {
@@ -361,11 +359,14 @@ impl Pass<'_> {
                 Scope::Build,
                 &mut Member::default(),
             ) {
+                index.try_reserve(1)?;
                 let postings = index.entry(scope.bundle).or_default();
-                for &pair in record_pairs(record) {
+                for pair in record_pairs(record) {
+                    postings.try_reserve(1)?;
                     let ids =
                         postings.entry(self.scope_key(scope, pair)).or_default();
                     if ids.last() != Some(&i) {
+                        ids.try_reserve(1)?;
                         ids.push(i);
                     }
                 }
@@ -398,7 +399,7 @@ impl Pass<'_> {
                 };
                 // A missing pair rules the whole bundle out.
                 let mut rarest: Option<&Vec<usize>> = None;
-                for pair in wanted {
+                for pair in wanted.clone() {
                     let Some(posting) =
                         postings.get(self.scope_key(scope, pair))
                     else {
@@ -411,11 +412,11 @@ impl Pass<'_> {
                     }
                 }
                 if let Some(posting) = rarest {
+                    candidates.try_reserve(posting.len())?;
                     candidates.extend_from_slice(posting);
                 }
             }
             unique(&mut candidates);
-            counts.candidates += candidates.len() as u64;
             let source_ns =
                 unsafe { CStr::from_ptr(selector.namespace.as_ptr()) }
                     .to_bytes();
@@ -446,10 +447,10 @@ impl Pass<'_> {
                     namespace,
                     None,
                     false,
-                ) && wanted
-                    .iter()
-                    .all(|pair| record_pairs(workload).contains(pair))
-                {
+                ) && wanted.clone().all(|pair| {
+                    record_pairs(workload).any(|label| label == pair)
+                }) {
+                    matches.try_reserve(1)?;
                     matches.push((
                         (name.to_bytes(), namespace),
                         i,
@@ -457,6 +458,7 @@ impl Pass<'_> {
                     ));
                 }
             }
+            counts.candidates += candidates.len() as u64;
             matches.sort_unstable_by_key(|&(key, i, _)| (key, i));
             for group in matches.chunk_by(|a, b| a.0 == b.0) {
                 let own_file = group.iter().any(|m| m.2);
@@ -468,6 +470,7 @@ impl Pass<'_> {
                 }
             }
         }
+        Ok(())
     }
 
     fn selector_edge(&self, selector: &Record, workload: &Record) {
@@ -479,18 +482,21 @@ impl Pass<'_> {
                     unsafe { CStr::from_ptr(selector.name.as_ptr()) }.to_bytes();
                 let name =
                     unsafe { CStr::from_ptr(workload.name.as_ptr()) }.to_bytes();
-                let mut props = [
+                // Match the native writer's 256-byte buffer, including NUL.
+                let mut props = [0; 256];
+                let mut len = 0;
+                for part in [
                     b"{\"kind\":\"selector\",\"service\":\"".as_slice(),
                     service,
                     b"\",\"workload\":\"",
                     name,
                     b"\"}",
-                ]
-                .concat();
-                // Match the native writer's 256-byte buffer, including NUL.
-                props.truncate(255);
-                props.push(0);
-                let props = CStr::from_bytes_with_nul(&props)
+                ] {
+                    let count = part.len().min(props.len() - 1 - len);
+                    props[len..len + count].copy_from_slice(&part[..count]);
+                    len += count;
+                }
+                let props = CStr::from_bytes_with_nul(&props[..=len])
                     .expect("selector names are C strings");
                 self.edge(selector.id, workload.id, c"INFRA_MAPS", props);
                 return;
@@ -736,7 +742,9 @@ impl Pass<'_> {
         unsafe { (self.ops.resolution)(self.state, &mut facts) };
         self.apply_namespaces();
         unsafe {
-            self.selectors(
+            // Selector scratch is optional. Keep completed selectors and
+            // continue into references and CRDs if a reservation fails.
+            let _ = self.selectors(
                 items(facts.records, facts.record_count),
                 items(facts.pairs, facts.pair_count),
                 &mut counts,
