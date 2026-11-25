@@ -3,6 +3,7 @@
 use super::native_graph_buffer::{
     Node, cbm_gbuf_find_by_label, cbm_gbuf_find_by_name,
 };
+use super::native_hash_table::{HashTable, cbm_ht_count, cbm_ht_get};
 use std::collections::{HashMap, HashSet};
 use std::ffi::{CStr, CString, c_char, c_int, c_void};
 use std::{ptr, slice};
@@ -35,7 +36,7 @@ type Publish = unsafe extern "C" fn(
     *mut c_void,
     *const Hit,
     c_int,
-    *const c_void,
+    *const HashTable,
 ) -> c_int;
 type MakeFiles = unsafe extern "C" fn(*const *const c_char, c_int, *mut c_void);
 type FindNodes = unsafe extern "C" fn(
@@ -89,8 +90,6 @@ unsafe extern "C" {
         node: *mut Node,
         props: *const c_char,
     ) -> c_int;
-    fn cbm_ht_count(table: *const c_void) -> u32;
-    fn cbm_ht_get(table: *const c_void, key: *const c_char) -> *mut c_void;
     fn cbm_json_escape(
         out: *mut c_char,
         size: c_int,
@@ -667,7 +666,7 @@ fn deploy(
     graph.edge(src, target, c"DEPLOYS", &props)
 }
 
-fn mark_declarers(graph: &mut Graph, declarers: *const c_void) {
+fn mark_declarers(graph: &mut Graph, declarers: *const HashTable) {
     if declarers.is_null() || unsafe { cbm_ht_count(declarers) } == 0 {
         return;
     }
@@ -712,7 +711,7 @@ unsafe extern "C" fn publish(
     collector: *mut c_void,
     hits: *const Hit,
     count: c_int,
-    declarers: *const c_void,
+    declarers: *const HashTable,
 ) -> c_int {
     let mut graph = Graph { ctx, buffer };
     let mut edges = 0;

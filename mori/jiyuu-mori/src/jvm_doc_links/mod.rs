@@ -118,6 +118,9 @@ use std::sync::atomic::{AtomicI64, Ordering};
 mod java;
 mod kotlin;
 
+use super::native_hash_table::{
+    HashTable, cbm_ht_count, cbm_ht_create, cbm_ht_free, cbm_ht_get, cbm_ht_set,
+};
 use java::{java_resolve, java_type_path};
 use kotlin::{ext_key, kotlin_resolve, kotlin_type_path};
 
@@ -126,7 +129,6 @@ use kotlin::{ext_key, kotlin_resolve, kotlin_type_path};
 enum Graph {}
 enum PipelineContext {}
 enum Arena {}
-enum HashTable {}
 
 #[repr(C)]
 struct GraphNode {
@@ -283,15 +285,6 @@ unsafe extern "C" {
         a0: *const Graph,
         a1: *const c_char,
     ) -> *const GraphNode;
-    fn cbm_ht_count(a0: *const HashTable) -> u32;
-    fn cbm_ht_create(a0: u32) -> *mut HashTable;
-    fn cbm_ht_free(a0: *mut HashTable);
-    fn cbm_ht_get(a0: *const HashTable, a1: *const c_char) -> *mut c_void;
-    fn cbm_ht_set(
-        a0: *mut HashTable,
-        a1: *const c_char,
-        a2: *mut c_void,
-    ) -> *mut c_void;
     fn cbm_label_is_type_like(a0: *const c_char) -> bool;
     fn cbm_log(a0: i32, a1: *const c_char, ...);
     fn mori_jvm_doclinks_should_skip_dir(a0: *const c_char, a1: i32) -> bool;
