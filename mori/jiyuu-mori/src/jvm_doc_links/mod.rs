@@ -706,12 +706,16 @@ unsafe fn mark(ix: *mut Index, ht: *mut HashTable, key: *const c_char) -> bool {
     true
 }
 
+fn ctype_arg(byte: c_char) -> i32 {
+    i32::from(u8::from_ne_bytes(byte.to_ne_bytes()))
+}
+
 unsafe fn ci_equal(s: *const c_char, n: usize, word: *const c_char) -> bool {
     if strlen(word) != n {
         return false;
     }
     for i in 0..n {
-        if tolower(((*s.add(i)) as u8) as i32) != ((*word.add(i)) as i32) {
+        if tolower(ctype_arg(*s.add(i))) != ((*word.add(i)) as i32) {
             return false;
         }
     }
@@ -725,8 +729,7 @@ unsafe fn ci_contains(s: *const c_char, n: usize, word: *const c_char) -> bool {
         while (i + wl) <= n {
             let mut k: usize = 0;
             while (k < wl)
-                && (tolower(((*s.add(i + k)) as u8) as i32)
-                    == ((*word.add(k)) as i32))
+                && (tolower(ctype_arg(*s.add(i + k))) == ((*word.add(k)) as i32))
             {
                 k += 1;
             }
@@ -761,9 +764,8 @@ unsafe fn test_dir_name(s: *const c_char, n: usize) -> bool {
             || (((*s.add(i)) as i32) == b'_' as i32))
             || (((*s.add(i)) as i32) == b'.' as i32);
         let step: bool = (((!(sep)) && (i > start))
-            && ((isupper(((*s.add(i)) as u8) as i32)) != 0))
-            && ((isupper(((*s.add(i - (SKIP_ONE as usize))) as u8) as i32))
-                == 0);
+            && ((isupper(ctype_arg(*s.add(i)))) != 0))
+            && ((isupper(ctype_arg(*s.add(i - SKIP_ONE as usize)))) == 0);
         if (!(sep)) && (!(step)) {
             continue;
         }
@@ -3636,10 +3638,7 @@ unsafe fn unfound_path(
         return unfound_simple(c, (*segs.offset(0)) as *const c_char);
     }
     let mut k: i32 = 0;
-    while (k < n)
-        && ((isupper(((*(*segs.offset(k as isize)).offset(0)) as u8) as i32))
-            == 0)
-    {
+    while (k < n) && ((isupper(ctype_arg(**segs.offset(k as isize)))) == 0) {
         k += 1;
     }
     if k == 0 {

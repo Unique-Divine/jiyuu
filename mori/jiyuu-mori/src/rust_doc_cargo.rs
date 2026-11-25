@@ -5,7 +5,7 @@
 //! Build scratch data is dropped once the resolved topology has been copied
 //! into the native index, before imports or parallel link lookups run.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, TryReserveError};
 use std::ffi::{CStr, c_char, c_int, c_void};
 use std::ptr;
 
@@ -144,6 +144,7 @@ struct DepRecord<'a> {
     name: &'a [u8],
     attr: &'a [u8],
     value: &'a [u8],
+    ordinal: usize,
 }
 
 #[derive(Default)]
@@ -215,7 +216,10 @@ fn edition(value: &[u8]) -> i32 {
     if year >= 2015 { year as i32 } else { -2 }
 }
 
-fn read_manifest<'a>(path: &'a [u8], blob: &'a [u8]) -> Package<'a> {
+fn read_manifest<'a>(
+    path: &'a [u8],
+    blob: &'a [u8],
+) -> Result<Package<'a>, TryReserveError> {
     let mut package = Package {
         dir: parent(path),
         ..Package::default()
@@ -268,6 +272,7 @@ fn read_manifest<'a>(path: &'a [u8], blob: &'a [u8]) -> Package<'a> {
                 if let (Some(b"path"), Some(path)) =
                     (fields.next(), fields.next())
                 {
+                    package.targets.try_reserve(1)?;
                     package.targets.push(path);
                 }
             }
@@ -278,11 +283,13 @@ fn read_manifest<'a>(path: &'a [u8], blob: &'a [u8]) -> Package<'a> {
                     (fields.next(), fields.next(), fields.next(), fields.next())
                     && let Some(&kind) = kind.first()
                 {
+                    package.raw_deps.try_reserve(1)?;
                     package.raw_deps.push(DepRecord {
                         kind,
                         name,
                         attr,
                         value,
+                        ordinal: package.raw_deps.len(),
                     });
                 }
             }
@@ -290,8 +297,10 @@ fn read_manifest<'a>(path: &'a [u8], blob: &'a [u8]) -> Package<'a> {
         }
     }
     // Keep the lexical record order within each dependency.
-    package.raw_deps.sort_by_key(|record| record.name);
     package
+        .raw_deps
+        .sort_unstable_by_key(|record| (record.name, record.ordinal));
+    Ok(package)
 }
 
 fn parent(path: &[u8]) -> &[u8] {
@@ -306,35 +315,68 @@ fn ancestors(path: &[u8]) -> impl Iterator<Item = &[u8]> {
     })
 }
 
-fn append_path(out: &mut Vec<u8>, part: &[u8]) -> Option<()> {
+fn reserved<T>(capacity: usize) -> Result<Vec<T>, TryReserveError> {
+    let mut items = Vec::new();
+    items.try_reserve_exact(capacity)?;
+    Ok(items)
+}
+
+struct CargoPath {
+    bytes: [u8; PATH_BUF],
+    len: usize,
+}
+
+impl CargoPath {
+    fn new() -> Self {
+        Self {
+            bytes: [0; PATH_BUF],
+            len: 0,
+        }
+    }
+
+    fn as_slice(&self) -> &[u8] {
+        &self.bytes[..self.len]
+    }
+
+    fn extend(&mut self, suffix: &[u8]) -> Option<()> {
+        if suffix.len() >= PATH_BUF - self.len {
+            return None;
+        }
+        let end = self.len + suffix.len();
+        self.bytes[self.len..end].copy_from_slice(suffix);
+        self.len = end;
+        Some(())
+    }
+}
+
+fn append_path(out: &mut CargoPath, part: &[u8]) -> Option<()> {
     if part.is_empty() {
         return Some(());
     }
-    if out.len() + part.len() + 2 >= PATH_BUF {
+    if out.len + part.len() + 2 >= PATH_BUF {
         return None;
     }
-    if !out.is_empty() {
-        out.push(b'/');
+    if out.len != 0 {
+        out.extend(b"/")?;
     }
-    out.extend(part);
-    Some(())
+    out.extend(part)
 }
 
-fn join_path(dir: &[u8], path: &[u8]) -> Option<Vec<u8>> {
+fn join_path(dir: &[u8], path: &[u8]) -> Option<CargoPath> {
     if path.starts_with(b"/")
         || dir.len() + usize::from(!dir.is_empty()) + path.len() >= PATH_BUF
     {
         return None;
     }
-    let mut out = Vec::new();
+    let mut out = CargoPath::new();
     for part in dir.split(|b| *b == b'/').chain(path.split(|b| *b == b'/')) {
         match part {
             b"" | b"." => {}
             b".." => {
-                if out.is_empty() {
+                if out.len == 0 {
                     return None;
                 }
-                out.truncate(parent(&out).len());
+                out.len = parent(out.as_slice()).len();
             }
             _ => append_path(&mut out, part)?,
         }
@@ -342,10 +384,10 @@ fn join_path(dir: &[u8], path: &[u8]) -> Option<Vec<u8>> {
     Some(out)
 }
 
-fn crate_name(name: &[u8]) -> Vec<u8> {
-    name.iter()
-        .map(|&b| if b == b'-' { b'_' } else { b })
-        .collect()
+fn crate_name(name: &[u8]) -> Result<Vec<u8>, TryReserveError> {
+    let mut bytes = reserved(name.len())?;
+    bytes.extend(name.iter().map(|&b| if b == b'-' { b'_' } else { b }));
+    Ok(bytes)
 }
 
 type PathMap<'a> = HashMap<&'a [u8], usize>;
@@ -434,10 +476,11 @@ impl Topology<'_> {
         &self,
         packages: &[Package<'_>],
         dirs: &PathMap<'_>,
-    ) -> (Vec<FileState>, Vec<i32>) {
-        let mut states: Vec<_> =
-            self.files.iter().map(|_| FileState::default()).collect();
-        let mut lib_roots = vec![NONE; packages.len()];
+    ) -> Result<(Vec<FileState>, Vec<i32>), TryReserveError> {
+        let mut states = reserved(self.files.len())?;
+        states.resize_with(self.files.len(), FileState::default);
+        let mut lib_roots = reserved(packages.len())?;
+        lib_roots.resize(packages.len(), NONE);
         for (id, package) in packages
             .iter()
             .enumerate()
@@ -486,31 +529,41 @@ impl Topology<'_> {
                 }
             }
         }
-        (states, lib_roots)
+        Ok((states, lib_roots))
     }
 
-    fn decl_dir(&self, decl: &Decl<'_>, view: u8) -> Option<Vec<u8>> {
-        let mut names = Vec::new();
+    fn decl_dir(&self, decl: &Decl<'_>, view: u8) -> Option<CargoPath> {
+        let mut names = [0; PATH_BUF];
+        let mut start = names.len();
+        let mut depth = 0;
         let mut module = &self.modules[decl.module];
         while let Some(parent) = module.parent {
-            if module.path_attr || names.len() >= PATH_BUF / 2 {
+            if module.path_attr || depth == PATH_BUF / 2 {
                 return None;
             }
-            names.push(module.name?);
+            let name = module.name?;
+            if !name.is_empty() {
+                if start != names.len() {
+                    start = start.checked_sub(1)?;
+                    names[start] = b'/';
+                }
+                let end = start;
+                start = start.checked_sub(name.len())?;
+                names[start..end].copy_from_slice(name);
+            }
+            depth += 1;
             module = &self.modules[parent];
         }
         let path = self.source(module.file).path;
         let base = path.rsplit(|b| *b == b'/').next()?;
-        let mut dir = Vec::new();
+        let mut dir = CargoPath::new();
         append_path(&mut dir, parent(path))?;
-        if view == UNDER_STEM && (decl.path.is_none() || !names.is_empty()) {
+        if view == UNDER_STEM && (decl.path.is_none() || depth != 0) {
             let stem =
                 base.strip_suffix(b".rs").filter(|stem| !stem.is_empty())?;
             append_path(&mut dir, stem)?;
         }
-        for name in names.into_iter().rev() {
-            append_path(&mut dir, name)?;
-        }
+        append_path(&mut dir, &names[start..])?;
         Some(dir)
     }
 
@@ -522,24 +575,23 @@ impl Topology<'_> {
             return [None, None];
         };
         if let Some(path) = decl.path {
-            let file = join_path(&dir, path)
+            let file = join_path(dir.as_slice(), path)
                 .and_then(|path| self.sources.get(path.as_slice()).copied());
             return [file.map(|file| (file, BESIDE)), None];
         }
-        if !dir.is_empty() {
-            dir.push(b'/');
+        if (dir.len != 0 && dir.extend(b"/").is_none())
+            || dir.extend(decl.name).is_none()
+        {
+            return [None, None];
         }
-        dir.extend(decl.name);
-        let len = dir.len();
-        dir.extend(b".rs");
-        let stem = (dir.len() < PATH_BUF)
-            .then(|| self.sources.get(dir.as_slice()))
-            .flatten();
-        dir.truncate(len);
-        dir.extend(b"/mod.rs");
-        let beside = (dir.len() < PATH_BUF)
-            .then(|| self.sources.get(dir.as_slice()))
-            .flatten();
+        let len = dir.len;
+        let stem = dir
+            .extend(b".rs")
+            .and_then(|()| self.sources.get(dir.as_slice()));
+        dir.len = len;
+        let beside = dir
+            .extend(b"/mod.rs")
+            .and_then(|()| self.sources.get(dir.as_slice()));
         [
             stem.map(|&file| (file, UNDER_STEM)),
             beside.map(|&file| (file, BESIDE)),
@@ -569,8 +621,11 @@ impl Topology<'_> {
     // Propagate from declared targets first. Files reached by no target or
     // mod.rs can supply either directory view. A declaration attaches only
     // when all those views name a single indexed file.
-    fn attachments(&self, states: &mut [FileState]) -> Vec<Option<usize>> {
-        let mut stack = Vec::new();
+    fn attachments(
+        &self,
+        states: &mut [FileState],
+    ) -> Result<Vec<Option<usize>>, TryReserveError> {
+        let mut stack = reserved(self.files.len())?;
         for (file, source) in self.files.iter().enumerate() {
             if let Some(source) = source
                 && (states[file].is_root
@@ -587,21 +642,20 @@ impl Topology<'_> {
             }
         }
         self.propagate_views(states, &mut stack);
-        self.decls
-            .iter()
-            .map(|decl| {
-                let views = states[self.modules[decl.module].file].views;
-                let mut candidates = [BESIDE, UNDER_STEM]
-                    .into_iter()
-                    .filter(|view| views & view != 0)
-                    .flat_map(|view| {
-                        self.candidates(decl, view).into_iter().flatten()
-                    })
-                    .map(|(file, _)| file);
-                let child = candidates.next()?;
-                candidates.all(|file| file == child).then_some(child)
-            })
-            .collect()
+        let mut children = reserved(self.decls.len())?;
+        children.extend(self.decls.iter().map(|decl| {
+            let views = states[self.modules[decl.module].file].views;
+            let mut candidates = [BESIDE, UNDER_STEM]
+                .into_iter()
+                .filter(|view| views & view != 0)
+                .flat_map(|view| {
+                    self.candidates(decl, view).into_iter().flatten()
+                })
+                .map(|(file, _)| file);
+            let child = candidates.next()?;
+            candidates.all(|file| file == child).then_some(child)
+        }));
+        Ok(children)
     }
 
     fn file_reach(
@@ -611,8 +665,8 @@ impl Topology<'_> {
         lib_roots: &[i32],
         packages: &[Package<'_>],
         dirs: &PathMap<'_>,
-    ) {
-        let mut stack = Vec::new();
+    ) -> Result<(), TryReserveError> {
+        let mut stack = reserved(self.files.len())?;
         for (file, state) in states
             .iter_mut()
             .enumerate()
@@ -657,6 +711,7 @@ impl Topology<'_> {
                 }
             }
         }
+        Ok(())
     }
 
     fn product(
@@ -664,11 +719,13 @@ impl Topology<'_> {
         states: &[FileState],
         children: &[Option<usize>],
         attachments: &[Attachment],
-    ) -> (Vec<bool>, i32) {
-        let mut product = vec![false; self.modules.len()];
-        let mut stack = Vec::new();
+    ) -> Result<(Vec<bool>, i32), TryReserveError> {
+        let mut product = reserved(self.modules.len())?;
+        product.resize(self.modules.len(), false);
+        let mut stack = reserved(self.files.len())?;
         let mut orphans = 0;
-        let mut attached = vec![false; self.modules.len()];
+        let mut attached = reserved(self.modules.len())?;
+        attached.resize(self.modules.len(), false);
         for attachment in attachments {
             attached[attachment.child as usize] = true;
         }
@@ -708,7 +765,7 @@ impl Topology<'_> {
                 }
             }
         }
-        (product, orphans)
+        Ok((product, orphans))
     }
 }
 
@@ -799,16 +856,16 @@ impl<'facts> Crates<'_, 'facts> {
         package: &Package<'_>,
         mut spec: DepSpec<'facts>,
         workspace: Option<&Package<'facts>>,
-    ) -> Dependency {
+    ) -> Result<Dependency, TryReserveError> {
         let mut dep = Dependency {
-            key: crate_name(name),
+            key: crate_name(name)?,
             kind: DepKind::Gap,
             module: 0,
         };
         let mut dir = package.dir;
         if spec.workspace {
             let Some(workspace) = workspace else {
-                return dep;
+                return Ok(dep);
             };
             let start = workspace
                 .raw_deps
@@ -825,23 +882,23 @@ impl<'facts> Crates<'_, 'facts> {
                 }
             }
             if !found {
-                return dep;
+                return Ok(dep);
             }
             spec = inherited;
             dir = workspace.dir;
         }
         if spec.conflict {
-            return dep;
+            return Ok(dep);
         }
         let Some(path) = spec.path else {
             dep.kind = DepKind::External;
-            return dep;
+            return Ok(dep);
         };
         if path == b"?" {
-            return dep;
+            return Ok(dep);
         }
-        if let Some(target) =
-            join_path(dir, path).and_then(|dir| package_at(self.dirs, &dir))
+        if let Some(target) = join_path(dir, path)
+            .and_then(|dir| package_at(self.dirs, dir.as_slice()))
             && self.packages[target].has_package
             && self.lib_roots[target] >= 0
         {
@@ -850,17 +907,19 @@ impl<'facts> Crates<'_, 'facts> {
             if !spec.renamed
                 && let Some(name) = &self.lib_names[target]
             {
-                dep.key.clone_from(name);
+                dep.key.clear();
+                dep.key.try_reserve_exact(name.len())?;
+                dep.key.extend_from_slice(name);
             }
         }
-        dep
+        Ok(dep)
     }
 
     fn package_deps(
         &self,
         id: usize,
         workspace: Option<usize>,
-    ) -> Vec<Dependency> {
+    ) -> Result<Vec<Dependency>, TryReserveError> {
         let package = &self.packages[id];
         let mut deps = Vec::new();
         for group in package.raw_deps.chunk_by(|a, b| a.name == b.name) {
@@ -873,12 +932,13 @@ impl<'facts> Crates<'_, 'facts> {
             for record in own {
                 spec.add(*record);
             }
+            deps.try_reserve(1)?;
             deps.push(self.dependency(
                 group[0].name,
                 package,
                 spec,
                 workspace.map(|ws| &self.packages[ws]),
-            ));
+            )?);
         }
         deps.sort_unstable_by(|a, b| a.key.cmp(&b.key));
         deps.dedup_by(|next, first| {
@@ -891,7 +951,7 @@ impl<'facts> Crates<'_, 'facts> {
             }
             true
         });
-        deps
+        Ok(deps)
     }
 }
 
@@ -925,6 +985,8 @@ fn ids(first: i32, count: i32) -> std::ops::Range<usize> {
 }
 
 /// Build the Cargo graph before the native name lookup tables are populated.
+/// Return a negative value on allocation failure so the native host can omit
+/// the incomplete resolver index.
 ///
 /// # Safety
 /// The host supplies valid callbacks and fact IDs. Strings returned by its
@@ -938,92 +1000,142 @@ pub(crate) unsafe extern "C" fn mori_rust_doc_cargo_build(
     module_count: c_int,
     decl_count: c_int,
 ) -> c_int {
+    unsafe { build_cargo(host, ops, file_count, module_count, decl_count) }
+        .unwrap_or(NONE)
+}
+
+unsafe fn build_cargo(
+    host: *mut c_void,
+    ops: &CargoOps,
+    file_count: c_int,
+    module_count: c_int,
+    decl_count: c_int,
+) -> Result<c_int, TryReserveError> {
     let mut sources = HashMap::new();
     let mut packages = Vec::new();
     let mut dirs = HashMap::new();
-    let files = (0..file_count)
-        .map(|id| {
-            let view = unsafe { (ops.file)(host, id) };
-            let path =
-                unsafe { bytes(view.path) }.expect("repository file path");
-            // The last file row owns a duplicate repository path.
-            sources.remove(path);
-            match view.kind {
-                SOURCE => {
-                    sources.insert(path, id as usize);
-                    Some(Source {
-                        path,
-                        test_path: view.test_path,
-                        modules: ids(view.first_module, view.module_count),
-                        decls: ids(view.first_decl, view.decl_count),
-                    })
-                }
-                MANIFEST => {
-                    let package = read_manifest(
-                        path,
-                        unsafe { bytes(view.scope) }.expect("manifest scope"),
-                    );
-                    dirs.insert(
-                        if package.dir.is_empty() {
-                            b"."
-                        } else {
-                            package.dir
-                        },
-                        packages.len(),
-                    );
-                    packages.push(package);
-                    None
-                }
-                _ => None,
+    let mut files = reserved(file_count as usize)?;
+    for id in 0..file_count {
+        let view = unsafe { (ops.file)(host, id) };
+        let path = unsafe { bytes(view.path) }.expect("repository file path");
+        // The last file row owns a duplicate repository path.
+        sources.remove(path);
+        let source = match view.kind {
+            SOURCE => {
+                sources.try_reserve(1)?;
+                sources.insert(path, id as usize);
+                Some(Source {
+                    path,
+                    test_path: view.test_path,
+                    modules: ids(view.first_module, view.module_count),
+                    decls: ids(view.first_decl, view.decl_count),
+                })
             }
-        })
-        .collect();
-    let modules = (0..module_count)
-        .map(|id| {
-            let view = unsafe { (ops.module)(host, id) };
-            Module {
-                name: unsafe { bytes(view.name) },
-                file: view.file as usize,
-                parent: usize::try_from(view.parent).ok(),
-                path_attr: view.path_attr,
-                cfg_test: view.cfg_test,
+            MANIFEST => {
+                let package = read_manifest(
+                    path,
+                    unsafe { bytes(view.scope) }.expect("manifest scope"),
+                )?;
+                dirs.try_reserve(1)?;
+                packages.try_reserve(1)?;
+                dirs.insert(
+                    if package.dir.is_empty() {
+                        b"."
+                    } else {
+                        package.dir
+                    },
+                    packages.len(),
+                );
+                packages.push(package);
+                None
             }
-        })
-        .collect();
-    let decls = (0..decl_count)
-        .map(|id| {
-            let view = unsafe { (ops.decl)(host, id) };
-            Decl {
-                name: unsafe { bytes(view.name) }
-                    .expect("module declaration name"),
-                path: unsafe { bytes(view.path) },
-                module: view.module as usize,
-                cond_path: view.cond_path,
-                cfg_test: view.cfg_test,
-            }
-        })
-        .collect();
+            _ => None,
+        };
+        files.push(source);
+    }
+    let mut modules = reserved(module_count as usize)?;
+    modules.extend((0..module_count).map(|id| {
+        let view = unsafe { (ops.module)(host, id) };
+        Module {
+            name: unsafe { bytes(view.name) },
+            file: view.file as usize,
+            parent: usize::try_from(view.parent).ok(),
+            path_attr: view.path_attr,
+            cfg_test: view.cfg_test,
+        }
+    }));
+    let mut decls = reserved(decl_count as usize)?;
+    decls.extend((0..decl_count).map(|id| {
+        let view = unsafe { (ops.decl)(host, id) };
+        Decl {
+            name: unsafe { bytes(view.name) }.expect("module declaration name"),
+            path: unsafe { bytes(view.path) },
+            module: view.module as usize,
+            cond_path: view.cond_path,
+            cfg_test: view.cfg_test,
+        }
+    }));
     let topology = Topology {
         files,
         modules,
         decls,
         sources,
     };
-    let (mut states, lib_roots) = topology.crate_roots(&packages, &dirs);
-    let children = topology.attachments(&mut states);
-    let mut attachments: Vec<_> = children
-        .iter()
-        .enumerate()
-        .filter_map(|(decl, &file)| {
+    let (mut states, lib_roots) = topology.crate_roots(&packages, &dirs)?;
+    let children = topology.attachments(&mut states)?;
+    let mut attachments = reserved(children.iter().flatten().count())?;
+    attachments.extend(children.iter().enumerate().filter_map(
+        |(decl, &file)| {
             file.map(|file| Attachment {
                 child: topology.source(file).modules.start as i32,
                 decl: decl as i32,
             })
-        })
-        .collect();
+        },
+    ));
     attachments.sort_unstable_by_key(|a| (a.child, a.decl));
-    topology.file_reach(&mut states, &children, &lib_roots, &packages, &dirs);
-    let (product, orphans) = topology.product(&states, &children, &attachments);
+    topology.file_reach(&mut states, &children, &lib_roots, &packages, &dirs)?;
+    let (product, orphans) =
+        topology.product(&states, &children, &attachments)?;
+
+    let mut lib_names = reserved(packages.len())?;
+    for package in &packages {
+        let name = package
+            .lib_name
+            .or(package.name)
+            .filter(|&name| name != b"?")
+            .map(crate_name)
+            .transpose()?;
+        lib_names.push(name);
+    }
+    let crates = Crates {
+        packages: &packages,
+        dirs: &dirs,
+        lib_roots: &lib_roots,
+        lib_names: &lib_names,
+    };
+    let mut package_outputs = reserved(packages.len())?;
+    for (id, package) in packages.iter().enumerate() {
+        let workspace = (package.dir.len() < PATH_BUF)
+            .then(|| {
+                ancestors(package.dir)
+                    .filter_map(|dir| package_at(&dirs, dir))
+                    .find(|&id| packages[id].workspace)
+            })
+            .flatten();
+        let edition =
+            package_edition(package, workspace.map(|ws| &packages[ws]));
+        let deps = crates.package_deps(id, workspace)?;
+        package_outputs.push((edition, deps));
+    }
+    let max_deps = package_outputs
+        .iter()
+        .map(|(_, deps)| deps.len())
+        .max()
+        .unwrap_or(0);
+    let mut views = reserved(max_deps)?;
+
+    // All Rust allocations have succeeded. Native callbacks can now populate
+    // the index, with their own allocation errors recorded on the host.
     unsafe {
         (ops.set_attachments)(host, attachments.as_ptr(), attachments.len())
     };
@@ -1035,42 +1147,14 @@ pub(crate) unsafe extern "C" fn mori_rust_doc_cargo_build(
     for (module, is_product) in product.into_iter().enumerate() {
         unsafe { (ops.set_product)(host, module as i32, is_product) };
     }
-
-    let lib_names: Vec<_> = packages
-        .iter()
-        .map(|p| {
-            p.lib_name
-                .or(p.name)
-                .filter(|&name| name != b"?")
-                .map(crate_name)
-        })
-        .collect();
-    let crates = Crates {
-        packages: &packages,
-        dirs: &dirs,
-        lib_roots: &lib_roots,
-        lib_names: &lib_names,
-    };
-    for (id, package) in packages.iter().enumerate() {
-        let workspace = (package.dir.len() < PATH_BUF)
-            .then(|| {
-                ancestors(package.dir)
-                    .filter_map(|dir| package_at(&dirs, dir))
-                    .find(|&id| packages[id].workspace)
-            })
-            .flatten();
-        let edition =
-            package_edition(package, workspace.map(|ws| &packages[ws]));
-        let deps = crates.package_deps(id, workspace);
-        let views: Vec<_> = deps
-            .iter()
-            .map(|dep| DepView {
-                key: dep.key.as_ptr(),
-                key_len: dep.key.len(),
-                kind: dep.kind,
-                module: dep.module,
-            })
-            .collect();
+    for (id, (edition, deps)) in package_outputs.into_iter().enumerate() {
+        views.clear();
+        views.extend(deps.iter().map(|dep| DepView {
+            key: dep.key.as_ptr(),
+            key_len: dep.key.len(),
+            kind: dep.kind,
+            module: dep.module,
+        }));
         let (name, len) = lib_names[id]
             .as_ref()
             .map_or((ptr::null(), 0), |name| (name.as_ptr(), name.len()));
@@ -1079,7 +1163,7 @@ pub(crate) unsafe extern "C" fn mori_rust_doc_cargo_build(
                 host,
                 id as i32,
                 edition,
-                package.broken,
+                packages[id].broken,
                 lib_roots[id],
                 name,
                 len,
@@ -1088,5 +1172,5 @@ pub(crate) unsafe extern "C" fn mori_rust_doc_cargo_build(
             );
         }
     }
-    orphans
+    Ok(orphans)
 }

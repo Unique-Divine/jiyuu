@@ -1165,7 +1165,12 @@ static void rs_cargo_build(rs_index_t *ix, const cbm_doclink_build_in_t *in) {
         .set_package = rs_cargo_set_package,
     };
     rs_cargo_host_t host = {ix, in};
-    ix->orphans = mori_rust_doc_cargo_build(&host, &ops, ix->nfiles, ix->nmods, ix->ndecls);
+    int orphans = mori_rust_doc_cargo_build(&host, &ops, ix->nfiles, ix->nmods, ix->ndecls);
+    if (orphans < 0) {
+        ix->oom = true;
+        return;
+    }
+    ix->orphans = orphans;
 }
 
 static int rs_edition(const rs_index_t *ix, int pkg) {
