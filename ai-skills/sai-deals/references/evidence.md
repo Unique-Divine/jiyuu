@@ -50,4 +50,4 @@ display. Report unavailable checkpoints, stale indexing, or mismatched scope
 as a gap in corroboration. Use the chain receipt to check a specific
 executed transfer. For query details, use the
 [Keeper GraphQL reference](https://github.com/Unique-Divine/jiyuu/blob/main/ai-skills/sai/references/graphql.md)
-and the [reconciliation guide](https://github.com/Unique-Divine/jiyuu/blob/main/ai-skills/sai/references/reconciliation.md).
+and the [reconciliation guide](https://github.com/Unique-Divine/jiyuu/blob/main/ai-skills/sai/workflows/reconciliation.md).
