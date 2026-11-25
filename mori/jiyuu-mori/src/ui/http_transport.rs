@@ -398,7 +398,7 @@ impl Response {
         let mut cursor = io::Cursor::new(&mut head[..]);
         if (|| -> io::Result<()> {
             write!(cursor, "HTTP/1.1 {} {}\r\n", self.status, reason)?;
-            cursor.write_all(&self.headers)?;
+            io::Write::write_all(&mut cursor, &self.headers)?;
             write!(
                 cursor,
                 "Content-Length: {}\r\nConnection: close\r\n\r\n",
