@@ -1647,7 +1647,7 @@ fn coalesce_checks_the_first_return_argument_scope() {
 }
 
 #[test]
-fn two_hop_regex_warns_only_when_the_second_hop_matches() {
+fn two_hop_regex_warnings_follow_native_traversal() {
     let fixture = Fixture::new();
     let db = fixture.index(CLIENT);
     let start = node(&db, CLIENT, "StartProbe", "start", "start", "regex.py");
@@ -1668,17 +1668,25 @@ fn two_hop_regex_warns_only_when_the_second_hop_matches() {
 
     let missing = "MATCH (a:StartProbe)-[r:CALLS]->(b)-[:SERVES]->(c) WHERE b.name =~ r.regex RETURN c.name";
     let complete = "MATCH (a:StartProbe)-[r:CALLS]->(b)-[:HANDLES]->(c) WHERE b.name =~ r.regex RETURN c.name";
-    let pages =
-        fixture.compare_query_pages(&[(missing, 0, true), (complete, 0, true)]);
+    let inline = format!(
+        "MATCH (a:StartProbe)-[:CALLS]->(b)-[:HANDLES]->(c {{name:'{oversized}'}}) WHERE b.name = 'unmatched' RETURN c.name"
+    );
+    let pages = fixture.compare_query_pages(&[
+        (missing, 0, true),
+        (complete, 0, true),
+        (&inline, 0, true),
+    ]);
     assert_eq!(pages[0]["rows"], json!([]));
     assert!(pages[0]["warning"].is_null());
-    assert_eq!(pages[1]["rows"], json!([]));
-    assert!(
-        pages[1]["warning"]
-            .as_str()
-            .unwrap()
-            .contains("regex pattern too large to compile")
-    );
+    for page in &pages[1..] {
+        assert_eq!(page["rows"], json!([]));
+        assert!(
+            page["warning"]
+                .as_str()
+                .unwrap()
+                .contains("regex pattern too large to compile")
+        );
+    }
 }
 
 #[test]
