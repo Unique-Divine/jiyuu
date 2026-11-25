@@ -34,7 +34,7 @@ native-engine-abi = [
 ]
 graphql-callbacks = ["dep:rusqlite"]
 native-graphql-fixtures = ["native-engine-abi"]
-native-engine-fixtures = ["native-graphql-fixtures"]
+native-engine-test-seams = ["native-graphql-fixtures"]
 
 [dependencies]
 libc = { version = "0.2", optional = true }
