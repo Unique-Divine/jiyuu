@@ -23,6 +23,8 @@ mod kubernetes;
 #[cfg(feature = "native-engine-abi")]
 mod native_graph_buffer;
 #[cfg(feature = "native-engine-abi")]
+mod native_hash_table;
+#[cfg(feature = "native-engine-abi")]
 mod pdf_doc_links;
 #[cfg(feature = "native-engine-abi")]
 mod rust_doc_cargo;
