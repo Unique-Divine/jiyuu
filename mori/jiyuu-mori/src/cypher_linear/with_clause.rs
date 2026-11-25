@@ -941,6 +941,14 @@ mod tests {
                 "variable 'f' is not in scope for RETURN — the WITH clause did not carry it through",
             ),
             (
+                "MATCH (n:Function) WITH n.name RETURN coalesce(n.name, '') AS value",
+                "variable 'n' is not in scope for RETURN — the WITH clause did not carry it through",
+            ),
+            (
+                "MATCH (n:Function) WITH coalesce(missing.name, n.name) AS value RETURN value",
+                "variable 'missing' is not in scope for WITH — no pattern in this query names it",
+            ),
+            (
                 "MATCH (f) WITH missing.name AS title RETURN title",
                 "variable 'missing' is not in scope for WITH — no pattern in this query names it",
             ),
@@ -952,6 +960,9 @@ mod tests {
             let error = classify(query).unwrap_err();
             assert_eq!(error.diagnostic().as_deref(), Some(expected));
         }
+        assert!(classify(
+            "MATCH (n:Function) WITH n.name AS name RETURN coalesce(name, n.name) AS value",
+        ).is_ok());
         let error = classify(
             "MATCH (n) WHERE n.file_path STARTS WITH 'src/' WITH split(n.file_path, '/')[2] AS dir, labels(n)[0] AS label RETURN dir, label, count(*) AS c ORDER BY c DESC LIMIT 20"
         ).unwrap_err();
