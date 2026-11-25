@@ -688,31 +688,23 @@ RETURN rt.name, h.name, h.file_path, x.callers LIMIT 100"#;
     drop(provider);
     fixture.relink(CLIENT, &[PROVIDER], 2);
 
-    let args = json!({"project": PROVIDER, "query": QUERY, "format": "json"})
-        .to_string();
-    let query = |bin: &Path| {
-        let output = fixture
-            .command(bin)
-            .args(["cli", "--quiet", "query_graph", &args])
-            .output()
-            .expect("query the provider graph");
-        fixture.stop_query_daemon(bin);
-        assert!(output.status.success(), "{output:?}");
-        output
+    let bin = Path::new(MORI);
+    let mcp_page = |query: &str| {
+        let before = fixture.rust_query_count();
+        let text = fixture.mcp_query_text(
+            bin,
+            json!({"project": PROVIDER, "query": query, "format": "json"}),
+        );
+        assert_eq!(fixture.rust_query_count() - before, 1, "{query}");
+        serde_json::from_str::<Value>(&text).expect("parse MCP query result")
     };
-    fixture.start_query_daemon(Path::new(MORI), None);
-    let before = fixture.rust_query_count();
-    let linked = query(Path::new(MORI));
-    assert_eq!(fixture.rust_query_count() - before, 1);
-    if let Some(reference_bin) = support::c_reference_bin() {
-        let reference = query(&reference_bin);
-        assert_eq!(linked.stdout, reference.stdout);
-        assert_eq!(linked.stderr, reference.stderr);
+    fixture.start_query_daemon(bin, None);
+    let result = mcp_page(QUERY);
+    fixture.stop_query_daemon(bin);
+    if support::c_reference_bin().is_some() {
+        assert_eq!(result, fixture.query_reference(PROVIDER, QUERY));
     }
 
-    let result: Value =
-        serde_json::from_slice(&linked.stdout).expect("parse query result");
-    fixture.compare_rust_query(PROVIDER, QUERY, &result);
     assert_eq!(
         result["columns"],
         json!(["rt.name", "h.name", "h.file_path", "x.callers"])
@@ -752,11 +744,25 @@ RETURN rt.name, h.name, h.file_path, x.callers LIMIT 100"#;
         1,
     );
     drop(db);
-    let reference = fixture.query_reference(PROVIDER, QUERY);
-    let caller_cell = reference["rows"][0][3].as_str().unwrap();
+    fixture.start_query_daemon(bin, None);
+    let clipped = mcp_page(QUERY);
+    let caller_cell = clipped["rows"][0][3].as_str().unwrap();
     assert_eq!(caller_cell.len(), 511);
     assert!(serde_json::from_str::<Value>(caller_cell).is_err());
-    fixture.compare_rust_query(PROVIDER, QUERY, &reference);
+
+    let union_query = format!("{QUERY} UNION ALL {QUERY}");
+    let union = mcp_page(&union_query);
+    assert_eq!(union["columns"], clipped["columns"]);
+    assert_eq!(union["total"], 2);
+    assert_eq!(
+        union["rows"],
+        json!([clipped["rows"][0], clipped["rows"][0]])
+    );
+    fixture.stop_query_daemon(bin);
+    if support::c_reference_bin().is_some() {
+        assert_eq!(clipped, fixture.query_reference(PROVIDER, QUERY));
+        assert_eq!(union, fixture.query_reference(PROVIDER, &union_query));
+    }
 }
 
 #[test]
@@ -835,12 +841,15 @@ fn linear_cypher_stops_inside_high_fanout_adjacency() {
     assert_eq!(checks.get(), 3);
 
     let checks = Cell::new(0);
-    let cancelled = || {
+    let request_status = || {
         checks.set(checks.get() + 1);
-        checks.get() == 2
+        if checks.get() == 2 {
+            Err(ExecutionError::Cancelled)
+        } else {
+            Ok(())
+        }
     };
-    let now = || start;
-    let mut budget = ExecutionBudget::new(&now, &cancelled);
+    let mut budget = ExecutionBudget::shared(&request_status);
     assert!(matches!(
         query.execute_with_budget(&db, CLIENT, &mut budget),
         Err(ExecutionError::Cancelled)
@@ -891,11 +900,13 @@ fn linear_cypher_filters_each_bound_node_before_expanding_it() {
             "answer",
         ),
     ] {
+        // Budget creation, execution entry, scan completion, and row finalization.
+        const FIXED_CHECKS: usize = 4;
         let started = Instant::now();
         let checks = Cell::new(0);
         let clock = || {
             checks.set(checks.get() + 1);
-            if checks.get() <= 3 {
+            if checks.get() <= FIXED_CHECKS {
                 started
             } else {
                 started + Duration::from_secs(30)
@@ -909,7 +920,11 @@ fn linear_cypher_filters_each_bound_node_before_expanding_it() {
             .unwrap_or_else(|error| panic!("{cypher}: {error:?}"));
         let rows = utf8_rows(&answer);
         assert_eq!(rows, [[expected]], "{cypher}");
-        assert_eq!(checks.get(), 3, "expanded rejected adjacency: {cypher}");
+        assert_eq!(
+            checks.get(),
+            FIXED_CHECKS,
+            "expanded rejected adjacency: {cypher}"
+        );
         assert_eq!(
             fixture.query_reference(CLIENT, cypher)["rows"],
             json!(rows),
@@ -1674,7 +1689,7 @@ fn bounded_count_projects_native_groups_and_empty_results_in_rust() {
             json!([[format!("@bytes:{}c3", "61".repeat(510)), "2"]]),
         ),
         (
-            (compound, 0, false),
+            (compound, 0, true),
             json!([["CountProbe", "group.py", "5"]]),
         ),
     ];
@@ -2374,6 +2389,26 @@ fn optional_and_bounded_paths_match_native_query_pages() {
                 true,
             ),
             (
+                "MATCH (a:PathProbe) OPTIONAL MATCH (a)-[:CALLS]->(b) WHERE substring(b.name, 0) = 'b' RETURN a.name ORDER BY a.name",
+                0,
+                true,
+            ),
+            (
+                "MATCH (a:PathProbe) WITH a.name, a AS item WHERE coalesce(a.name, '') = 'b' RETURN item.name",
+                0,
+                true,
+            ),
+            (
+                "MATCH (a:PathProbe) OPTIONAL MATCH (a)-[r:CALLS]->(b) RETURN *",
+                0,
+                false,
+            ),
+            (
+                "MATCH (a)-[r:CALLS]->(b:PathProbe) WHERE b.name = 'b' RETURN *",
+                0,
+                false,
+            ),
+            (
                 "MATCH (a:PathProbe {name: 'a'})-[:CALLS*1..3]->(b) RETURN b.name",
                 0,
                 true,
@@ -2382,9 +2417,12 @@ fn optional_and_bounded_paths_match_native_query_pages() {
         &[("CBM_CYPHER_MAX_DEPTH", "1")],
     );
     assert_eq!(pages[0]["rows"], json!([["c", "", ""]]));
-    assert_eq!(pages[1]["rows"], json!([["b"]]));
+    assert_eq!(pages[1]["rows"], json!([["a"]]));
+    assert_eq!(pages[1]["total"], 1);
+    assert_eq!(pages[2]["rows"], json!([["b"]]));
+    assert_eq!(pages[5]["rows"], json!([["b"]]));
     assert!(
-        pages[1]["warning"]
+        pages[5]["warning"]
             .as_str()
             .unwrap()
             .contains("engine ceiling (1)")

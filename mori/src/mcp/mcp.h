@@ -309,9 +309,10 @@ enum {
     CBM_MCP_CYPHER_ERROR,
 };
 
+/* budget_status reports OK, DEADLINE, or CANCELLED for the active request. */
 typedef int (*cbm_mcp_cypher_evaluator_fn)(struct sqlite3 *db, const char *query,
-                                           const char *project, bool (*cancelled)(void *),
-                                           void *cancel_context, const cbm_mcp_cypher_sink_t *sink);
+                                           const char *project, int (*budget_status)(void *),
+                                           void *budget_context, const cbm_mcp_cypher_sink_t *sink);
 void cbm_mcp_set_cypher_evaluator(cbm_mcp_cypher_evaluator_fn evaluate);
 
 typedef struct {

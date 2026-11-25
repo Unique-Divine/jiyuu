@@ -6635,12 +6635,25 @@ static bool cypher_request_cancelled(void *context) {
     return mcp_request_cancelled(context);
 }
 
+/* Map the shared native budget to status codes understood by the Rust adapter. */
+static int cypher_request_budget_status(void *context) {
+    switch (cbm_cypher_budget_status(context)) {
+    case CBM_CYPHER_BUDGET_DEADLINE:
+        return CBM_MCP_CYPHER_DEADLINE;
+    case CBM_CYPHER_BUDGET_CANCELLED:
+        return CBM_MCP_CYPHER_CANCELLED;
+    default:
+        return CBM_MCP_CYPHER_OK;
+    }
+}
+
 /* The Rust evaluator receives the same read-batched connection from which
  * the query handler obtained the generation. The C handler owns pagination
  * and rendering for both evaluators. Linked builds try Rust by default;
  * MORI_IMPL_QUERY=c keeps the native path available for comparisons. */
 static int evaluate_mcp_cypher(cbm_mcp_server_t *srv, cbm_store_t *store, const char *query,
                                const char *project, cbm_cypher_result_t *result) {
+    cbm_cypher_budget_t budget = cbm_cypher_budget_start(cypher_request_cancelled, srv);
     const char *backend = cbm_runtime_getenv("MORI_IMPL_QUERY");
     if (rust_cypher_evaluator && project && (!backend || strcmp(backend, "c") != 0)) {
         const cbm_mcp_cypher_sink_t sink = {
@@ -6650,7 +6663,7 @@ static int evaluate_mcp_cypher(cbm_mcp_server_t *srv, cbm_store_t *store, const 
             .storage_error = cypher_sink_storage_error,
         };
         int status = rust_cypher_evaluator(cbm_store_get_db(store), query, project,
-                                           cypher_request_cancelled, srv, &sink);
+                                           cypher_request_budget_status, &budget, &sink);
         if (status != CBM_MCP_CYPHER_UNSUPPORTED) {
             cbm_log_debug("query_graph.evaluator", "backend", "rust");
             switch (status) {
@@ -6660,7 +6673,7 @@ static int evaluate_mcp_cypher(cbm_mcp_server_t *srv, cbm_store_t *store, const 
                 result->error = heap_strdup(CBM_CYPHER_DEADLINE_ERROR);
                 break;
             case CBM_MCP_CYPHER_CANCELLED:
-                result->error = heap_strdup("query_graph cancelled for this request");
+                result->error = heap_strdup(CBM_CYPHER_CANCELLED_ERROR);
                 break;
             case CBM_MCP_CYPHER_ROW_CEILING:
                 result->truncated = true;
@@ -6670,7 +6683,7 @@ static int evaluate_mcp_cypher(cbm_mcp_server_t *srv, cbm_store_t *store, const 
             return CBM_NOT_FOUND;
         }
     }
-    return cbm_cypher_execute(store, query, project, 0, result);
+    return cbm_cypher_execute_with_budget(store, query, project, 0, result, &budget);
 }
 
 static char *handle_query_graph(cbm_mcp_server_t *srv, const char *args) {

@@ -319,8 +319,11 @@ impl<'a> Parser<'a> {
     }
 
     pub(super) fn coalesce(&mut self) -> Result<Coalesce<'a>, Unsupported> {
-        self.scalar_arguments(|parser, name, _| parser.field(name))
-            .map(Coalesce)
+        self.scalar_arguments(|parser, name, _| {
+            let field = parser.field(name)?;
+            Ok(parser.resolve_projected_field(field))
+        })
+        .map(Coalesce)
     }
 
     pub(super) fn substring(
@@ -328,7 +331,7 @@ impl<'a> Parser<'a> {
         projection: bool,
     ) -> Result<Substring<'a>, Unsupported> {
         self.scalar_arguments(|parser, name, first| {
-            let mut field = if projection {
+            let field = if projection {
                 // Native scope validation checks only the first argument.
                 let binding = if first {
                     parser.projection_binding(name)
@@ -345,19 +348,24 @@ impl<'a> Parser<'a> {
             } else {
                 parser.field(name)?
             };
-            // The native scalar reader tries the full virtual name first,
-            // including an unaliased WITH field such as n.pos.
-            if let Some(prop) = field.property
-                && !parser.projected_fields.is_empty()
-                && let Some(&index) =
-                    parser.projected_fields.get(&format!("{name}.{prop}"))
-            {
-                field.binding = Binding::Node(index);
-                field.property = None;
-            }
-            Ok(field)
+            Ok(parser.resolve_projected_field(field))
         })
         .map(Substring)
+    }
+
+    fn resolve_projected_field(&self, mut field: Field<'a>) -> Field<'a> {
+        // The native scalar reader tries the full virtual name first,
+        // including an unaliased WITH field such as n.pos.
+        let name = field.name;
+        if let Some(prop) = field.property
+            && !self.projected_fields.is_empty()
+            && let Some(&index) =
+                self.projected_fields.get(&format!("{name}.{prop}"))
+        {
+            field.binding = Binding::Node(index);
+            field.property = None;
+        }
+        field
     }
 
     fn scalar_arguments(
@@ -544,7 +552,7 @@ impl Condition<'_> {
             // Native applies NOT to the leaf result, so an outer NOT reverses it.
             return Some(true);
         }
-        let read_argument = |binding, property: Option<&str>| {
+        let bound_argument = |binding, property: Option<&str>| {
             if let Binding::Edge(index) = binding
                 && property.is_none()
             {
@@ -559,15 +567,16 @@ impl Condition<'_> {
             }
             .value(bindings, context)
         };
+        let read_argument = |binding, property: Option<&str>| {
+            bound_argument(binding, property)
+                .or(bindings.complete_path.then_some(Cow::Borrowed(b"")))
+        };
         let actual = match &self.lhs {
             Subject::Field(field) => match field.value(bindings, context) {
                 Some(value) => value,
                 None => return bindings.complete_path.then_some(true),
             },
-            Subject::Coalesce(call) => call.value(|binding, property| {
-                read_argument(binding, property)
-                    .or(bindings.complete_path.then_some(Cow::Borrowed(b"")))
-            })?,
+            Subject::Coalesce(call) => call.value(read_argument)?,
             Subject::Substring(call) => Cow::Owned(call.value(read_argument)?),
         };
         Some(match &self.test {
