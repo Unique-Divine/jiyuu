@@ -25,7 +25,7 @@ CLI also prints its packaged copy with `sai --skill`.
 | `references/sai-graphql.md` | [`references/graphql.md`](../sai/references/graphql.md) |
 | `references/sai-rest.md` | [`references/rest.md`](../sai/references/rest.md) |
 | `references/sai-referrals.md` | [`references/referrals.md`](../sai/references/referrals.md) |
-| `references/sai-reconciliation.md` | [`references/reconciliation.md`](../sai/references/reconciliation.md) |
+| `references/sai-reconciliation.md` | [`workflows/reconciliation.md`](../sai/workflows/reconciliation.md) |
 | `examples/sai-perps-prompts.md` | [`examples/prompts.md`](../sai/examples/prompts.md) |
 
 The links above work when both skills sit in the same directory. Otherwise

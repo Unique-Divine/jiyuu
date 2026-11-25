@@ -11,7 +11,8 @@ written down: what to call things in one part of a project, and what not to
 call them. This is the "ubiquitous language" of domain-driven design.
 
 Read [format.md](references/format.md) before creating or editing a
-`LEXICON.md`.
+`LEXICON.md`. To link terms to source symbols, follow
+[Graph Links](workflows/graph.md).
 
 ## Which Lexicons Apply
 
