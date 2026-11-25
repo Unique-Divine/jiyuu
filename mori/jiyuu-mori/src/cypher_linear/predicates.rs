@@ -251,7 +251,7 @@ impl<'a> Parser<'a> {
         let name = self.name()?;
         let lhs = if self.consume(b'(') {
             if name.eq_ignore_ascii_case("coalesce") {
-                Subject::Coalesce(self.coalesce()?)
+                Subject::Coalesce(self.coalesce(false)?)
             } else if name.eq_ignore_ascii_case("substring") {
                 Subject::Substring(self.substring(false)?)
             } else if ["replace", "left", "right"]
@@ -318,10 +318,12 @@ impl<'a> Parser<'a> {
         })
     }
 
-    pub(super) fn coalesce(&mut self) -> Result<Coalesce<'a>, Unsupported> {
-        self.scalar_arguments(|parser, name, _| {
-            let field = parser.field(name)?;
-            Ok(parser.resolve_projected_field(field))
+    pub(super) fn coalesce(
+        &mut self,
+        projection: bool,
+    ) -> Result<Coalesce<'a>, Unsupported> {
+        self.scalar_arguments(|parser, name, first| {
+            parser.scalar_field(name, projection, first)
         })
         .map(Coalesce)
     }
@@ -331,26 +333,36 @@ impl<'a> Parser<'a> {
         projection: bool,
     ) -> Result<Substring<'a>, Unsupported> {
         self.scalar_arguments(|parser, name, first| {
-            let field = if projection {
-                // Native scope validation checks only the first argument.
-                let binding = if first {
-                    parser.projection_binding(name)
-                } else {
-                    parser.binding(name).unwrap_or(Binding::Unbound)
-                };
-                let property =
-                    parser.consume(b'.').then(|| parser.name()).transpose()?;
-                Field {
-                    name,
-                    binding,
-                    property,
-                }
-            } else {
-                parser.field(name)?
-            };
-            Ok(parser.resolve_projected_field(field))
+            parser.scalar_field(name, projection, first)
         })
         .map(Substring)
+    }
+
+    fn scalar_field(
+        &mut self,
+        name: &'a str,
+        projection: bool,
+        first: bool,
+    ) -> Result<Field<'a>, Unsupported> {
+        let field = if projection {
+            // Scope checking uses the written variable in the first argument,
+            // even when the dotted virtual field itself remains readable.
+            let binding = if first {
+                self.projection_binding(name)
+            } else {
+                self.binding(name).unwrap_or(Binding::Unbound)
+            };
+            let property =
+                self.consume(b'.').then(|| self.name()).transpose()?;
+            Field {
+                name,
+                binding,
+                property,
+            }
+        } else {
+            self.field(name)?
+        };
+        Ok(self.resolve_projected_field(field))
     }
 
     fn resolve_projected_field(&self, mut field: Field<'a>) -> Field<'a> {

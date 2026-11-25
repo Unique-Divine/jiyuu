@@ -1620,6 +1620,68 @@ fn cypher_expressions_match_the_native_query_pages() {
 }
 
 #[test]
+fn coalesce_checks_the_first_return_argument_scope() {
+    let fixture = Fixture::new();
+    drop(fixture.index(CLIENT));
+    let missing =
+        "MATCH (n:Function) WITH n.name RETURN coalesce(n.name, '') AS value";
+    let bin = Path::new(MORI);
+    fixture.start_query_daemon(bin, None);
+    let before = fixture.rust_query_count();
+    let candidate = fixture.query_output(bin, CLIENT, missing);
+    assert_eq!(fixture.rust_query_count() - before, 1);
+
+    let reference = Fixture::query_mode_comparison_binary();
+    fixture.start_query_daemon(&reference, Some("c"));
+    let reference = fixture.query_output(&reference, CLIENT, missing);
+    assert_eq!(candidate.status.code(), Some(1));
+    assert_eq!(candidate.status, reference.status);
+    assert_eq!(candidate.stderr, reference.stderr);
+    assert!(String::from_utf8_lossy(&candidate.stderr).contains(
+        "variable 'n' is not in scope for RETURN — the WITH clause did not carry it through",
+    ));
+
+    let valid = "MATCH (n:Function) WITH n.name AS name RETURN coalesce(name, n.name) AS value";
+    let pages = fixture.compare_query_pages(&[(valid, 0, true)]);
+    assert_eq!(pages[0]["rows"], json!([["placeholder"]]));
+}
+
+#[test]
+fn two_hop_regex_warns_only_when_the_second_hop_matches() {
+    let fixture = Fixture::new();
+    let db = fixture.index(CLIENT);
+    let start = node(&db, CLIENT, "StartProbe", "start", "start", "regex.py");
+    let middle =
+        node(&db, CLIENT, "MiddleProbe", "middle", "middle", "regex.py");
+    let end = node(&db, CLIENT, "EndProbe", "end", "end", "regex.py");
+    let oversized = "((((a){20}){20}){20}){20}";
+    edge(
+        &db,
+        CLIENT,
+        start,
+        middle,
+        "CALLS",
+        json!({"regex": oversized}),
+    );
+    edge(&db, CLIENT, middle, end, "HANDLES", json!({}));
+    drop(db);
+
+    let missing = "MATCH (a:StartProbe)-[r:CALLS]->(b)-[:SERVES]->(c) WHERE b.name =~ r.regex RETURN c.name";
+    let complete = "MATCH (a:StartProbe)-[r:CALLS]->(b)-[:HANDLES]->(c) WHERE b.name =~ r.regex RETURN c.name";
+    let pages =
+        fixture.compare_query_pages(&[(missing, 0, true), (complete, 0, true)]);
+    assert_eq!(pages[0]["rows"], json!([]));
+    assert!(pages[0]["warning"].is_null());
+    assert_eq!(pages[1]["rows"], json!([]));
+    assert!(
+        pages[1]["warning"]
+            .as_str()
+            .unwrap()
+            .contains("regex pattern too large to compile")
+    );
+}
+
+#[test]
 fn bounded_count_projects_native_groups_and_empty_results_in_rust() {
     let fixture = Fixture::new();
     let db = fixture.index(CLIENT);
