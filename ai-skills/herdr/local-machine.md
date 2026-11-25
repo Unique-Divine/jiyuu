@@ -34,8 +34,8 @@ a Herdr-managed pane, as described in `SKILL.md`.
   `$DOTFILES/herdr/src/config/model.rs`
 - Commented default-config template:
   `$DOTFILES/herdr/src/main.rs`
-- API protocol schema: `herdr api schema --json`. The dotfiles fork stores a
-  copy at `$DOTFILES/herdr/docs/api/herdr-api.schema.json`.
+- API protocol schema: `herdr api schema --json`. Run it with the client
+  whose API you want to inspect.
 
 For key bindings and defaults, read the managed config, then compare it
 with the installed client's help and default config.
@@ -100,13 +100,19 @@ The dotfiles fork builds from the upstream release recorded in
 `herdr build-info --json` for the fork source, source commit, upstream
 baseline, and fork update command. Use `herdr status` to check the running
 server separately. Updating the client executable leaves an existing
-session on its running server.
+session on its running server. On a binary that predates `build-info`,
+record `herdr --version` and verify the executable against the published
+fork archive for that version. On Windows, hash the installed executable
+and the executable extracted from the verified archive with
+`Get-FileHash -Algorithm SHA256`. If provenance is unknown, use the
+version and protocol for compatibility checks.
 
 On Linux, install through the dotfiles recipe `just herdr-install` or
 `just herdr-install --ver VERSION` for a published fork build. The native
 Windows install uses the fork's Windows ZIP. Keep its ConPTY files with the
 executable, and verify the downloaded archive with the fork's published
-checksums. The upstream `herdr update` and `herdr channel set` commands use
+checksums. Fork provenance reports a null `update_command` on Windows.
+The upstream `herdr update` and `herdr channel set` commands use
 upstream downloads. See [Herdr fork releases](https://github.com/Unique-Divine/dotfiles/blob/main/herdr-release/README.md).
 
 ## Tab Controls
