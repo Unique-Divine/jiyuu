@@ -34,12 +34,11 @@ a Herdr-managed pane, as described in `SKILL.md`.
   `$DOTFILES/herdr/src/config/model.rs`
 - Commented default-config template:
   `$DOTFILES/herdr/src/main.rs`
-- Unreleased English documentation:
-  `$DOTFILES/herdr/docs/next/website/src/content/docs`
+- API protocol schema: `herdr api schema --json`. The dotfiles fork stores a
+  copy at `$DOTFILES/herdr/docs/api/herdr-api.schema.json`.
 
-For guided config documentation, begin with file `configuration.mdx`. For the
-generated key catalog, use file `config-reference.mdx` together with the config
-model and command `herdr --default-config`.
+For key bindings and defaults, read the managed config, then compare it
+with the installed client's help and default config.
 
 ## Configuration changes
 
@@ -96,11 +95,34 @@ bun test herdr-cfg/flatten.test.ts
 
 ## Installed fork and Codex
 
-The vendored v0.9.3 fork keeps zero-based tab shortcuts and labels. Build it
-with command `just herdr-install` from directory `$DOTFILES`. Command
-`herdr update` replaces the custom binary with an upstream release. Check
-command `herdr status server` separately from command `herdr --version`, since
-installing a binary does not replace a running server.
+The dotfiles fork builds from the upstream release recorded in
+`$DOTFILES/herdr/UPSTREAM.md`. On builds that support it, run
+`herdr build-info --json` for the fork source, source commit, upstream
+baseline, and fork update command. Use `herdr status` to check the running
+server separately. Updating the client executable leaves an existing
+session on its running server.
+
+On Linux, install through the dotfiles recipe `just herdr-install` or
+`just herdr-install --ver VERSION` for a published fork build. The native
+Windows install uses the fork's Windows ZIP. Keep its ConPTY files with the
+executable, and verify the downloaded archive with the fork's published
+checksums. The upstream `herdr update` and `herdr channel set` commands use
+upstream downloads. See [Herdr fork releases](https://github.com/Unique-Divine/dotfiles/blob/main/herdr-release/README.md).
+
+## Tab Controls
+
+- Press `Ctrl+b`, then uppercase `T`, to rename the active tab. From a shell,
+  use `herdr tab rename` with its stable tab ID.
+- When the managed `herdr-tmux` plugin's tab editor is installed and bound,
+  press `Ctrl+b`, then lowercase `t`, to open the workspace's tab order in
+  Neovim. Move entries with `J` and `K`. Use `:w` to apply the order or
+  `:wq` to apply it and close the editor.
+- For automation, use the `tab.move` API with a stable tab ID and a zero-based
+  destination index. Use `herdr pane move` to move a pane between tabs.
+- The fork's `goto_agents` binding opens the agent navigator. Read its binding
+  from the active config.
+
+## Codex Display and Session Hooks
 
 The managed Codex defaults set configuration key `tui.alternate_screen` to
 `"never"`. Codex reads this setting when its process starts and renders inline
