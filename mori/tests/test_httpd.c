@@ -3253,12 +3253,15 @@ typedef struct {
     int send_deadline_ms;
 } th_httpd_large_reply_t;
 
+/* Keep the fixture above the repository-map response size threshold. */
+enum { TH_HTTPD_LARGE_REPLY_SIZE = 12U * 1024U * 1024U };
+
 static void th_httpd_dispatch_large_reply(void *context, const cbm_http_req_t *request,
                                           cbm_ui_http_reply_fn send, void *reply_context) {
     (void)request;
     th_httpd_large_reply_t *reply = context;
     atomic_store(&reply->accepted, 1);
-    size_t response_size = 8U * 1024U * 1024U;
+    size_t response_size = TH_HTTPD_LARGE_REPLY_SIZE;
     char *response = malloc(response_size);
     if (response) {
         memset(response, 'R', response_size);
@@ -3294,7 +3297,7 @@ TEST(httpd_interrupt_unblocks_nonreading_large_response_within_one_second) {
     mori_ui_http_transport_t *listener = mori_ui_http_bind(0);
     ASSERT_NOT_NULL(listener);
     /* Deadline pinned far out of reach: the only remaining way the blocked
-     * 8 MB send can end is the interrupt, so the join itself proves
+     * large send can end is the interrupt, so the join itself proves
      * interrupt causality — no wall-clock discrimination needed (the old
      * elapsed<500ms check was a lottery under sanitizer slowdown). */
     mori_ui_http_set_send_options_for_test(listener, 64 * 1024, 60 * 1000);
@@ -3351,7 +3354,7 @@ TEST(httpd_large_response_opt_in_survives_a_busy_reader_without_changing_default
     /* Deterministic backpressure spans the ordinary test deadline. The new
      * per-response opt-in must preserve the complete promised Content-Length. */
     cbm_usleep(300 * 1000);
-    size_t size = 8U * 1024U * 1024U;
+    size_t size = TH_HTTPD_LARGE_REPLY_SIZE;
     char *response = malloc(size + 1024);
     ASSERT_NOT_NULL(response);
     int got = th_recv_until_close(socket, response, size + 1024);

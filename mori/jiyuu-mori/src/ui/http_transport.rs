@@ -4,8 +4,10 @@
 #[path = "http_request.rs"]
 mod http_request;
 
+use std::borrow::Cow;
+use std::collections::TryReserveError;
 use std::ffi::{CStr, c_char, c_int, c_void};
-use std::io;
+use std::io::{self, Write as _};
 use std::net::{Ipv4Addr, Shutdown, SocketAddrV4};
 use std::ptr;
 use std::sync::Mutex;
@@ -26,6 +28,7 @@ const RESPONDING: c_int = 2;
 const RECEIVE_MS: c_int = 5000;
 const SEND_MS: c_int = 1000;
 const SEND_SLICE: usize = 64 * 1024;
+const MAX_REPLY_HEAD: usize = 1024;
 
 type Reply = unsafe extern "C" fn(
     *mut c_void,
@@ -345,7 +348,7 @@ async fn read_request<'a>(
 struct Response {
     status: c_int,
     headers: Vec<u8>,
-    body: Vec<u8>,
+    body: Cow<'static, [u8]>,
     write_timeout: Option<Duration>,
 }
 
@@ -354,7 +357,16 @@ impl Response {
         Self {
             status,
             headers: Vec::new(),
-            body: b"bad request".to_vec(),
+            body: Cow::Borrowed(b"bad request"),
+            write_timeout: None,
+        }
+    }
+
+    fn allocation_failure() -> Self {
+        Self {
+            status: 500,
+            headers: Vec::new(),
+            body: Cow::Borrowed(b"internal server error"),
             write_timeout: None,
         }
     }
@@ -380,18 +392,26 @@ impl Response {
             503 => "Service Unavailable",
             _ => "",
         };
-        let first = format!("HTTP/1.1 {} {}\r\n", self.status, reason);
-        let last = format!(
-            "Content-Length: {}\r\nConnection: close\r\n\r\n",
-            self.body.len()
-        );
-        if first.len() + self.headers.len() + last.len() >= 1024 {
+        // The fixed buffer also keeps response framing available after a
+        // reply allocation fails.
+        let mut head = [0; MAX_REPLY_HEAD];
+        let mut cursor = io::Cursor::new(&mut head[..]);
+        if (|| -> io::Result<()> {
+            write!(cursor, "HTTP/1.1 {} {}\r\n", self.status, reason)?;
+            cursor.write_all(&self.headers)?;
+            write!(
+                cursor,
+                "Content-Length: {}\r\nConnection: close\r\n\r\n",
+                self.body.len()
+            )
+        })()
+        .is_err()
+            || cursor.position() >= MAX_REPLY_HEAD as u64
+        {
             return Ok(());
         }
-        let mut head = first.into_bytes();
-        head.extend_from_slice(&self.headers);
-        head.extend_from_slice(last.as_bytes());
-        stream.write_all(&head).await?;
+        let head_len = cursor.position() as usize;
+        stream.write_all(&head[..head_len]).await?;
         // Bound each write so Winsock cannot queue the full body into AFD
         // buffers before the send deadline or stop signal can be observed.
         for chunk in self.body.chunks(SEND_SLICE) {
@@ -399,6 +419,13 @@ impl Response {
         }
         Ok(())
     }
+}
+
+fn copy_reply_bytes(bytes: &[u8]) -> Result<Vec<u8>, TryReserveError> {
+    let mut copy = Vec::new();
+    copy.try_reserve_exact(bytes.len())?;
+    copy.extend_from_slice(bytes);
+    Ok(copy)
 }
 
 unsafe extern "C" fn capture_reply(
@@ -413,25 +440,31 @@ unsafe extern "C" fn capture_reply(
     // The host keeps the C string and non-empty body live until we return.
     let response = unsafe { &mut *context.cast::<Option<Response>>() };
     let headers = if headers.is_null() {
-        Vec::new()
+        &[]
     } else {
-        unsafe { CStr::from_ptr(headers) }.to_bytes().to_vec()
+        unsafe { CStr::from_ptr(headers) }.to_bytes()
     };
     let body = if body_len == 0 {
-        Vec::new()
+        &[]
     } else {
         unsafe { std::slice::from_raw_parts(body.cast::<u8>(), body_len) }
-            .to_vec()
     };
     let write_timeout = (1..=5000)
         .contains(&send_deadline_ms)
         .then(|| millis(send_deadline_ms));
-    *response = Some(Response {
-        status,
-        headers,
-        body,
-        write_timeout,
-    });
+    *response = Some(
+        match copy_reply_bytes(headers).and_then(|headers| {
+            copy_reply_bytes(body).map(|body| (headers, body))
+        }) {
+            Ok((headers, body)) => Response {
+                status,
+                headers,
+                body: Cow::Owned(body),
+                write_timeout,
+            },
+            Err(_) => Response::allocation_failure(),
+        },
+    );
 }
 
 #[unsafe(no_mangle)]
