@@ -146,5 +146,5 @@ production deploy flows.
 
 ## References
 
-- [references/make-migration.md](references/make-migration.md)
+- [workflows/make-migration.md](workflows/make-migration.md)
 - [references/justfile-patterns.md](references/justfile-patterns.md)

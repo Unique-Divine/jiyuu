@@ -10,7 +10,7 @@ For a request such as "Review PR #1153 with gh-rev":
 
 1. Resolve the repository, PR number, issue, PR description, prior GitHub
    comments, base/head refs, and immutable base/head SHAs with `gh`.
-2. Inspect the installed CLI as described in [cli.md](cli.md).
+2. Inspect the installed CLI as described in [cli.md](../references/cli.md).
 3. Use a suitable repository checkout, discovered from the command directory
    or selected with `-C`, and open the PR ledger:
 

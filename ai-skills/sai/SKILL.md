@@ -65,7 +65,7 @@ package.
 | Sai Keeper GraphQL: indexed trades, LP history, prices, referrals, subscriptions | [references/graphql.md](references/graphql.md) |
 | DexPal REST: public stats, markets, yield, health checks | [references/rest.md](references/rest.md) |
 | Referral code ownership, redemptions, testnet balance and credit checks | [references/referrals.md](references/referrals.md) |
-| Why contract state, GraphQL, and REST disagree | [references/reconciliation.md](references/reconciliation.md) |
+| Why contract state, GraphQL, and REST disagree | [workflows/reconciliation.md](workflows/reconciliation.md) |
 
 Read [trading-safety.md](trading-safety.md) before the first trade of a
 session, even when the person asks for one quick order.
