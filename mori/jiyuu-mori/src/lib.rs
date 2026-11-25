@@ -8,18 +8,18 @@ mod architecture_projection;
 mod complexity;
 #[cfg(feature = "native-engine-abi")]
 mod doc_file_links;
+#[cfg(feature = "native-engine-abi")]
+mod docker_image;
 #[cfg(any(feature = "native-engine-abi", test))]
 mod explicit_override;
 #[cfg(feature = "native-engine-abi")]
-mod docker_image;
-#[cfg(feature = "native-engine-abi")]
 mod ffi_output;
-#[cfg(feature = "native-engine-abi")]
-mod pdf_doc_links;
 #[cfg(feature = "native-engine-abi")]
 mod kubernetes;
 #[cfg(feature = "native-engine-abi")]
 mod native_graph_buffer;
+#[cfg(feature = "native-engine-abi")]
+mod pdf_doc_links;
 #[cfg(feature = "native-engine-abi")]
 mod shell_pass;
 #[cfg(any(feature = "native-engine-abi", test))]

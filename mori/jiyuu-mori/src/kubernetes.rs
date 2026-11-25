@@ -135,7 +135,24 @@ struct Counts {
     instances: c_int,
 }
 
-type Index<'a, T> = HashMap<*const c_char, HashMap<&'a [u8], Vec<T>>>;
+type Index<K, T> = HashMap<*const c_char, HashMap<K, Vec<T>>>;
+type ResourceIndex = Index<Vec<u8>, i64>;
+
+fn index_resource_key(
+    index: &mut ResourceIndex,
+    bundle: *const c_char,
+    name: &[u8],
+    id: i64,
+) {
+    let names = index.entry(bundle).or_default();
+    if let Some(ids) = names.get_mut(name) {
+        if ids.last() != Some(&id) {
+            ids.push(id);
+        }
+    } else {
+        names.insert(name.to_vec(), vec![id]);
+    }
+}
 
 // Callers supply validated C facts and graph-owned strings. Keep bytes as
 // C supplied them, since name and path comparison does not require UTF-8.
@@ -331,7 +348,7 @@ impl Pass<'_> {
             let off = r.pair_offset as usize;
             &pairs[off..off + r.pair_count as usize]
         };
-        let mut index: Index<'_, usize> = HashMap::new();
+        let mut index: Index<&[u8], usize> = HashMap::new();
         for (i, record) in records.iter().enumerate() {
             if !matches!(record.kind, WORKLOAD | POD) {
                 continue;
@@ -492,11 +509,11 @@ impl Pass<'_> {
         &name[..name.len().min(limit)]
     }
 
-    fn index_add<'a>(
+    fn index_add(
         &self,
-        index: &mut Index<'a, i64>,
+        index: &mut ResourceIndex,
         node: &Node,
-        name: &'a [u8],
+        name: &[u8],
         deploys: bool,
     ) {
         let mut one = Member::default();
@@ -508,20 +525,18 @@ impl Pass<'_> {
             &[]
         };
         for scope in scopes.iter().chain(deploy) {
-            let ids = index
-                .entry(scope.bundle)
-                .or_default()
-                .entry(self.scope_key(scope, name))
-                .or_default();
-            if ids.last() != Some(&node.id) {
-                ids.push(node.id);
-            }
+            index_resource_key(
+                index,
+                scope.bundle,
+                self.scope_key(scope, name),
+                node.id,
+            );
         }
     }
 
     fn find(
         &self,
-        index: &Index<'_, i64>,
+        index: &ResourceIndex,
         file: *const c_char,
         name: &[u8],
         deploys: bool,
@@ -591,15 +606,21 @@ impl Pass<'_> {
         let mut found = Vec::new();
         let mut matches = Vec::new();
         for reference in refs {
-            let source = self
-                .node(reference.source)
-                .filter(|n| !n.file_path.is_null());
             let from = if reference.route.is_null() {
                 reference.source
             } else {
-                let route = source.map_or(0, |node| unsafe {
-                    (self.ops.route)(self.context, node, reference)
-                });
+                let raw =
+                    unsafe { cbm_gbuf_find_by_id(self.graph, reference.source) };
+                // A Route upsert may replace a node with the same qualified
+                // name. Pass a raw pointer and look the source up again after
+                // the native write has completed.
+                let route = if unsafe { raw.as_ref() }
+                    .is_some_and(|node| !node.file_path.is_null())
+                {
+                    unsafe { (self.ops.route)(self.context, raw, reference) }
+                } else {
+                    0
+                };
                 if route <= 0
                     || reference.kind.is_null()
                     || reference.name.is_null()
@@ -608,7 +629,10 @@ impl Pass<'_> {
                 }
                 route
             };
-            let Some(source) = source else {
+            let Some(source) = self
+                .node(reference.source)
+                .filter(|n| !n.file_path.is_null())
+            else {
                 counts.unresolved += 1;
                 continue;
             };
@@ -783,6 +807,59 @@ unsafe extern "C" fn cbm_rust_k8s_run(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "c-backend")]
+    #[test]
+    fn resource_index_keeps_its_key_after_a_colliding_route_upsert() {
+        unsafe extern "C" {
+            fn cbm_gbuf_new(
+                project: *const c_char,
+                root: *const c_char,
+            ) -> *mut c_void;
+            fn cbm_gbuf_free(graph: *mut c_void);
+            fn cbm_gbuf_upsert_node(
+                graph: *mut c_void,
+                label: *const c_char,
+                name: *const c_char,
+                qualified_name: *const c_char,
+                file: *const c_char,
+                start_line: c_int,
+                end_line: c_int,
+                props: *const c_char,
+            ) -> i64;
+        }
+
+        let graph = unsafe { cbm_gbuf_new(c"k8s".as_ptr(), c"/tmp".as_ptr()) };
+        assert!(!graph.is_null());
+        let qualified_name = c"__route__ingress__example.com/api";
+        let upsert = |label: &CStr, name: &CStr| unsafe {
+            cbm_gbuf_upsert_node(
+                graph,
+                label.as_ptr(),
+                name.as_ptr(),
+                qualified_name.as_ptr(),
+                c"api.yaml".as_ptr(),
+                1,
+                2,
+                c"{}".as_ptr(),
+            )
+        };
+        let id = upsert(c"Resource", c"Service/api");
+        assert!(id > 0);
+        let bundle = c"bundle".as_ptr();
+        let mut index = ResourceIndex::new();
+        {
+            let node = unsafe { &*cbm_gbuf_find_by_id(graph, id) };
+            let name = unsafe { CStr::from_ptr(node.name) };
+            index_resource_key(&mut index, bundle, name.to_bytes(), id);
+        }
+        assert_eq!(upsert(c"Route", c"example.com/api"), id);
+        unsafe { cbm_gbuf_free(graph) };
+        assert_eq!(
+            index[&bundle].get(b"Service/api".as_slice()),
+            Some(&vec![id])
+        );
+    }
 
     #[test]
     fn cancellation_releases_the_rest_of_the_prepared_chunk() {
