@@ -761,22 +761,14 @@ mod tests {
     #[cfg(feature = "c-backend")]
     #[test]
     fn collection_reservation_failure_streams_bare_sections_with_prose() {
+        use crate::native_parser::{
+            RawLanguage, RawTree, ts_parser_delete, ts_parser_new,
+            ts_parser_parse_string, ts_parser_set_language, ts_tree_delete,
+        };
+
         unsafe extern "C" {
-            fn tree_sitter_markdown() -> *const c_void;
-            fn ts_parser_new() -> *mut c_void;
-            fn ts_parser_set_language(
-                parser: *mut c_void,
-                language: *const c_void,
-            ) -> bool;
-            fn ts_parser_parse_string(
-                parser: *mut c_void,
-                old: *const c_void,
-                source: *const u8,
-                len: u32,
-            ) -> *mut c_void;
-            fn ts_parser_delete(parser: *mut c_void);
-            fn ts_tree_root_node(tree: *const c_void) -> RawNode;
-            fn ts_tree_delete(tree: *mut c_void);
+            fn tree_sitter_markdown() -> *const RawLanguage;
+            fn ts_tree_root_node(tree: *const RawTree) -> RawNode;
         }
 
         type Sections = Vec<(String, String)>;
@@ -824,7 +816,7 @@ mod tests {
             let tree = ts_parser_parse_string(
                 parser,
                 ptr::null(),
-                source.as_ptr(),
+                source.as_ptr().cast(),
                 source.len() as u32,
             );
             ts_parser_delete(parser);
