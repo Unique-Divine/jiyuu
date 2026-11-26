@@ -360,6 +360,8 @@ typedef enum {
 /* Start once per request and reuse across evaluator attempts. */
 cbm_cypher_budget_t cbm_cypher_budget_start(bool (*cancelled)(void *), void *context);
 cbm_cypher_budget_status_t cbm_cypher_budget_status(const cbm_cypher_budget_t *budget);
+/* Read the time left without changing the request deadline. */
+uint64_t cbm_cypher_budget_remaining_ms(const cbm_cypher_budget_t *budget);
 int cbm_cypher_execute_with_budget(cbm_store_t *store, const char *query, const char *project,
                                    int max_rows, cbm_cypher_result_t *out,
                                    const cbm_cypher_budget_t *budget);

@@ -58,6 +58,7 @@ type Evaluate = unsafe extern "C" fn(
 ) -> c_int;
 
 unsafe extern "C" {
+    fn cbm_cypher_budget_remaining_ms(budget: *const c_void) -> u64;
     fn cbm_cypher_max_depth() -> c_int;
     fn cbm_mcp_set_cypher_evaluator(evaluate: Evaluate);
 }
@@ -87,7 +88,11 @@ unsafe extern "C" fn evaluate(
             }
             _ => Ok(()),
         };
-        let mut budget = ExecutionBudget::shared(&check);
+        // SAFETY: The native query handler lends its request budget here.
+        let remaining_ms = || unsafe {
+            cbm_cypher_budget_remaining_ms(budget_context.cast_const())
+        };
+        let mut budget = ExecutionBudget::shared(&check, &remaining_ms);
         #[cfg(debug_assertions)]
         if let Some(limit) = std::env::var("MORI_TEST_ORDERED_COUNT_GROUP_LIMIT")
             .ok()

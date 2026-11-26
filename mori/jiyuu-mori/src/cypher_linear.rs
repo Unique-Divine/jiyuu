@@ -34,6 +34,9 @@ use with_clause::{ReturnGroups, WithPlan, WithRows};
 
 const ENGINE_LIMIT: usize = 100_000;
 const ORDERED_COUNT_GROUP_LIMIT: usize = 16_384;
+const ORDERED_COUNT_REPLAY_MAX_MS: u64 = 500;
+const ORDERED_COUNT_FALLBACK_RESERVE_MS: u64 = 1_000;
+const ORDERED_COUNT_REPLAY_MAX_STEPS: usize = 1_048_576;
 #[cfg(test)]
 const DEADLINE: Duration = Duration::from_secs(30);
 const CHECK_INTERVAL: usize = 1024;
@@ -1585,13 +1588,22 @@ enum BudgetCheck<'a> {
         cancelled: &'a dyn Fn() -> bool,
     },
     #[cfg(feature = "c-backend")]
-    Shared(&'a dyn Fn() -> Result<(), ExecutionError>),
+    Shared {
+        status: &'a dyn Fn() -> Result<(), ExecutionError>,
+        remaining_ms: &'a dyn Fn() -> u64,
+    },
+}
+
+struct OrderedCountReplay {
+    stop_at_remaining_ms: u64,
+    remaining_steps: usize,
 }
 
 pub(crate) struct ExecutionBudget<'a> {
     check: BudgetCheck<'a>,
     remaining: usize,
     ordered_count_group_limit: usize,
+    ordered_count_replay: Option<OrderedCountReplay>,
     pub(crate) path_depth_cap: u32,
 }
 
@@ -1611,8 +1623,12 @@ impl<'a> ExecutionBudget<'a> {
     #[cfg(feature = "c-backend")]
     pub(crate) fn shared(
         check: &'a dyn Fn() -> Result<(), ExecutionError>,
+        remaining_ms: &'a dyn Fn() -> u64,
     ) -> Self {
-        Self::with_check(BudgetCheck::Shared(check))
+        Self::with_check(BudgetCheck::Shared {
+            status: check,
+            remaining_ms,
+        })
     }
 
     fn with_check(check: BudgetCheck<'a>) -> Self {
@@ -1620,6 +1636,7 @@ impl<'a> ExecutionBudget<'a> {
             check,
             remaining: CHECK_INTERVAL,
             ordered_count_group_limit: ORDERED_COUNT_GROUP_LIMIT,
+            ordered_count_replay: None,
             path_depth_cap: 10,
         }
     }
@@ -1646,14 +1663,59 @@ impl<'a> ExecutionBudget<'a> {
                 if now() >= deadline {
                     return Err(ExecutionError::Deadline);
                 }
-                Ok(())
             }
             #[cfg(feature = "c-backend")]
-            BudgetCheck::Shared(check) => check(),
+            BudgetCheck::Shared { status, .. } => status()?,
+        }
+        if let Some(replay) = &self.ordered_count_replay
+            && (replay.remaining_steps == 0
+                || self.remaining_ms() <= replay.stop_at_remaining_ms)
+        {
+            return Err(ExecutionError::Unsupported);
+        }
+        Ok(())
+    }
+
+    fn remaining_ms(&self) -> u64 {
+        match self.check {
+            #[cfg(test)]
+            BudgetCheck::Local { deadline, now, .. } => {
+                deadline.saturating_duration_since(now()).as_millis() as u64
+            }
+            #[cfg(feature = "c-backend")]
+            BudgetCheck::Shared { remaining_ms, .. } => remaining_ms(),
         }
     }
 
+    fn begin_ordered_count_replay(&mut self) -> Result<(), ExecutionError> {
+        if self.ordered_count_replay.is_some() {
+            return Ok(());
+        }
+        self.check()?;
+        let remaining = self.remaining_ms();
+        // Count time and work from the first overflow, including the rest of
+        // that scan and all later batches. Leave time in the same deadline
+        // for C to evaluate the query if Rust gives up.
+        let allowance = ORDERED_COUNT_REPLAY_MAX_MS
+            .min(remaining / 2)
+            .min(remaining.saturating_sub(ORDERED_COUNT_FALLBACK_RESERVE_MS));
+        if allowance == 0 {
+            return Err(ExecutionError::Unsupported);
+        }
+        self.ordered_count_replay = Some(OrderedCountReplay {
+            stop_at_remaining_ms: remaining - allowance,
+            remaining_steps: ORDERED_COUNT_REPLAY_MAX_STEPS,
+        });
+        Ok(())
+    }
+
     fn step(&mut self) -> Result<(), ExecutionError> {
+        if let Some(replay) = &mut self.ordered_count_replay {
+            replay.remaining_steps = replay.remaining_steps.saturating_sub(1);
+            if replay.remaining_steps == 0 {
+                return self.check();
+            }
+        }
         self.remaining -= 1;
         if self.remaining == 0 {
             self.remaining = CHECK_INTERVAL;
@@ -1730,12 +1792,9 @@ impl MatchQuery<'_> {
             let RowCollector::OrderedCount(counts) = &mut collector else {
                 break;
             };
-            if let Some(rows) = counts.finish_batch(
-                &self.order,
-                result.columns.len(),
-                limit,
-                budget,
-            )? {
+            if let Some(rows) =
+                counts.finish_batch(&self.order, result.columns.len(), budget)?
+            {
                 result.rows = rows;
                 result.warnings.regex_refused |= context.regex_refused.get();
                 budget.check()?;
@@ -2054,6 +2113,7 @@ impl MatchQuery<'_> {
                         RowCollector::OrderedCount(OrderedCount::new(
                             column,
                             ordered_group_limit,
+                            limit,
                         ))
                     } else {
                         // An unordered limit needs only the first-seen keys.
@@ -2119,7 +2179,7 @@ impl MatchQuery<'_> {
                 let key = self.projections[counts.column]
                     .expression
                     .field_value(nodes, edges, context);
-                counts.record(&key);
+                counts.record(&key, budget)?;
                 return Ok(true);
             }
             RowCollector::Distinct(distinct) => {

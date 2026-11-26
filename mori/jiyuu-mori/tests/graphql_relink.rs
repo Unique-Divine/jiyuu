@@ -849,7 +849,7 @@ fn linear_cypher_stops_inside_high_fanout_adjacency() {
             Ok(())
         }
     };
-    let mut budget = ExecutionBudget::shared(&request_status);
+    let mut budget = ExecutionBudget::shared(&request_status, &|| 30_000);
     assert!(matches!(
         query.execute_with_budget(&db, CLIENT, &mut budget),
         Err(ExecutionError::Cancelled)
@@ -1782,6 +1782,7 @@ fn ordered_count_overflow_ranks_late_groups_in_rust() {
     const TIES: &str = "MATCH (n:RankProbe) RETURN n.name, count(*) AS total ORDER BY total DESC LIMIT 3";
     const NUMERIC: &str = "MATCH (n:RankProbe) RETURN n.name, count(*) AS total ORDER BY n.name DESC, total DESC LIMIT 3";
     const ZERO: &str = "MATCH (n:RankProbe) RETURN n.name, count(*) AS total ORDER BY total DESC LIMIT 0";
+    const WIDE: &str = "MATCH (n:RankProbe) RETURN n.name, count(*) AS total ORDER BY total DESC LIMIT 16384";
     let fixture = Fixture::new();
     let db = fixture.index(CLIENT);
     let mut tail = 0;
@@ -1810,7 +1811,7 @@ fn ordered_count_overflow_ranks_late_groups_in_rust() {
     let checks = Cell::new(0);
     let cancelled = || {
         checks.set(checks.get() + 1);
-        // Start and end of the first scan, overflow, pre/post sort, replay.
+        // First scan start, first overflow, scan end, pre/post sort, replay.
         checks.get() >= 6
     };
     let mut budget = ExecutionBudget::new(&Instant::now, &cancelled);
@@ -1832,6 +1833,7 @@ fn ordered_count_overflow_ranks_late_groups_in_rust() {
             (NUMERIC, 1, true),
             (NUMERIC, 2, true),
             (ZERO, 0, true),
+            (WIDE, 0, false),
         ],
         &[("MORI_TEST_ORDERED_COUNT_GROUP_LIMIT", "2")],
     );
@@ -1843,10 +1845,19 @@ fn ordered_count_overflow_ranks_late_groups_in_rust() {
     assert_eq!(pages[5]["rows"], json!([["2", "1"]]));
     assert_eq!(pages[6]["rows"], json!([["winner", "3"]]));
     assert_eq!(pages[7]["rows"], json!([]));
+    assert_eq!(pages[8]["rows"], json!([["winner", "3"]]));
 
-    // A later SQLite error must still be detected for LIMIT 0.
     let db = fixture.db(CLIENT);
     fail_node_read(&db, tail);
+    // A wide window gives up at overflow, before reading the failing row.
+    let mut budget = ExecutionBudget::new(&Instant::now, &|| false);
+    budget.set_ordered_count_group_limit_for_tests(2);
+    let wide = cypher_linear::classify(WIDE).unwrap();
+    assert!(matches!(
+        wide.execute_with_budget(&db, CLIENT, &mut budget),
+        Err(ExecutionError::Unsupported)
+    ));
+    // A later SQLite error must still be detected for LIMIT 0.
     let query = cypher_linear::classify(ZERO).unwrap();
     assert!(matches!(
         query.execute_on(&db, CLIENT),

@@ -3291,6 +3291,11 @@ cbm_cypher_budget_t cbm_cypher_budget_start(bool (*cancelled)(void *), void *con
     return (cbm_cypher_budget_t){cypher_deadline_now() + duration, cancelled, context};
 }
 
+uint64_t cbm_cypher_budget_remaining_ms(const cbm_cypher_budget_t *budget) {
+    uint64_t now = cypher_deadline_now();
+    return budget && budget->deadline_ms > now ? budget->deadline_ms - now : 0;
+}
+
 cbm_cypher_budget_status_t cbm_cypher_budget_status(const cbm_cypher_budget_t *budget) {
     if (!budget) {
         return CBM_CYPHER_BUDGET_ACTIVE;
