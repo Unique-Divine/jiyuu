@@ -18,7 +18,7 @@ mod doc_file_links;
 mod docker_image;
 #[cfg(any(feature = "native-engine-abi", test))]
 mod explicit_override;
-#[cfg(feature = "native-engine-abi")]
+#[cfg(any(feature = "native-engine-abi", test))]
 mod ffi_output;
 #[cfg(feature = "native-engine-abi")]
 mod jvm_doc_links;

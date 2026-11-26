@@ -722,6 +722,7 @@ fn mcp_method_dispatch_matches_c() {
         "{\"jsonrpc\":\"2.0\",\"id\":\"discover\",\"method\":\"server/discover\"}\n",
         "{\"jsonrpc\":\"2.0\",\"id\":\"unknown\",\"method\":\"ping/extra\"}\n",
         "{\"jsonrpc\":\"2.0\",\"id\":\"cancel-request\",\"method\":\"notifications/cancelled\"}\n",
+        "not-json\n",
     );
     let reference = run_stdio(&c_binary(), "c", &[], input);
     let linked = run_stdio(Path::new(MORI), "rs", &[], input);
@@ -730,7 +731,7 @@ fn mcp_method_dispatch_matches_c() {
         .lines()
         .map(|line| serde_json::from_str(line).expect("parse response"))
         .collect();
-    assert_eq!(replies.len(), 7, "{linked}");
+    assert_eq!(replies.len(), 8, "{linked}");
     assert_eq!(replies[0]["id"], "ping");
     assert_eq!(replies[0]["result"], serde_json::json!({}));
     // The C envelope uses -1 for a present null ID. A missing ID is silent.
@@ -742,13 +743,15 @@ fn mcp_method_dispatch_matches_c() {
         serde_json::json!([])
     );
     for (reply, id) in
-        replies[4..]
+        replies[4..7]
             .iter()
             .zip(["discover", "unknown", "cancel-request"])
     {
         assert_eq!(reply["id"], id);
         assert_eq!(reply["error"]["code"], -32601);
     }
+    assert_eq!(replies[7]["id"], 0);
+    assert_eq!(replies[7]["error"]["code"], -32700);
 }
 
 #[test]

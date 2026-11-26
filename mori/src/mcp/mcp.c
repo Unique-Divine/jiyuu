@@ -141,8 +141,6 @@ enum {
 #define ADR_DIR_PERMS 0755
 
 /* JSON-RPC 2.0 standard error codes */
-#define JSONRPC_PARSE_ERROR (-32700)
-#define JSONRPC_METHOD_NOT_FOUND (-32601)
 #define JSONRPC_INVALID_PARAMS (-32602)
 #define JSONRPC_INTERNAL_ERROR (-32603)
 
@@ -23066,7 +23064,6 @@ typedef struct {
     bool is_error;
     bool cancelled;
     bool timed_out;
-    bool method_not_found;
 } mcp_request_context_t;
 
 static void mcp_request_initialize(mcp_request_context_t *ctx) {
@@ -23138,16 +23135,54 @@ static void mcp_request_cancel_notification(mcp_request_context_t *ctx) {
     }
 }
 
-static void mcp_request_unknown(mcp_request_context_t *ctx, bool discover) {
-    ctx->method_not_found = true;
-    /* The discovery probe receives -32601 so the client falls back to
-     * initialize. Treat the probe as expected in diagnostics (#2433). */
-    ctx->is_error = !discover;
+static void mcp_request_start_timer(mcp_request_context_t *ctx) {
+    cbm_clock_gettime(CLOCK_MONOTONIC, &ctx->started_at);
 }
 
-/* Keep this table in sync with RequestOps in mcp_dispatch/methods.rs. Rust
- * borrows ctx for this call only. C owns the parsed request and all outputs. */
+static void mcp_request_trace_dispatch(mcp_request_context_t *ctx) {
+    cbm_log_debug("mcp.dispatch", "backend", "rust", "method", ctx->req.method ? ctx->req.method : "",
+                  "has_id", ctx->req.has_id ? "true" : "false");
+}
+
+static char *mcp_request_finish(mcp_request_context_t *ctx, const char *protocol_error_json,
+                                bool unexpected_method) {
+    cbm_jsonrpc_response_t resp = {
+        .id = ctx->req.id,
+        .id_str = ctx->req.id_str,
+        .result_json = ctx->result_json,
+        .error_json = protocol_error_json ? protocol_error_json : ctx->error_json,
+    };
+    struct timespec serialize_t0;
+    cbm_clock_gettime(CLOCK_MONOTONIC, &serialize_t0);
+    char *out = cbm_jsonrpc_format_response(&resp);
+    struct timespec serialize_t1;
+    cbm_clock_gettime(CLOCK_MONOTONIC, &serialize_t1);
+    long long serialization_us = mcp_elapsed_us(serialize_t0, serialize_t1);
+    long long duration_us = mcp_elapsed_us(ctx->started_at, serialize_t1);
+    long long handler_us = ctx->tool_name ? ctx->tool_handler_us
+                                         : mcp_elapsed_us(ctx->started_at, serialize_t0);
+    bool is_error = ctx->is_error || ctx->error_json || unexpected_method ||
+                    (!protocol_error_json && !out);
+    cbm_log_mcp_request(ctx->req.method, ctx->tool_name, is_error, duration_us, handler_us,
+                        serialization_us, ctx->cancelled, ctx->timed_out);
+    free(ctx->tool_name);
+    free(ctx->result_json);
+    free(ctx->error_json);
+    return out;
+}
+
+/* Mirrors RequestOps in mcp_dispatch/methods.rs. Rust controls when the
+ * request is admitted, dispatched, serialized, and released. These callbacks
+ * retain C ownership of the codec and the native allocator. */
 typedef struct {
+    int (*parse)(const char *, cbm_jsonrpc_request_t *);
+    bool (*begin_scope)(cbm_mcp_server_t *);
+    void (*start_timer)(mcp_request_context_t *);
+    void (*trace_dispatch)(mcp_request_context_t *);
+    char *(*finish)(mcp_request_context_t *, const char *, bool);
+    void (*end_scope)(cbm_mcp_server_t *);
+    void (*free_parsed)(cbm_jsonrpc_request_t *);
+    char *(*format_error)(int64_t, int, const char *);
     void (*initialize)(mcp_request_context_t *);
     void (*ping)(mcp_request_context_t *);
     void (*resources_list)(mcp_request_context_t *);
@@ -23157,14 +23192,22 @@ typedef struct {
     void (*tools_list)(mcp_request_context_t *);
     void (*tools_call)(mcp_request_context_t *);
     void (*cancel_notification)(mcp_request_context_t *);
-    void (*unknown)(mcp_request_context_t *, bool discover);
 } mcp_request_ops_t;
 
-extern void cbm_rust_mcp_dispatch(const char *method, bool has_id, mcp_request_context_t *ctx,
-                                  const mcp_request_ops_t *ops);
+extern void cbm_rust_mcp_handle_request(const char *line, cbm_mcp_server_t *srv,
+                                        cbm_jsonrpc_request_t *request, mcp_request_context_t *ctx,
+                                        const mcp_request_ops_t *ops, char **out);
 
-static void mcp_dispatch_request(mcp_request_context_t *ctx) {
+char *cbm_mcp_server_handle(cbm_mcp_server_t *srv, const char *line) {
     static const mcp_request_ops_t ops = {
+        .parse = cbm_jsonrpc_parse,
+        .begin_scope = cbm_mcp_server_request_scope_begin,
+        .start_timer = mcp_request_start_timer,
+        .trace_dispatch = mcp_request_trace_dispatch,
+        .finish = mcp_request_finish,
+        .end_scope = cbm_mcp_server_request_scope_end,
+        .free_parsed = cbm_jsonrpc_request_free,
+        .format_error = cbm_jsonrpc_format_error,
         .initialize = mcp_request_initialize,
         .ping = mcp_request_ping,
         .resources_list = mcp_request_resources_list,
@@ -23174,65 +23217,10 @@ static void mcp_dispatch_request(mcp_request_context_t *ctx) {
         .tools_list = mcp_request_tools_list,
         .tools_call = mcp_request_tools_call,
         .cancel_notification = mcp_request_cancel_notification,
-        .unknown = mcp_request_unknown,
     };
-    const char *method = ctx->req.method ? ctx->req.method : "";
-    cbm_rust_mcp_dispatch(method, ctx->req.has_id, ctx, &ops);
-    cbm_log_debug("mcp.dispatch", "backend", "rust", "method", method, "has_id",
-                  ctx->req.has_id ? "true" : "false");
-}
-char *cbm_mcp_server_handle(cbm_mcp_server_t *srv, const char *line) {
     mcp_request_context_t ctx = {.srv = srv};
-    if (cbm_jsonrpc_parse(line, &ctx.req) < 0) {
-        return cbm_jsonrpc_format_error(0, JSONRPC_PARSE_ERROR, "Parse error");
-    }
-
-    if (!ctx.req.has_id) {
-        mcp_dispatch_request(&ctx);
-        cbm_jsonrpc_request_free(&ctx.req);
-        return NULL;
-    }
-
-    if (!cbm_mcp_server_request_scope_begin(srv)) {
-        int64_t request_id = ctx.req.id;
-        cbm_jsonrpc_request_free(&ctx.req);
-        return cbm_jsonrpc_format_error(request_id, JSONRPC_INTERNAL_ERROR,
-                                        "Request cancellation scope unavailable");
-    }
-
-    cbm_clock_gettime(CLOCK_MONOTONIC, &ctx.started_at);
-    mcp_dispatch_request(&ctx);
-
-    cbm_jsonrpc_response_t resp = {
-        .id = ctx.req.id,
-        .id_str = ctx.req.id_str,
-        .result_json = ctx.result_json,
-        .error_json = ctx.error_json,
-    };
-    char method_error[160];
-    if (ctx.method_not_found) {
-        snprintf(method_error, sizeof(method_error), "{\"code\":%d,\"message\":\"Method not found\"}",
-                 JSONRPC_METHOD_NOT_FOUND);
-        resp.error_json = method_error;
-    }
-
-    struct timespec serialize_t0;
-    cbm_clock_gettime(CLOCK_MONOTONIC, &serialize_t0);
-    char *out = cbm_jsonrpc_format_response(&resp);
-    struct timespec serialize_t1;
-    cbm_clock_gettime(CLOCK_MONOTONIC, &serialize_t1);
-    long long serialization_us = mcp_elapsed_us(serialize_t0, serialize_t1);
-    long long duration_us = mcp_elapsed_us(ctx.started_at, serialize_t1);
-    long long handler_us = ctx.tool_name ? ctx.tool_handler_us
-                                        : mcp_elapsed_us(ctx.started_at, serialize_t0);
-    bool is_error = ctx.is_error || ctx.error_json || (!ctx.method_not_found && !out);
-    cbm_log_mcp_request(ctx.req.method, ctx.tool_name, is_error, duration_us, handler_us,
-                        serialization_us, ctx.cancelled, ctx.timed_out);
-    free(ctx.tool_name);
-    free(ctx.result_json);
-    free(ctx.error_json);
-    cbm_mcp_server_request_scope_end(srv);
-    cbm_jsonrpc_request_free(&ctx.req);
+    char *out = NULL;
+    cbm_rust_mcp_handle_request(line, srv, &ctx.req, &ctx, &ops, &out);
     return out;
 }
 
