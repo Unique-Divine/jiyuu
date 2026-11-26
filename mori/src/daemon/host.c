@@ -905,7 +905,7 @@ typedef struct {
     bool free_refused_while_scheduled;
 } host_http_thread_create_failure_test_t;
 
-/* WHY: the signature is fixed by the mori_http_host_ops_t thread_start hook type;
+/* WHY: the signature is fixed by the host_http_thread_create_fn type;
  * a const pointee would make the function-pointer types incompatible. */
 static int host_http_thread_create_failure_for_test(
     void *opaque, cbm_thread_t *thread, void *(*entry)(void *),
