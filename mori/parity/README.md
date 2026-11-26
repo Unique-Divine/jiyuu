@@ -47,3 +47,24 @@ count per side. A corpus may include small repositories that take the
 sequential path on both sides. It must also contain at least one
 repository where side B takes the parallel path. Both commands skip
 tool-call replay.
+
+## Verify Rust Execution for Selected Cypher Calls
+
+Tool-call replay compares each saved request's result across both builds.
+Mori can return the correct result through C fallback with the Rust
+query implementation enabled. To also require Rust execution on side B,
+pass `--require-rust-query CALL_ID` for each saved `query_graph` request
+that the Rust build must handle. Use the stable `call:...` ID from an L4
+report or compute it with `calls.call_id(tool, args)` on the saved request
+before resolving its placeholders.
+
+This flag enables the Rust query implementation and debug logging in the
+side B replay daemon. The harness disables the Graph UI in side B's
+scratch cache before starting any daemon. The runner looks for exactly one
+`query_graph.evaluator` debug event with `backend=rust` appended during
+each selected request, including any extra pages the comparison needs.
+Missing or ambiguous evidence fails the run even when both replies match.
+An output allow-list cannot waive this check. The dispatch diagnostic
+records the call ID and event count. After a side B timeout, later Rust
+execution checks fail because the timed-out request may still write to the
+daemon log.
