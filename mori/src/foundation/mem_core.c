@@ -260,6 +260,18 @@ static bool core_reports_frees(void) {
 #define MEMEV_FREEING(block) ((void)0)
 #endif
 
+void *cbm_result_realloc(void *block, size_t bytes) {
+    return realloc(block, bytes);
+}
+
+char *cbm_result_strdup(const char *text) {
+    return strdup(text);
+}
+
+void cbm_result_free(void *block) {
+    free(block);
+}
+
 void *cbm_alloc(cbm_mem_class_t cls, size_t bytes) {
     MEMEV_HINT(cls);
     void *block = CBM_BACKING_MALLOC(bytes ? bytes : CBM_ALLOC_ONE);

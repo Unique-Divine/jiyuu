@@ -27,18 +27,6 @@ void cbm_ffi_mark_written(const void *address, size_t size) {
     CBM_MSAN_WRITTEN(address, size);
 }
 
-void *cbm_result_realloc(void *block, size_t bytes) {
-    return realloc(block, bytes);
-}
-
-char *cbm_result_strdup(const char *text) {
-    return strdup(text);
-}
-
-void cbm_result_free(void *block) {
-    free(block);
-}
-
 #define CBM_NSEC_PER_SEC 1000000000ULL
 
 static uint64_t cbm_platform_scale_fraction(uint64_t remainder, uint64_t multiplier,
