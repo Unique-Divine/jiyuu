@@ -3241,6 +3241,39 @@ TEST(probe_ansible_files_import_what_they_name) {
     PASS();
 }
 
+TEST(probe_ansible_import_after_wide_yaml_sequence) {
+    enum { ITEMS = 2048 };
+    static const char prefix[] = "- hosts: all\n"
+                                 "  vars:\n"
+                                 "    options:\n";
+    static const char item[] = "      - ordinary\n";
+    static const char suffix[] = "  tasks:\n"
+                                 "    - include_tasks: linked.yml\n";
+    char *yaml = malloc(sizeof(prefix) - 1 + ITEMS * (sizeof(item) - 1) + sizeof(suffix));
+    ASSERT_NOT_NULL(yaml);
+    memcpy(yaml, prefix, sizeof(prefix) - 1);
+    char *next = yaml + sizeof(prefix) - 1;
+    for (int i = 0; i < ITEMS; i++) {
+        memcpy(next, item, sizeof(item) - 1);
+        next += sizeof(item) - 1;
+    }
+    memcpy(next, suffix, sizeof(suffix));
+
+    const GpfFile files[] = {{"wide.yml", yaml},
+                             {"linked.yml", "- name: linked\n  debug:\n    msg: hi\n"}};
+    char *got = gpf_ansible(files, (int)(sizeof(files) / sizeof(files[0])));
+    free(yaml);
+    char want[128];
+    snprintf(want, sizeof(want), "wide.yml IMPORTS Module:linked.yml include_tasks:%d", ITEMS + 5);
+    if (!got || strcmp(got, want) != 0) {
+        fprintf(stderr, "ansible got:\n%s\nwant:\n%s\n", got ? got : "(null)", want);
+        free(got);
+        FAIL("ansible wide sequence");
+    }
+    free(got);
+    PASS();
+}
+
 /* Every Resource a Terraform block DEPLOYS as "<block> DEPLOYS <name>
  * <obj_key> v=<version>", then "terraform resources <n>": the Resources
  * marked ecosystem terraform, then each INFRA_MAPS edge into one of them as
@@ -7107,6 +7140,7 @@ SUITE(grammar_probe_f) {
     RUN_TEST(probe_terraform_tfvars_override_their_variables);
     RUN_TEST(probe_terragrunt_units_compose_their_files);
     RUN_TEST(probe_ansible_files_import_what_they_name);
+    RUN_TEST(probe_ansible_import_after_wide_yaml_sequence);
     RUN_TEST(probe_terraform_kubernetes_objects_are_resources);
     RUN_TEST(probe_kustomize_name_prefix_makes_variants);
     RUN_TEST(probe_ansible_tasks_are_functions);

@@ -355,7 +355,8 @@ impl Composition {
         imports: &mut c_int,
         includes: &mut Vec<Vec<u8>>,
     ) {
-        let mut stack = vec![doc.root()];
+        let mut ancestors = Vec::new();
+        let mut next = Some(doc.root());
         let mut edge = |target, directive: &str, line| {
             if let Some(id) = target
                 && from > 0
@@ -368,7 +369,7 @@ impl Composition {
                 *imports += 1;
             }
         };
-        while let Some(node) = stack.pop() {
+        while let Some(node) = next.take() {
             if run.cancelled() {
                 return;
             }
@@ -461,7 +462,23 @@ impl Composition {
                     }
                 }
             }
-            stack.extend(node.children().rev());
+            // Keep one iterator per ancestor, even for a wide YAML sequence.
+            let mut children = node.children();
+            if let Some(child) = children.next() {
+                if ancestors.try_reserve(1).is_err() {
+                    return;
+                }
+                ancestors.push(children);
+                next = Some(child);
+            } else {
+                while let Some(siblings) = ancestors.last_mut() {
+                    if let Some(sibling) = siblings.next() {
+                        next = Some(sibling);
+                        break;
+                    }
+                    ancestors.pop();
+                }
+            }
         }
     }
 }
