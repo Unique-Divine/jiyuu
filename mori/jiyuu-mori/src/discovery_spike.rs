@@ -215,7 +215,7 @@ impl NativeWalk {
                 ignored: items(self.ignored, self.ignored_count)
                     .map(|ptr| {
                         let file = &*ptr;
-                        (c_text(file.rel_path).into(), c_text(file.reason))
+                        (c_text(file.path).into(), c_text(file.reason))
                     })
                     .collect(),
                 ignored_total: self.ignored_total as usize,
