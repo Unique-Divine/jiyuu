@@ -1731,19 +1731,17 @@ bool cbm_rust_stage_write(cbm_stage_write_t *run, const cbm_stage_write_ops_t *o
  * quarantine the old generation, so late cancellation and rename failure
  * must roll back before discarding the stage. */
 typedef struct cbm_stage_finalize cbm_stage_finalize_t;
-typedef struct {
-    int abort_preserve_db;
-    int persist_failed;
-    bool (*remove_sidecars)(cbm_stage_finalize_t *);
-    bool (*cancelled)(cbm_stage_finalize_t *);
-    bool (*prepare)(cbm_stage_finalize_t *);
-    bool (*rollback)(cbm_stage_finalize_t *);
-    bool (*rename)(cbm_stage_finalize_t *);
-    void (*release)(cbm_stage_finalize_t *);
-    void (*discard)(cbm_stage_finalize_t *);
-} cbm_stage_finalize_ops_t;
+bool cbm_stage_install_remove_sidecars(cbm_stage_finalize_t *run);
+bool cbm_stage_install_cancelled(cbm_stage_finalize_t *run);
+bool cbm_stage_install_clean_destination_sidecars(cbm_stage_finalize_t *run);
+bool cbm_stage_install_prepare_destination(cbm_stage_finalize_t *run);
+bool cbm_stage_install_rollback(cbm_stage_finalize_t *run);
+bool cbm_stage_install_rename(cbm_stage_finalize_t *run);
+void cbm_stage_install_release(cbm_stage_finalize_t *run);
+void cbm_stage_install_discard(cbm_stage_finalize_t *run);
 
-int cbm_rust_stage_finalize(cbm_stage_finalize_t *run, const cbm_stage_finalize_ops_t *ops);
+int cbm_rust_stage_finalize(cbm_stage_finalize_t *run, bool destination_known_healthy,
+                            int abort_preserve_db, int persist_failed);
 
 /* ── Incremental pipeline (pipeline_incremental.c) ───────────────── */
 
