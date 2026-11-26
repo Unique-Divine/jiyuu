@@ -3,6 +3,7 @@
  */
 #include "daemon/host.h"
 #include "daemon/host_internal.h"
+#include "daemon/http_host.h"
 
 #include "daemon/application.h"
 #include "daemon/bootstrap.h"
@@ -49,9 +50,6 @@ enum {
      * client's 30 s daemon-start budget. */
     HOST_DAEMON_CLAIM_TIMEOUT_MS = 12000,
     HOST_WAIT_TICK_MS = 100,
-    HOST_HTTP_CONFIG_POLL_MS = 1000,
-    HOST_HTTP_RETRY_INITIAL_MS = 1000,
-    HOST_HTTP_RETRY_MAX_MS = 30000,
     HOST_WATCH_INTERVAL_MS = 5000,
     HOST_NAMED_WATCH_CONFIG_POLL_MS = 1000,
     HOST_NAMED_WATCH_CONFIG_CAP = 64 * 1024,
@@ -78,18 +76,6 @@ typedef struct {
     cbm_daemon_named_watch_t entries[CBM_DAEMON_NAMED_WATCH_LIMIT];
 } host_named_watch_snapshot_t;
 
-typedef struct {
-    void *context;
-    void (*config_load)(void *context, cbm_ui_config_t *config_out);
-    cbm_http_server_t *(*server_new)(void *context, int port);
-    void (*server_configure)(void *context, cbm_http_server_t *server, host_state_t *host);
-    void (*server_stop)(void *context, cbm_http_server_t *server);
-    bool (*server_free)(void *context, cbm_http_server_t *server);
-    int (*thread_start)(void *context, cbm_thread_t *thread, void *(*entry)(void *),
-                        void *entry_context);
-    int (*thread_join)(void *context, cbm_thread_t *thread);
-} host_http_ops_t;
-
 struct host_state {
     /* Mirrors cbm_daemon_host_config_t.permanent for prepare-time consumers. */
     bool permanent;
@@ -98,7 +84,7 @@ struct host_state {
     cbm_store_t *watch_store;
     cbm_config_t *runtime_config;
     cbm_project_lock_manager_t *project_locks;
-    cbm_http_server_t *http;
+    mori_http_host_t http;
     cbm_thread_t watcher_thread;
     cbm_thread_t http_thread;
     bool watcher_started;
@@ -111,17 +97,7 @@ struct host_state {
     bool named_watch_apply_warned;
     bool named_watch_pending;
     bool named_watch_suspended;
-    bool http_started;
-    bool http_retiring;
-    bool http_config_loaded;
-    bool http_config_enabled;
-    bool http_assets_available;
-    int http_config_port;
-    uint64_t http_next_config_load_ms;
-    uint64_t http_retry_at_ms;
-    uint32_t http_retry_delay_ms;
-    uint32_t http_largest_scheduled_retry_ms;
-    const host_http_ops_t *http_ops;
+    const mori_http_host_ops_t *http_ops;
     uint8_t ui_readiness_secret[CBM_SHA256_DIGEST_LEN];
 };
 
@@ -518,8 +494,9 @@ static cbm_http_server_t *host_http_server_new_default(void *context, int port) 
 }
 
 static void host_http_server_configure_default(void *context, cbm_http_server_t *server,
-                                               host_state_t *host) {
+                                               void *owner) {
     (void)context;
+    host_state_t *host = owner;
     cbm_http_server_set_watcher(server, host->watcher);
     cbm_http_server_set_index_executor(server, host_ui_index, host);
     cbm_http_server_set_project_mutation_guard(server, host_ui_mutation_begin, host_ui_mutation_end,
@@ -558,19 +535,30 @@ static int host_http_thread_schedule_create(cbm_thread_t *thread, void *(*entry)
     return rc;
 }
 
-static int host_http_thread_start_default(void *context, cbm_thread_t *thread,
-                                          void *(*entry)(void *), void *entry_context) {
+static int host_http_thread_start_default(void *context, void *owner, cbm_http_server_t *server) {
     (void)context;
-    return host_http_thread_schedule_create(thread, entry, entry_context,
+    host_state_t *host = owner;
+    return host_http_thread_schedule_create(&host->http_thread, host_http_thread, server,
                                             host_http_thread_create_default, NULL);
 }
 
-static int host_http_thread_join_default(void *context, cbm_thread_t *thread) {
+static int host_http_thread_join_default(void *context, void *owner) {
     (void)context;
-    return cbm_thread_join(thread);
+    host_state_t *host = owner;
+    return cbm_thread_join(&host->http_thread);
 }
 
-static const host_http_ops_t g_host_http_default_ops = {
+static void host_http_log_retry(const char *reason, uint32_t delay_ms) {
+    char delay_text[32];
+    (void)snprintf(delay_text, sizeof(delay_text), "%u", delay_ms);
+    cbm_log_warn("ui.retry_scheduled", "reason", reason, "delay_ms", delay_text);
+}
+
+static void host_http_log_no_assets(void) {
+    cbm_log_warn("ui.no_assets", "hint", "rebuild with: make -f Makefile.cbm cbm-with-ui");
+}
+
+static const mori_http_host_ops_t g_host_http_default_ops = {
     .context = NULL,
     .config_load = host_http_config_load_default,
     .server_new = host_http_server_new_default,
@@ -579,132 +567,30 @@ static const host_http_ops_t g_host_http_default_ops = {
     .server_free = host_http_server_free_default,
     .thread_start = host_http_thread_start_default,
     .thread_join = host_http_thread_join_default,
+    .log_retry = host_http_log_retry,
+    .log_no_assets = host_http_log_no_assets,
 };
-
-static bool host_http_stop_join_free(host_state_t *host) {
-    const host_http_ops_t *ops = host->http_ops;
-    if (host->http && host->http_started) {
-        ops->server_stop(ops->context, host->http);
-    }
-    if (host->http_started) {
-        if (ops->thread_join(ops->context, &host->http_thread) != 0) {
-            return false;
-        }
-        host->http_started = false;
-    }
-    if (!ops->server_free(ops->context, host->http)) {
-        return false;
-    }
-    host->http = NULL;
-    return true;
-}
 
 static uint64_t host_deadline_from(uint64_t now_ms, uint32_t delay_ms) {
     return now_ms > UINT64_MAX - delay_ms ? UINT64_MAX : now_ms + delay_ms;
 }
 
-static void host_http_schedule_retry(host_state_t *host, uint64_t now_ms, const char *reason) {
-    uint32_t delay =
-        host->http_retry_delay_ms ? host->http_retry_delay_ms : HOST_HTTP_RETRY_INITIAL_MS;
-    host->http_retry_at_ms = host_deadline_from(now_ms, delay);
-    if (delay > host->http_largest_scheduled_retry_ms) {
-        host->http_largest_scheduled_retry_ms = delay;
-    }
-    host->http_retry_delay_ms =
-        delay >= HOST_HTTP_RETRY_MAX_MS / 2U ? HOST_HTTP_RETRY_MAX_MS : delay * 2U;
-    char delay_text[32];
-    (void)snprintf(delay_text, sizeof(delay_text), "%u", delay);
-    cbm_log_warn("ui.retry_scheduled", "reason", reason, "delay_ms", delay_text);
-}
-
 static void host_http_reconcile_at(host_state_t *host, uint64_t now_ms, bool force_config_load) {
-    if (!host || !host->http_ops) {
-        return;
-    }
-    if (!force_config_load && host->http_config_loaded && now_ms < host->http_next_config_load_ms) {
-        return;
-    }
-    host->http_next_config_load_ms = host_deadline_from(now_ms, HOST_HTTP_CONFIG_POLL_MS);
-
-    cbm_ui_config_t desired;
-    host->http_ops->config_load(host->http_ops->context, &desired);
-    bool config_changed = !host->http_config_loaded ||
-                          desired.ui_enabled != host->http_config_enabled ||
-                          desired.ui_port != host->http_config_port;
-    if (config_changed && !host->http_retiring) {
-        host->http_retiring = true;
-        host->http_retry_at_ms = now_ms;
-        host->http_retry_delay_ms = HOST_HTTP_RETRY_INITIAL_MS;
-    }
-    if (host->http_retiring) {
-        if (now_ms < host->http_retry_at_ms) {
-            return;
-        }
-        if (!host_http_stop_join_free(host)) {
-            host_http_schedule_retry(host, now_ms, "server_retire");
-            return;
-        }
-        host->http_retiring = false;
-    }
-    if (config_changed) {
-        host->http_config_loaded = true;
-        host->http_config_enabled = desired.ui_enabled;
-        host->http_config_port = desired.ui_port;
-        host->http_retry_at_ms = now_ms;
-        host->http_retry_delay_ms = HOST_HTTP_RETRY_INITIAL_MS;
-    }
-    if (!desired.ui_enabled) {
-        return;
-    }
-    if (host->http_started || host->http) {
-        return;
-    }
-    if (!host->http_assets_available) {
-        if (config_changed) {
-            cbm_log_warn("ui.no_assets", "hint", "rebuild with: make -f Makefile.cbm cbm-with-ui");
-        }
-        host->http_retry_at_ms = UINT64_MAX;
-        return;
-    }
-    if (now_ms < host->http_retry_at_ms) {
-        return;
-    }
-
-    const host_http_ops_t *ops = host->http_ops;
-    host->http = ops->server_new(ops->context, desired.ui_port);
-    if (!host->http) {
-        host_http_schedule_retry(host, now_ms, "server_create");
-        return;
-    }
-    ops->server_configure(ops->context, host->http, host);
-    if (ops->thread_start(ops->context, &host->http_thread, host_http_thread, host->http) == 0) {
-        host->http_started = true;
-        host->http_retry_at_ms = 0;
-        host->http_retry_delay_ms = HOST_HTTP_RETRY_INITIAL_MS;
-    } else {
-        host->http_retiring = true;
-        if (host_http_stop_join_free(host)) {
-            host->http_retiring = false;
-        }
-        host_http_schedule_retry(host, now_ms, "thread_start");
+    if (host && host->http_ops) {
+        mori_http_host_reconcile(&host->http, host->http_ops, host, now_ms, force_config_load);
     }
 }
 
 static void host_background_stop(host_state_t *host) {
-    if (host->http && host->http_started) {
-        host->http_ops->server_stop(host->http_ops->context, host->http);
-    }
+    mori_http_host_stop(&host->http, host->http_ops);
     if (host->watcher) {
         cbm_watcher_stop(host->watcher);
     }
 }
 
 static bool host_background_join(host_state_t *host) {
-    if (host->http_started) {
-        if (host->http_ops->thread_join(host->http_ops->context, &host->http_thread) != 0) {
-            return false;
-        }
-        host->http_started = false;
+    if (!mori_http_host_join(&host->http, host->http_ops, host)) {
+        return false;
     }
     if (host->watcher_started) {
         if (cbm_thread_join(&host->watcher_thread) != 0) {
@@ -727,7 +613,7 @@ static bool host_project_lock_manager_free_once(void *context) {
 static void host_state_free(host_state_t *host) {
     host_named_watch_free(host->named_watch_candidate);
     host_named_watch_free(host->named_watch_accepted);
-    if (!host_http_stop_join_free(host)) {
+    if (!mori_http_host_dispose(&host->http, host->http_ops, host)) {
         /* The retained server or one of its callbacks can still borrow every
          * dependency below. Process containment is the only safe teardown. */
         host_force_terminate("http_cleanup");
@@ -756,7 +642,7 @@ static void host_state_free(host_state_t *host) {
 
 static bool host_state_prepare(host_state_t *host, const cbm_daemon_ipc_endpoint_t *endpoint) {
     host->http_ops = &g_host_http_default_ops;
-    host->http_assets_available = CBM_EMBEDDED_FILE_COUNT > 0;
+    host->http.assets_available = CBM_EMBEDDED_FILE_COUNT > 0;
     if (!cbm_secure_random(host->ui_readiness_secret, sizeof(host->ui_readiness_secret))) {
         cbm_log_error("daemon.readiness_secret_failed", "reason", "system_rng_unavailable");
         return false;
@@ -868,14 +754,13 @@ static cbm_http_server_t *host_http_test_server_new(void *opaque, int port) {
                : (cbm_http_server_t *)context;
 }
 
-static void host_http_test_server_configure(void *opaque, cbm_http_server_t *server,
-                                            host_state_t *host) {
+static void host_http_test_server_configure(void *opaque, cbm_http_server_t *server, void *owner) {
     (void)opaque;
     (void)server;
-    (void)host;
+    (void)owner;
 }
 
-/* WHY: host_http_ops_t is also implemented by production callbacks that mutate
+/* WHY: mori_http_host_ops_t is also implemented by production callbacks that mutate
  * the server; this test double must retain that callback ABI even though it
  * only observes whether the opaque fake server is present. */
 // cppcheck-suppress constParameterCallback
@@ -886,7 +771,7 @@ static void host_http_test_server_stop(void *opaque, cbm_http_server_t *server) 
 }
 
 /* WHY: See host_http_test_server_stop; changing only this implementation to a
- * pointer-to-const parameter would make it incompatible with host_http_ops_t. */
+ * pointer-to-const parameter would make it incompatible with mori_http_host_ops_t. */
 // cppcheck-suppress constParameterCallback
 static bool host_http_test_server_free(void *opaque, cbm_http_server_t *server) {
     host_http_reconcile_test_context_t *context = opaque;
@@ -896,18 +781,17 @@ static bool host_http_test_server_free(void *opaque, cbm_http_server_t *server) 
     return !server || context->server_frees > context->server_free_failures;
 }
 
-static int host_http_test_thread_start(void *opaque, cbm_thread_t *thread, void *(*entry)(void *),
-                                       void *entry_context) {
-    (void)thread;
-    (void)entry;
-    (void)entry_context;
+// cppcheck-suppress constParameterCallback
+static int host_http_test_thread_start(void *opaque, void *owner, cbm_http_server_t *server) {
+    (void)owner;
+    (void)server;
     host_http_reconcile_test_context_t *context = opaque;
     context->thread_start_attempts++;
     return context->thread_start_attempts <= context->thread_start_failures ? -1 : 0;
 }
 
-static int host_http_test_thread_join(void *opaque, cbm_thread_t *thread) {
-    (void)thread;
+static int host_http_test_thread_join(void *opaque, void *owner) {
+    (void)owner;
     host_http_reconcile_test_context_t *context = opaque;
     context->thread_joins++;
     return 0;
@@ -929,7 +813,7 @@ bool cbm_daemon_host_http_reconcile_sequence_for_test(
         .create_failures = create_failures,
         .thread_start_failures = thread_start_failures,
     };
-    const host_http_ops_t ops = {
+    const mori_http_host_ops_t ops = {
         .context = &context,
         .config_load = host_http_test_config_load,
         .server_new = host_http_test_server_new,
@@ -938,18 +822,20 @@ bool cbm_daemon_host_http_reconcile_sequence_for_test(
         .server_free = host_http_test_server_free,
         .thread_start = host_http_test_thread_start,
         .thread_join = host_http_test_thread_join,
+        .log_retry = host_http_log_retry,
+        .log_no_assets = host_http_log_no_assets,
     };
     host_state_t host = {
-        .http_assets_available = true,
+        .http = {.assets_available = true},
         .http_ops = &ops,
     };
     for (size_t i = 0; i < timestamp_count; i++) {
         host_http_reconcile_at(&host, timestamps_ms[i], i == 0);
     }
-    bool active = host.http_started;
-    uint32_t largest_retry = host.http_largest_scheduled_retry_ms;
-    uint64_t next_retry = host.http_retry_at_ms;
-    if (!host_http_stop_join_free(&host)) {
+    bool active = host.http.started;
+    uint32_t largest_retry = host.http.largest_scheduled_retry_ms;
+    uint64_t next_retry = host.http.retry_at_ms;
+    if (!mori_http_host_dispose(&host.http, &ops, &host)) {
         return false;
     }
 
@@ -976,7 +862,7 @@ bool cbm_daemon_host_http_reconcile_free_refusal_for_test(
         .server_free_failures = 1,
         .config_change_after_load = 2,
     };
-    const host_http_ops_t ops = {
+    const mori_http_host_ops_t ops = {
         .context = &context,
         .config_load = host_http_test_config_load,
         .server_new = host_http_test_server_new,
@@ -985,19 +871,21 @@ bool cbm_daemon_host_http_reconcile_free_refusal_for_test(
         .server_free = host_http_test_server_free,
         .thread_start = host_http_test_thread_start,
         .thread_join = host_http_test_thread_join,
+        .log_retry = host_http_log_retry,
+        .log_no_assets = host_http_log_no_assets,
     };
     host_state_t host = {
-        .http_assets_available = true,
+        .http = {.assets_available = true},
         .http_ops = &ops,
     };
 
     host_http_reconcile_at(&host, 0, true);
-    host_http_reconcile_at(&host, HOST_HTTP_CONFIG_POLL_MS, false);
+    host_http_reconcile_at(&host, 1000, false);
     bool retained_after_refusal =
-        host.http != NULL && !host.http_started && context.server_create_attempts == 1;
+        host.http.server != NULL && !host.http.started && context.server_create_attempts == 1;
     size_t creates_after_refusal = context.server_create_attempts;
-    host_http_reconcile_at(&host, HOST_HTTP_CONFIG_POLL_MS * 2U, false);
-    bool replacement_active = host.http != NULL && host.http_started;
+    host_http_reconcile_at(&host, 2000, false);
+    bool replacement_active = host.http.server != NULL && host.http.started;
 
     *result_out = (cbm_daemon_host_http_free_refusal_test_result_t){
         .server_create_attempts_after_refusal = creates_after_refusal,
@@ -1009,7 +897,7 @@ bool cbm_daemon_host_http_reconcile_free_refusal_for_test(
         .retained_after_refusal = retained_after_refusal,
         .replacement_active_after_retry = replacement_active,
     };
-    return host_http_stop_join_free(&host);
+    return mori_http_host_dispose(&host.http, &ops, &host);
 }
 
 typedef struct {
@@ -1017,7 +905,7 @@ typedef struct {
     bool free_refused_while_scheduled;
 } host_http_thread_create_failure_test_t;
 
-/* WHY: the signature is fixed by the host_http_ops_t thread_start hook type;
+/* WHY: the signature is fixed by the mori_http_host_ops_t thread_start hook type;
  * a const pointee would make the function-pointer types incompatible. */
 static int host_http_thread_create_failure_for_test(
     void *opaque, cbm_thread_t *thread, void *(*entry)(void *),

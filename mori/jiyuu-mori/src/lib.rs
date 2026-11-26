@@ -84,6 +84,10 @@ pub use project_response::register_index_status_renderer;
 pub mod startup;
 
 #[cfg(feature = "native-engine-abi")]
+#[path = "ui/http_host.rs"]
+mod ui_http_host;
+
+#[cfg(feature = "native-engine-abi")]
 #[path = "ui/http_transport.rs"]
 mod ui_http_transport;
 
