@@ -4,6 +4,7 @@ from telethon import errors
 
 from telethon.tl.custom import Message
 
+from telegram_mcp import call_history
 from telegram_mcp.message_results import message_page, single_message
 from telegram_mcp.runtime import *
 
@@ -1155,6 +1156,7 @@ async def delete_messages_bulk(
     except errors.MessageIdInvalidError:
         return "Cannot delete messages: one or more message IDs are invalid."
     except errors.ChatAdminRequiredError:
+        call_history.record_failure("denied", "telegram_admin_required")
         return "Cannot delete messages: admin privileges are required."
     except Exception as e:
         return log_and_format_error(
