@@ -728,6 +728,11 @@ fn number(value: impl ToString) -> CString {
 
 fn raw_tree(row: &RawMatch) -> [CString; 11] {
     let next = content_next(row);
+    let (match_start, match_end) = if row.match_known {
+        (number(row.match_start_byte), number(row.match_end_byte))
+    } else {
+        (CString::default(), CString::default())
+    };
     [
         row.file().to_owned(),
         number(row.line),
@@ -735,12 +740,8 @@ fn raw_tree(row: &RawMatch) -> [CString; 11] {
         number(row.content_start_byte),
         number(row.content_returned_bytes),
         number(row.content_total_bytes),
-        row.match_known
-            .then(|| number(row.match_start_byte))
-            .unwrap_or_default(),
-        row.match_known
-            .then(|| number(row.match_end_byte))
-            .unwrap_or_default(),
+        match_start,
+        match_end,
         number(next.is_some()),
         next.map(number).unwrap_or_default(),
         number(match_returned(row)),
