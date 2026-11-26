@@ -2138,7 +2138,7 @@ impl MatchQuery<'_> {
         nodes: &[Option<&Node>],
         edges: &[Option<&Edge>],
         context: &ExpressionContext<'_>,
-        budget: &ExecutionBudget<'_>,
+        budget: &mut ExecutionBudget<'_>,
     ) -> Result<bool, ExecutionError> {
         let limit = self.limit.unwrap_or(ENGINE_LIMIT);
         match collector {
