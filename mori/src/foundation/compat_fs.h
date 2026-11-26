@@ -138,6 +138,10 @@ void cbm_lockfile_close(int fd);
  * On POSIX, delegates to fopen. mode must be an ASCII string. */
 FILE *cbm_fopen(const char *path, const char *mode);
 
+/* Rust's test-impact CLI uses the same CRT that owns the FILE on Windows. */
+bool cbm_test_impact_cli_write(FILE *stream, const unsigned char *bytes, size_t len, bool newline);
+bool cbm_test_impact_cli_close(FILE *stream);
+
 /* Execute a command without shell interpretation.
  * argv is a NULL-terminated array: {"cmd", "arg1", "arg2", NULL}.
  * Returns the process exit code, or -1 on fork/exec failure.

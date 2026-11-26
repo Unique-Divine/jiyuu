@@ -1,19 +1,52 @@
-//! Method routing for a parsed JSON-RPC request.
+//! Lifecycle and method routing for MCP JSON-RPC requests.
 
-use std::ffi::{CStr, c_char};
+use std::ffi::{CStr, c_char, c_int};
+use std::ptr;
 
-/// C owns the request and its outputs. Only the C operations may
-/// dereference this pointer, and only while dispatch is running.
+use crate::ffi_output;
+
+const PARSE_ERROR: c_int = -32700;
+const INTERNAL_ERROR: c_int = -32603;
+
 #[repr(C)]
 pub(super) struct RequestContext {
     _opaque: [u8; 0],
 }
 
+#[repr(C)]
+struct Server {
+    _opaque: [u8; 0],
+}
+
+/// Mirrors cbm_jsonrpc_request_t. C owns the fields until `free_parsed`.
+#[repr(C)]
+struct JsonRpcRequest {
+    jsonrpc: *const c_char,
+    method: *const c_char,
+    id: i64,
+    id_str: *const c_char,
+    has_id: bool,
+    params_raw: *const c_char,
+}
+
 type RequestOp = unsafe extern "C" fn(*mut RequestContext);
 
-/// Mirrors mcp_request_ops_t in mcp.c.
+/// Mirrors mcp_request_ops_t in mcp.c. Operations borrow the context
+/// synchronously. C owns allocations, the codec, and the native tool calls.
 #[repr(C)]
 pub(super) struct RequestOps {
+    parse: unsafe extern "C" fn(*const c_char, *mut JsonRpcRequest) -> c_int,
+    begin_scope: unsafe extern "C" fn(*mut Server) -> bool,
+    start_timer: RequestOp,
+    trace_dispatch: RequestOp,
+    finish: unsafe extern "C" fn(
+        *mut RequestContext,
+        *const c_char,
+        bool,
+    ) -> *mut c_char,
+    end_scope: unsafe extern "C" fn(*mut Server),
+    free_parsed: unsafe extern "C" fn(*mut JsonRpcRequest),
+    format_error: unsafe extern "C" fn(i64, c_int, *const c_char) -> *mut c_char,
     initialize: RequestOp,
     ping: RequestOp,
     resources_list: RequestOp,
@@ -23,108 +56,132 @@ pub(super) struct RequestOps {
     tools_list: RequestOp,
     tools_call: RequestOp,
     cancel_notification: RequestOp,
-    unknown: unsafe extern "C" fn(*mut RequestContext, bool),
 }
 
-#[unsafe(no_mangle)]
-unsafe extern "C" fn cbm_rust_mcp_dispatch(
-    method: *const c_char,
+enum RouteOutcome {
+    Handled,
+    MethodNotFound { expected: bool },
+}
+
+/// # Safety
+/// The context and operations must be live and satisfy the request ABI.
+unsafe fn dispatch_method(
+    method: &CStr,
     has_id: bool,
     ctx: *mut RequestContext,
-    ops: *const RequestOps,
-) {
-    // SAFETY: C supplies the parsed method, live request, and matching
-    // operation table for the duration of this synchronous callback.
-    unsafe {
-        let method = CStr::from_ptr(method).to_bytes();
-        let ops = &*ops;
-        if !has_id {
-            if method == b"notifications/cancelled" {
-                (ops.cancel_notification)(ctx);
+    ops: &RequestOps,
+) -> RouteOutcome {
+    let method = method.to_bytes();
+    let operation = if has_id {
+        match method {
+            b"initialize" => ops.initialize,
+            b"ping" => ops.ping,
+            b"resources/list" => ops.resources_list,
+            b"resources/templates/list" => ops.resource_templates_list,
+            b"prompts/list" => ops.prompts_list,
+            b"prompts/get" => ops.prompts_get,
+            b"tools/list" => ops.tools_list,
+            b"tools/call" => ops.tools_call,
+            _ => {
+                // The discovery probe expects a method error and then uses
+                // initialize, so leave its request diagnostics successful.
+                return RouteOutcome::MethodNotFound {
+                    expected: method == b"server/discover",
+                };
             }
-            return;
+        }
+    } else if method == b"notifications/cancelled" {
+        ops.cancel_notification
+    } else {
+        return RouteOutcome::Handled;
+    };
+    // SAFETY: The caller provides the live context for the operation table.
+    unsafe { operation(ctx) };
+    RouteOutcome::Handled
+}
+
+/// # Safety
+/// C supplies live context and request storage, NUL-terminated input, and the
+/// matching table. The server pointer must satisfy the native scope callbacks.
+unsafe fn handle_request(
+    line: *const c_char,
+    server: *mut Server,
+    request: *mut JsonRpcRequest,
+    ctx: *mut RequestContext,
+    ops: &RequestOps,
+) -> *mut c_char {
+    // SAFETY: The parser initializes the request in C-owned storage. Copy the
+    // header fields rather than holding a reference across mutable callbacks.
+    unsafe {
+        if (ops.parse)(line, request) < 0 {
+            return (ops.format_error)(
+                0,
+                PARSE_ERROR,
+                ffi_output::c_str(c"Parse error"),
+            );
         }
 
-        match method {
-            b"initialize" => (ops.initialize)(ctx),
-            b"ping" => (ops.ping)(ctx),
-            b"resources/list" => (ops.resources_list)(ctx),
-            b"resources/templates/list" => (ops.resource_templates_list)(ctx),
-            b"prompts/list" => (ops.prompts_list)(ctx),
-            b"prompts/get" => (ops.prompts_get)(ctx),
-            b"tools/list" => (ops.tools_list)(ctx),
-            b"tools/call" => (ops.tools_call)(ctx),
-            _ => (ops.unknown)(ctx, method == b"server/discover"),
+        let method = (*request).method;
+        let method = if method.is_null() {
+            c""
+        } else {
+            CStr::from_ptr(method)
+        };
+        if !(*request).has_id {
+            dispatch_method(method, false, ctx, ops);
+            (ops.trace_dispatch)(ctx);
+            (ops.free_parsed)(request);
+            return ptr::null_mut();
         }
+        if !(ops.begin_scope)(server) {
+            let id = (*request).id;
+            (ops.free_parsed)(request);
+            return (ops.format_error)(
+                id,
+                INTERNAL_ERROR,
+                ffi_output::c_str(c"Request cancellation scope unavailable"),
+            );
+        }
+
+        (ops.start_timer)(ctx);
+        let outcome = dispatch_method(method, true, ctx, ops);
+        (ops.trace_dispatch)(ctx);
+        let (protocol_error, unexpected_method) = match outcome {
+            RouteOutcome::Handled => (ptr::null(), false),
+            RouteOutcome::MethodNotFound { expected } => (
+                ffi_output::c_str(
+                    c"{\"code\":-32601,\"message\":\"Method not found\"}",
+                ),
+                !expected,
+            ),
+        };
+        let response = (ops.finish)(ctx, protocol_error, unexpected_method);
+        (ops.end_scope)(server);
+        (ops.free_parsed)(request);
+        response
     }
+}
+
+/// Write the C-owned response pointer back to the caller. The caller frees it
+/// with the native allocator.
+///
+/// # Safety
+/// In addition to the request ABI, `out` must point to writable pointer storage.
+#[unsafe(no_mangle)]
+unsafe extern "C" fn cbm_rust_mcp_handle_request(
+    line: *const c_char,
+    server: *mut Server,
+    request: *mut JsonRpcRequest,
+    ctx: *mut RequestContext,
+    ops: *const RequestOps,
+    out: *mut *mut c_char,
+) {
+    // SAFETY: C supplies the matching table and a writable pointer on every call.
+    unsafe {
+        ffi_output::write(out, handle_request(line, server, request, ctx, &*ops))
+    };
 }
 
 #[cfg(test)]
-#[test]
-fn dispatches_cancel_only_as_a_notification() {
-    #[derive(Debug, PartialEq)]
-    enum Operation {
-        None,
-        Cancel,
-        Unknown,
-        Discover,
-        Request,
-    }
-
-    unsafe extern "C" fn request(ctx: *mut RequestContext) {
-        // SAFETY: The test passes a writable Operation as its context.
-        unsafe { *ctx.cast() = Operation::Request };
-    }
-    unsafe extern "C" fn cancel(ctx: *mut RequestContext) {
-        // SAFETY: The test passes a writable Operation as its context.
-        unsafe { *ctx.cast() = Operation::Cancel };
-    }
-    unsafe extern "C" fn unknown(ctx: *mut RequestContext, discover: bool) {
-        // SAFETY: The test passes a writable Operation as its context.
-        unsafe {
-            *ctx.cast() = if discover {
-                Operation::Discover
-            } else {
-                Operation::Unknown
-            };
-        }
-    }
-
-    let ops = RequestOps {
-        initialize: request,
-        ping: request,
-        resources_list: request,
-        resource_templates_list: request,
-        prompts_list: request,
-        prompts_get: request,
-        tools_list: request,
-        tools_call: request,
-        cancel_notification: cancel,
-        unknown,
-    };
-    for (method, has_id, expected) in [
-        (c"notifications/cancelled", false, Operation::Cancel),
-        (c"notifications/cancelled", true, Operation::Unknown),
-        (c"initialize", false, Operation::None),
-        (c"tools/call", false, Operation::None),
-        (c"tools/call", true, Operation::Request),
-        (c"tools/list", true, Operation::Request),
-        (c"ping", true, Operation::Request),
-        (c"server/discover", false, Operation::None),
-        (c"server/discover", true, Operation::Discover),
-        (c"bogus", true, Operation::Unknown),
-    ] {
-        let mut observed = Operation::None;
-        // SAFETY: The method and table are live, and the test operations
-        // cast the borrowed pointer back to its original type.
-        unsafe {
-            cbm_rust_mcp_dispatch(
-                method.as_ptr(),
-                has_id,
-                (&raw mut observed).cast(),
-                &ops,
-            );
-        }
-        assert_eq!(observed, expected, "{method:?}, has_id={has_id}");
-    }
-}
+#[path = "methods_tests.rs"]
+mod tests;

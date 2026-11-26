@@ -18,7 +18,7 @@ mod doc_file_links;
 mod docker_image;
 #[cfg(any(feature = "native-engine-abi", test))]
 mod explicit_override;
-#[cfg(feature = "native-engine-abi")]
+#[cfg(any(feature = "native-engine-abi", test))]
 mod ffi_output;
 #[cfg(feature = "native-engine-abi")]
 mod jvm_doc_links;
@@ -40,6 +40,8 @@ mod pdf_doc_links;
 mod rust_doc_cargo;
 #[cfg(feature = "native-engine-abi")]
 mod rust_doc_path;
+#[cfg(feature = "native-engine-abi")]
+mod search_code_request;
 #[cfg(any(feature = "native-engine-abi", test))]
 mod semantic_candidates;
 #[cfg(feature = "native-engine-abi")]
@@ -52,6 +54,8 @@ mod snippet_window;
 mod swift_package_map;
 #[cfg(feature = "native-engine-abi")]
 mod terraform;
+#[cfg(feature = "native-engine-abi")]
+mod test_impact_cli;
 #[cfg(feature = "native-engine-abi")]
 mod test_impact_git;
 

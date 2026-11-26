@@ -44,6 +44,7 @@ pub(crate) fn c_str(value: &CStr) -> *const c_char {
 }
 
 /// Mark initialized Rust bytes before calling code that may use a C interceptor.
+#[cfg(feature = "native-engine-abi")]
 pub(crate) fn bytes(value: &[u8]) {
     // SAFETY: a Rust byte slice carries its initialized length.
     unsafe { written(value.as_ptr(), value.len()) }

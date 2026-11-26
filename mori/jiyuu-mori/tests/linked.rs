@@ -13,6 +13,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use rusqlite::{Connection, OpenFlags};
 
 mod support;
+#[path = "support/test_impact.rs"]
+mod test_impact;
 
 const MORI: &str = env!("CARGO_BIN_EXE_mori");
 
@@ -722,6 +724,7 @@ fn mcp_method_dispatch_matches_c() {
         "{\"jsonrpc\":\"2.0\",\"id\":\"discover\",\"method\":\"server/discover\"}\n",
         "{\"jsonrpc\":\"2.0\",\"id\":\"unknown\",\"method\":\"ping/extra\"}\n",
         "{\"jsonrpc\":\"2.0\",\"id\":\"cancel-request\",\"method\":\"notifications/cancelled\"}\n",
+        "not-json\n",
     );
     let reference = run_stdio(&c_binary(), "c", &[], input);
     let linked = run_stdio(Path::new(MORI), "rs", &[], input);
@@ -730,7 +733,7 @@ fn mcp_method_dispatch_matches_c() {
         .lines()
         .map(|line| serde_json::from_str(line).expect("parse response"))
         .collect();
-    assert_eq!(replies.len(), 7, "{linked}");
+    assert_eq!(replies.len(), 8, "{linked}");
     assert_eq!(replies[0]["id"], "ping");
     assert_eq!(replies[0]["result"], serde_json::json!({}));
     // The C envelope uses -1 for a present null ID. A missing ID is silent.
@@ -742,13 +745,15 @@ fn mcp_method_dispatch_matches_c() {
         serde_json::json!([])
     );
     for (reply, id) in
-        replies[4..]
+        replies[4..7]
             .iter()
             .zip(["discover", "unknown", "cancel-request"])
     {
         assert_eq!(reply["id"], id);
         assert_eq!(reply["error"]["code"], -32601);
     }
+    assert_eq!(replies[7]["id"], 0);
+    assert_eq!(replies[7]["error"]["code"], -32700);
 }
 
 #[test]
@@ -1969,7 +1974,20 @@ fn snippet_source_windows_match_c_in_cli_and_forwarded_mcp() {
     let mut source = "class Big:\n    def first(self): return 1\n".to_owned();
     source.push_str(&"    # filler\n".repeat(600));
     source.push_str("    def last(self): return 2\n");
+    source.push_str("\ndef over_budget(): return \"");
+    source.push_str(&"x".repeat(700));
+    source.push_str("\"\n");
+    source.push_str("\ndef escaped(): return \"😀\t\x1b\\\\tail\"\n");
+    source.push_str("\ndef relay(): return escaped()\n");
     fs::write(&file, &source).unwrap();
+
+    for module in ["left", "right"] {
+        fs::write(
+            repo.join(format!("{module}.py")),
+            "def duplicate():\n    return 1\n",
+        )
+        .unwrap();
+    }
 
     let c = c_binary();
     let rust = Path::new(MORI);
@@ -1996,6 +2014,8 @@ fn snippet_source_windows_match_c_in_cli_and_forwarded_mcp() {
     };
     let big = qualified_name("Big");
     let first = qualified_name("first");
+    let over_budget = qualified_name("over_budget");
+    let escaped = qualified_name("escaped");
     drop(graph);
 
     let requests = [
@@ -2013,10 +2033,23 @@ fn snippet_source_windows_match_c_in_cli_and_forwarded_mcp() {
             "qualified_name": first, "start_line": 999,
         }),
         serde_json::json!({"qualified_name": "unknown_symbol"}),
+        serde_json::json!({
+            "qualified_name": over_budget, "max_output_tokens": 200,
+        }),
+        serde_json::json!({"qualified_name": escaped, "include_neighbors": true}),
+        serde_json::json!({"qualified_name": "duplicate"}),
+        serde_json::json!({
+            "qualified_name": escaped, "format": "tree",
+        }),
+        serde_json::json!({
+            "qualified_name": big, "member_limit": 1, "member_offset": 1,
+        }),
     ]
     .map(|mut args| {
         args["project"] = serde_json::json!(project);
-        args["format"] = serde_json::json!("json");
+        if args.get("format").is_none() {
+            args["format"] = serde_json::json!("json");
+        }
         args
     });
     let read = |bin: &Path, args: &serde_json::Value| {
@@ -2058,8 +2091,30 @@ fn snippet_source_windows_match_c_in_cli_and_forwarded_mcp() {
                 .contains("symbol not found")
     );
 
+    let omitted = json(&responses[6]);
+    assert_eq!(omitted["source_omitted"], true);
+    assert_eq!(omitted["source_lines_returned"], 0);
+    assert_eq!(omitted["continuation_requires_higher_budget"], true);
+    let escaped = json(&responses[7]);
+    assert_eq!(escaped["caller_names"], serde_json::json!(["relay"]));
+    let escaped_source = escaped["source"].as_str().unwrap();
+    assert!(escaped_source.contains("😀\t\x1b\\\\tail"));
+    assert!(
+        responses[7]
+            .stdout
+            .windows(6)
+            .any(|part| part == br"\u001B")
+    );
+    let ambiguous = json(&responses[8]);
+    assert_eq!(ambiguous["status"], "ambiguous");
+    assert_eq!(ambiguous["suggestions"].as_array().unwrap().len(), 2);
+    assert!(String::from_utf8_lossy(&responses[9].stdout).contains("source: |"));
+    let outline_page = json(&responses[10]);
+    assert_eq!(outline_page["members_returned"], 1);
+    assert_eq!(outline_page["members"][0]["label"], "Method");
+
     // Repeat a successful request through MCP stdio. The debug marker is
-    // written by the daemon only after the Rust callback returns.
+    // written by the daemon after Rust assembles the response.
     let startup = command_in(rust, &scratch)
         .env("CBM_LOG_LEVEL", "debug")
         .args(["daemon", "start"])
@@ -2100,7 +2155,8 @@ fn snippet_source_windows_match_c_in_cli_and_forwarded_mcp() {
     let log =
         fs::read_to_string(scratch.0.join("cache/logs/cbm-daemon.log")).unwrap();
     assert!(log.lines().any(|line| {
-        line.contains("get_code_snippet.window") && line.contains("backend=rust")
+        line.contains("get_code_snippet.response")
+            && line.contains("backend=rust")
     }));
 
     fs::write(&file, format!("# shifted\n{source}")).unwrap();

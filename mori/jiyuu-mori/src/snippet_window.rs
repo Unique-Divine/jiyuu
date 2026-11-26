@@ -2,6 +2,8 @@
 
 use std::ffi::c_int;
 
+#[cfg(any(feature = "native-engine-abi", test))]
+mod response;
 mod source;
 
 const DEFAULT_LINES: c_int = 50;
