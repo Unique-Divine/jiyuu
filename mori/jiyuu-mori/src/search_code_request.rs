@@ -4,13 +4,13 @@
 mod native;
 mod response;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, hash_map::Entry};
 use std::ffi::{CStr, CString, c_char, c_void};
 use std::{panic, ptr};
 
-use serde::de::{Error, MapAccess, Visitor};
+use serde::de::{IgnoredAny, MapAccess, Visitor};
 use serde::{Deserialize, Deserializer};
-use serde_json::Value;
+use serde_json::value::RawValue;
 
 use native::{Native, NativeOps};
 use response::Response;
@@ -48,15 +48,41 @@ struct Request {
     json: bool,
 }
 
-// Match yyjson's first-key lookup, including when the first value has the
-// wrong type. Keep the original number token for integer-only presence checks.
-#[derive(Default)]
-struct Args<'a>(HashMap<String, Arg<'a>>);
-
-struct Arg<'a> {
-    raw: &'a str,
-    value: Value,
+fn known_field(name: &str) -> bool {
+    // Key comparisons may call C's memcmp on these Rust-owned bytes.
+    crate::ffi_output::bytes(name.as_bytes());
+    matches!(
+        name,
+        "pattern"
+            | "project"
+            | "project_name"
+            | "project_id"
+            | "projectName"
+            | "file_pattern"
+            | "path_filter"
+            | "mode"
+            | "limit"
+            | "result_limit"
+            | "max_output_tokens"
+            | "result_offset"
+            | "raw_offset"
+            | "raw_limit"
+            | "directory_offset"
+            | "directory_limit"
+            | "raw_content_offset"
+            | "match_limit"
+            | "context"
+            | "source_max_lines"
+            | "regex"
+            | "debug"
+            | "format"
+    )
 }
+
+// Keep yyjson's first value for each known key, even if it has the wrong
+// type. Lookups decode only the scalar type that they need.
+#[derive(Default)]
+struct Args<'a>(HashMap<String, &'a str>);
 
 impl<'de> Deserialize<'de> for Args<'de> {
     fn deserialize<D: Deserializer<'de>>(
@@ -79,13 +105,14 @@ impl<'de> Deserialize<'de> for Args<'de> {
                 mut map: A,
             ) -> Result<Self::Value, A::Error> {
                 let mut fields = HashMap::new();
-                while let Some((key, value)) =
-                    map.next_entry::<String, &'de serde_json::value::RawValue>()?
-                {
-                    let raw = value.get();
-                    let value =
-                        serde_json::from_str(raw).map_err(A::Error::custom)?;
-                    fields.entry(key).or_insert(Arg { raw, value });
+                while let Some(key) = map.next_key::<String>()? {
+                    if known_field(&key)
+                        && let Entry::Vacant(entry) = fields.entry(key)
+                    {
+                        entry.insert(map.next_value::<&'de RawValue>()?.get());
+                    } else {
+                        map.next_value::<IgnoredAny>()?;
+                    }
                 }
                 Ok(Args(fields))
             }
@@ -96,36 +123,37 @@ impl<'de> Deserialize<'de> for Args<'de> {
 }
 
 impl Args<'_> {
-    fn value(&self, key: &str) -> Option<&Value> {
-        self.0.get(key).map(|arg| &arg.value)
+    fn raw(&self, field: &str) -> Option<&str> {
+        self.0.get(field).copied()
     }
 
-    fn string(&self, key: &str) -> Option<CString> {
-        let Value::String(value) = self.value(key)? else {
-            return None;
-        };
+    fn string(&self, field: &str) -> Option<CString> {
+        let value = serde_json::from_str::<String>(self.raw(field)?).ok()?;
         // The native argument getter copies through the first NUL.
-        Some(CString::new(value.split('\0').next().unwrap_or_default()).unwrap())
+        let value =
+            CString::new(value.split('\0').next().unwrap_or_default()).unwrap();
+        // CStr equality may call MemorySanitizer's intercepted memcmp.
+        native::c_str(&value);
+        Some(value)
     }
 
-    fn int(&self, key: &str, default: i32) -> i32 {
-        self.0
-            .get(key)
-            .and_then(|arg| arg.raw.parse::<i32>().ok())
+    fn int(&self, field: &str, default: i32) -> i32 {
+        self.raw(field)
+            .and_then(|raw| raw.parse().ok())
             .unwrap_or(default)
     }
 
-    fn offset(&self, key: &str) -> usize {
-        self.int(key, 0).max(0) as usize
+    fn offset(&self, field: &str) -> usize {
+        self.int(field, 0).max(0) as usize
     }
 
-    fn flag(&self, key: &str) -> bool {
-        self.value(key) == Some(&Value::Bool(true))
+    fn flag(&self, field: &str) -> bool {
+        self.raw(field) == Some("true")
     }
 
-    fn has_integer(&self, key: &str) -> bool {
-        self.0.get(key).is_some_and(|arg| {
-            arg.raw.parse::<i64>().is_ok() || arg.raw.parse::<u64>().is_ok()
+    fn has_integer(&self, field: &str) -> bool {
+        self.raw(field).is_some_and(|raw| {
+            raw.parse::<i64>().is_ok() || raw.parse::<u64>().is_ok()
         })
     }
 }
@@ -391,6 +419,37 @@ mod tests {
             Request::parse(br#"{"raw_content_offset":1.0}"#).raw_content_offset,
             None
         );
+    }
+
+    #[test]
+    fn skips_deep_ignored_fields_and_later_duplicates() {
+        let nested = format!("{}0{}", "[".repeat(200), "]".repeat(200));
+        let json = format!(
+            r#"{{"unknown":{nested},"pattern":"first","pattern":{nested},"project":"repo","debug": true}}"#
+        );
+        let request = Request::parse(json.as_bytes());
+        assert_eq!(request.pattern.as_deref(), Some(c"first"));
+        assert_eq!(request.project.as_deref(), Some(c"repo"));
+        assert!(request.debug);
+    }
+
+    #[test]
+    fn uses_field_defaults_when_first_values_have_wrong_types() {
+        let nested = format!("{}0{}", "[".repeat(200), "]".repeat(200));
+        let json = format!(
+            r#"{{
+                "pattern":"first","project":{nested},"project":"ignored","project_id":"alias",
+                "mode":{nested},"mode":"full","format":{nested},"format":"json",
+                "limit":{nested},"limit":30,"regex":{nested},"regex":true
+            }}"#
+        );
+        let request = Request::parse(json.as_bytes());
+        assert_eq!(request.pattern.as_deref(), Some(c"first"));
+        assert_eq!(request.project.as_deref(), Some(c"alias"));
+        assert_eq!(request.mode, Mode::Compact);
+        assert_eq!(request.results.limit, 10);
+        assert!(!request.json);
+        assert!(!request.use_regex);
     }
 
     #[test]
