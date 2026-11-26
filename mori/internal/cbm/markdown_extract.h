@@ -15,6 +15,9 @@ typedef struct {
     uint64_t name_checks;
 } cbm_markdown_work_t;
 
+/* Charge Rust-owned scratch capacity to the C runtime's ARENA class. */
+void cbm_markdown_scratch_change(size_t bytes, bool release, bool publish_peak);
+
 cbm_markdown_work_t mori_markdown_extract_sections(TSNode root, const char *source,
                                                    size_t source_len, size_t body_cap, void *ctx,
                                                    cbm_markdown_section_sink emit,

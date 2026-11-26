@@ -13736,6 +13736,23 @@ static void walk_defs(CBMExtractCtx *ctx, TSNode root, const CBMLangSpec *spec, 
     }
 }
 
+void cbm_markdown_scratch_change(size_t bytes, bool release, bool publish_peak) {
+    if (publish_peak) {
+        cbm_mem_class_flush_thread();
+    }
+    /* The accounting deltas use signed long, including on Windows. */
+    const size_t max_delta = LONG_MAX / 2;
+    while (bytes) {
+        size_t delta = bytes < max_delta ? bytes : max_delta;
+        if (release) {
+            cbm_mem_class_remove_external(CBM_MEM_CLASS_ARENA, delta);
+        } else {
+            cbm_mem_class_add_external(CBM_MEM_CLASS_ARENA, delta);
+        }
+        bytes -= delta;
+    }
+}
+
 static void markdown_emit_section(void *opaque, const TSNode *heading, const char *name,
                                   size_t name_len, const char *segment, size_t segment_len,
                                   const char *body, size_t body_len) {

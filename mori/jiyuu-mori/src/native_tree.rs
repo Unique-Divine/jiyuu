@@ -32,6 +32,10 @@ unsafe extern "C" {
         len: u32,
     ) -> RawNode;
     fn cbm_ffi_ts_tree_cursor_new(node: *const RawNode) -> RawCursor;
+    fn cbm_ffi_ts_tree_cursor_reset_to(
+        cursor: *mut RawCursor,
+        source: *const RawCursor,
+    );
     fn cbm_ffi_ts_tree_cursor_delete(cursor: *mut RawCursor);
     fn cbm_ffi_ts_tree_cursor_current_node(cursor: *const RawCursor) -> RawNode;
     fn cbm_ffi_ts_tree_cursor_goto_first_child(cursor: *mut RawCursor) -> bool;
@@ -51,6 +55,13 @@ impl TreeCursor {
     pub(crate) unsafe fn new(node: RawNode) -> Self {
         // SAFETY: The caller provides the live node and tree.
         Self(unsafe { cbm_ffi_ts_tree_cursor_new(&node) })
+    }
+
+    /// # Safety
+    /// The source tree must remain alive for the destination cursor's lifetime.
+    pub(crate) unsafe fn reset_to(&mut self, source: &Self) {
+        // SAFETY: Both cursors are live, and the destination is exclusively borrowed.
+        unsafe { cbm_ffi_ts_tree_cursor_reset_to(&mut self.0, &source.0) };
     }
 
     pub(crate) fn node(&self) -> RawNode {

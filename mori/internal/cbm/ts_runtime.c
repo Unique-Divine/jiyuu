@@ -51,6 +51,12 @@ static void cbm_ffi_ts_cursor_written(const TSTreeCursor *cursor) {
 #endif
 }
 
+void cbm_ffi_ts_tree_cursor_reset_to(TSTreeCursor *cursor, const TSTreeCursor *source) {
+    cbm_ffi_ts_cursor_written(cursor);
+    cbm_ffi_ts_cursor_written(source);
+    ts_tree_cursor_reset_to(cursor, source);
+}
+
 void cbm_ffi_ts_tree_cursor_delete(TSTreeCursor *cursor) {
     cbm_ffi_ts_cursor_written(cursor);
     ts_tree_cursor_delete(cursor);

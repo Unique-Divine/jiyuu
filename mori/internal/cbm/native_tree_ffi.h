@@ -19,6 +19,7 @@ bool cbm_ffi_ts_node_is_named(const TSNode *node);
 TSNode cbm_ffi_ts_node_child_by_field_name(const TSNode *node, const char *name, uint32_t length);
 
 TSTreeCursor cbm_ffi_ts_tree_cursor_new(const TSNode *node);
+void cbm_ffi_ts_tree_cursor_reset_to(TSTreeCursor *cursor, const TSTreeCursor *source);
 void cbm_ffi_ts_tree_cursor_delete(TSTreeCursor *cursor);
 TSNode cbm_ffi_ts_tree_cursor_current_node(const TSTreeCursor *cursor);
 bool cbm_ffi_ts_tree_cursor_goto_first_child(TSTreeCursor *cursor);
