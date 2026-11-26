@@ -10,14 +10,15 @@ builds and tests the Mori packages.
 | Branch dry run | Linux x64, Linux arm64, Apple Silicon | Workflow artifact `mori-preview-<version>-<sha>` with archives and checksums |
 | Manual reference prewarm on `main` | Linux x64, Linux arm64, Apple Silicon | Frozen C reference caches |
 | Daily check | All four release targets | Build, download, smoke, and CLI parity results |
-| Manual daily check on `main` | All four release targets | Cold build and parity results, with issue reporting disabled |
+| Manual daily check on `main` | All four release targets | Build and parity results, with issue reporting disabled |
 | Tagged release or tagged dry run | All four release targets | Archives and checksums for the exact tag commit |
 
 GitHub schedules the daily check for 04:23 UTC on the commit it selects
-from `main`. The check fetches grammar archives and builds pinned C references
-without restoring their caches. This exercises download and build steps
-even when routine previews use cached inputs. The tagged run builds and
-checks Intel macOS on the tag's commit before creating a draft release.
+from `main`. Daily checks use the same grammar and pinned C reference
+caches as previews and releases. The build verifies restored inputs and
+fetches or rebuilds them when the cache has no valid entry. Each target
+still builds Mori and runs CLI parity. Tagged runs check Intel macOS on
+the tag's commit before creating a draft release.
 
 Use the branch ref for a preview. Use `main` for a cache prewarm or a
 manual run of the daily checks.

@@ -70,7 +70,6 @@ jobs:
         if: fromJSON(inputs.platform).goos == 'darwin'
         run: command -v zstd || brew install zstd
       - name: Cache grammar archive
-        if: inputs.mode != 'daily'
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/jiyuu-mori/grammars
@@ -330,14 +329,13 @@ jobs:
           printf 'key=%s\n' "$key" >> "$GITHUB_OUTPUT"
           printf 'grammars=%s\n' "$(python3 scripts/c_reference_cache.py grammar-pin)" >> "$GITHUB_OUTPUT"
       - name: Cache the frozen C release reference
-        if: inputs.mode != 'daily'
         id: c-cache
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}/mori-release-c-reference
           key: mori-c-reference-${{ steps.c-oracle.outputs.key }}
       - name: Cache the oracle grammar archive
-        if: inputs.mode != 'daily' && steps.c-cache.outputs.cache-hit != 'true'
+        if: steps.c-cache.outputs.cache-hit != 'true'
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/jiyuu-mori/grammars
@@ -348,20 +346,6 @@ jobs:
           MORI_MAKE_JOBS="$(getconf _NPROCESSORS_ONLN)"
           export MORI_MAKE_JOBS
           python3 scripts/c_reference_cache.py ensure "$RUST_TARGET" "$RUNNER_TEMP/mori-release-c-reference"
-      - name: Look up the verified reference cache
-        if: inputs.mode == 'daily'
-        id: daily-reference-cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          lookup-only: true
-          path: ${{ runner.temp }}/mori-release-c-reference
-          key: mori-c-reference-${{ steps.c-oracle.outputs.key }}
-      - name: Save the verified reference
-        if: inputs.mode == 'daily' && steps.daily-reference-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ${{ runner.temp }}/mori-release-c-reference
-          key: mori-c-reference-${{ steps.c-oracle.outputs.key }}
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: inputs.mode != 'prewarm'
         with:
