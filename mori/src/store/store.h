@@ -672,17 +672,6 @@ int cbm_store_get_file_outline(cbm_store_t *s, const char *project, const char *
                                cbm_file_outline_row_t **out, int *count, int *total);
 void cbm_store_free_file_outline(cbm_file_outline_row_t *rows, int count);
 
-/* Register before request threads start. The reader runs while the store owns
- * SQLite's cancellation handler. The sink copies each borrowed row and enforces
- * the existing output limit. Both callbacks return CBM_STORE_* status codes. */
-typedef int (*cbm_file_outline_emit_fn)(void *context, const cbm_file_outline_row_t *row,
-                                       const size_t lengths[3]);
-typedef int (*cbm_file_outline_reader_fn)(struct sqlite3 *db, const char *project,
-                                         const char *file_path, const char *const *labels,
-                                         int label_count, int limit, int offset, int *total,
-                                         cbm_file_outline_emit_fn emit, void *context);
-void cbm_store_set_file_outline_reader(cbm_file_outline_reader_fn reader);
-
 /* Batch lookup: map qualified names → node IDs.
  * qns[i] is resolved; out_ids[i] receives the ID or 0 if not found.
  * Returns number of QNs actually found, or CBM_STORE_ERR. */

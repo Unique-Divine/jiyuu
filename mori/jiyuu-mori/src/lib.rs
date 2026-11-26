@@ -166,6 +166,8 @@ mod config_toml_edit;
 #[cfg(feature = "native-engine-abi")]
 mod config_yaml_edit;
 #[cfg(feature = "native-engine-abi")]
+mod file_outline;
+#[cfg(feature = "native-engine-abi")]
 mod fts_writer;
 #[cfg(feature = "native-engine-abi")]
 mod store_digest;
