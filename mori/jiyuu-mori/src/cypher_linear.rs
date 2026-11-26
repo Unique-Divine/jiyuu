@@ -21,9 +21,13 @@ mod rows;
 #[path = "cypher_linear/with_clause.rs"]
 mod with_clause;
 
+#[path = "cypher_linear/ordered_count.rs"]
+mod ordered_count;
+
 #[path = "cypher_linear/paths.rs"]
 mod paths;
 
+use ordered_count::OrderedCount;
 use predicates::{Bindings, Expr};
 use rows::Query;
 use with_clause::{ReturnGroups, WithPlan, WithRows};
@@ -1502,6 +1506,7 @@ enum RowCollector {
     With(WithRows),
     All,
     Count(CountRows),
+    OrderedCount(OrderedCount),
     Aggregate(ReturnGroups),
     Distinct(DistinctRows),
 }
@@ -1509,25 +1514,17 @@ enum RowCollector {
 struct CountGroups {
     column: usize,
     max_groups: usize,
-    needs_all_groups: bool,
     // Each map value records the group's first-seen position and count.
     groups: HashMap<Vec<u8>, (usize, usize)>,
 }
 
 impl CountGroups {
-    // False means that ranking needs a group the Rust accumulator cannot keep.
-    fn record(&mut self, key: &[u8]) -> bool {
-        // Native clips grouped cells before grouping and output.
-        let key = c_string_bytes(key);
-        let key = &key[..key.len().min(PROPERTY_LIMIT)];
+    fn record(&mut self, key: &[u8]) {
+        let key = count_group_key(key);
         if let Some((_, count)) = self.groups.get_mut(key) {
             *count += 1;
-            true
         } else if self.groups.len() < self.max_groups {
             self.groups.insert(key.to_vec(), (self.groups.len(), 1));
-            true
-        } else {
-            !self.needs_all_groups
         }
     }
 }
@@ -1674,47 +1671,10 @@ impl MatchQuery<'_> {
         standalone: bool,
         budget: &mut ExecutionBudget<'_>,
     ) -> Result<ResultRows, ExecutionError> {
-        budget.check()?;
-        let reversed = self.paths.as_ref().is_none_or(paths::Plan::can_reverse)
-            && self.hops.len() == 1
-            && self.selectivity(1) > self.selectivity(0);
-        // Native MATCH derives star column order from the bindings it emits.
-        if self.return_star
-            && self.with.is_none()
-            && (reversed || self.paths.is_some())
-        {
-            return Err(ExecutionError::Unsupported);
-        }
-        let start_index = usize::from(reversed);
-        let second_index = usize::from(!reversed);
         let context = ExpressionContext {
             connection,
             regex_refused: Cell::new(false),
         };
-        // Regex refusals are observable even after RETURN fills its window.
-        let scan_for_regex = self.filter.as_ref().is_some_and(Expr::has_regex)
-            || self.nodes.iter().any(|node| {
-                node.inline.iter().any(|(_, value)| looks_like_regex(value))
-            });
-        let labels = &self.nodes[start_index].labels;
-        let condition = if labels.is_empty() {
-            ""
-        } else {
-            " AND n.label = ?2"
-        };
-        // One scan per written label in order, including repeated labels.
-        let sql = format!(
-            "SELECT {NODE_COLUMNS} FROM nodes n WHERE n.project = ?1{condition}"
-        );
-        let mut statement = connection.prepare(&sql)?;
-        let mut walk = self
-            .paths
-            .as_ref()
-            .map(|plan| paths::Walk::new(plan, connection, project, &context))
-            .transpose()?;
-        let mut adjacency = (walk.is_none() && !self.hops.is_empty())
-            .then(|| Adjacency::new(connection))
-            .transpose()?;
         let limit = self.limit.unwrap_or(ENGINE_LIMIT);
         let mut collector = if self.with.is_some() {
             RowCollector::With(WithRows::default())
@@ -1722,9 +1682,9 @@ impl MatchQuery<'_> {
         // before it can apply the final result ceiling.
         } else if standalone
             && let Some(counts) =
-                self.count_rows(budget.ordered_count_group_limit)
+                self.count_collector(budget.ordered_count_group_limit)
         {
-            RowCollector::Count(counts)
+            counts
         } else if self
             .projections
             .iter()
@@ -1752,6 +1712,106 @@ impl MatchQuery<'_> {
             truncated: false,
             warnings: Warnings::default(),
         };
+        // MCP already lends us a read-batched handle. Direct callers may
+        // arrive in autocommit mode, so pin their snapshot across scans too.
+        let _snapshot = (matches!(collector, RowCollector::OrderedCount(_))
+            && connection.is_autocommit())
+        .then(|| connection.unchecked_transaction())
+        .transpose()?;
+        loop {
+            self.scan(
+                project,
+                standalone,
+                &context,
+                &mut collector,
+                &mut result,
+                budget,
+            )?;
+            let RowCollector::OrderedCount(counts) = &mut collector else {
+                break;
+            };
+            if let Some(rows) = counts.finish_batch(
+                &self.order,
+                result.columns.len(),
+                limit,
+                budget,
+            )? {
+                result.rows = rows;
+                result.warnings.regex_refused |= context.regex_refused.get();
+                budget.check()?;
+                return Ok(result);
+            }
+        }
+        match collector {
+            RowCollector::With(rows) => {
+                return self
+                    .with
+                    .as_ref()
+                    .unwrap()
+                    .finish(self, rows, result, &context, budget);
+            }
+            RowCollector::Count(counts) => {
+                result.rows =
+                    counts.rows(result.columns.len(), limit, budget)?;
+            }
+            RowCollector::Aggregate(groups) => {
+                groups.emit(self, &mut result, budget)?
+            }
+            RowCollector::OrderedCount(_) => unreachable!(),
+            RowCollector::All | RowCollector::Distinct(_) => {}
+        }
+        result.warnings.regex_refused |= context.regex_refused.get();
+        self.finish_rows(result, budget)
+    }
+
+    fn scan(
+        &self,
+        project: &str,
+        standalone: bool,
+        context: &ExpressionContext<'_>,
+        collector: &mut RowCollector,
+        result: &mut ResultRows,
+        budget: &mut ExecutionBudget<'_>,
+    ) -> Result<(), ExecutionError> {
+        budget.check()?;
+        let connection = context.connection;
+        let reversed = self.paths.as_ref().is_none_or(paths::Plan::can_reverse)
+            && self.hops.len() == 1
+            && self.selectivity(1) > self.selectivity(0);
+        // Native MATCH derives star column order from the bindings it emits.
+        if self.return_star
+            && self.with.is_none()
+            && (reversed || self.paths.is_some())
+        {
+            return Err(ExecutionError::Unsupported);
+        }
+        let start_index = usize::from(reversed);
+        let second_index = usize::from(!reversed);
+        // Regex refusals are observable even after RETURN fills its window.
+        let scan_for_regex = self.filter.as_ref().is_some_and(Expr::has_regex)
+            || self.nodes.iter().any(|node| {
+                node.inline.iter().any(|(_, value)| looks_like_regex(value))
+            });
+        let labels = &self.nodes[start_index].labels;
+        let condition = if labels.is_empty() {
+            ""
+        } else {
+            " AND n.label = ?2"
+        };
+        // One scan per written label in order, including repeated labels.
+        let sql = format!(
+            "SELECT {NODE_COLUMNS} FROM nodes n WHERE n.project = ?1{condition}"
+        );
+        let mut statement = connection.prepare(&sql)?;
+        let mut walk = self
+            .paths
+            .as_ref()
+            .map(|plan| paths::Walk::new(plan, connection, project, context))
+            .transpose()?;
+        let mut adjacency = (walk.is_none() && !self.hops.is_empty())
+            .then(|| Adjacency::new(connection))
+            .transpose()?;
+        let limit = self.limit.unwrap_or(ENGINE_LIMIT);
         let mut projection_done = false;
         let mut collect =
             |result: &mut ResultRows,
@@ -1763,7 +1823,7 @@ impl MatchQuery<'_> {
                     return Ok::<bool, ExecutionError>(true);
                 }
                 let more = self.collect_row(
-                    result, collector, nodes, edges, &context, budget,
+                    result, collector, nodes, edges, context, budget,
                 )?;
                 // This result already hits the final cap. Another start-node
                 // read cannot change the standalone query's answer.
@@ -1807,7 +1867,7 @@ impl MatchQuery<'_> {
                 };
                 budget.step()?;
                 let start = Node::read(row, 0)?;
-                if !self.matches_node(start_index, &start, &context) {
+                if !self.matches_node(start_index, &start, context) {
                     continue;
                 }
                 let mut seed = Bindings::default();
@@ -1816,7 +1876,7 @@ impl MatchQuery<'_> {
                     .as_ref()
                     .map_or(start_index, |plan| plan.first_slot(start_index));
                 seed.nodes[seed_slot] = Some(&start);
-                if !self.matches_where(&seed, &context) {
+                if !self.matches_where(&seed, context) {
                     continue;
                 }
                 if let Some(walk) = &mut walk {
@@ -1827,8 +1887,8 @@ impl MatchQuery<'_> {
                         budget,
                         &mut |path, budget| {
                             collect(
-                                &mut result,
-                                &mut collector,
+                                result,
+                                collector,
                                 &path.nodes,
                                 &path.edges,
                                 budget,
@@ -1839,13 +1899,8 @@ impl MatchQuery<'_> {
                     continue;
                 }
                 let Some(adjacency) = &mut adjacency else {
-                    if !collect(
-                        &mut result,
-                        &mut collector,
-                        &[Some(&start)],
-                        &[],
-                        budget,
-                    )? {
+                    if !collect(result, collector, &[Some(&start)], &[], budget)?
+                    {
                         break 'starts;
                     }
                     continue;
@@ -1860,7 +1915,7 @@ impl MatchQuery<'_> {
                     adjacency.neighbors(start.id, hop, direction, budget)?
                 {
                     budget.step()?;
-                    if !self.matches_node(second_index, &next, &context) {
+                    if !self.matches_node(second_index, &next, context) {
                         continue;
                     }
                     let mut path = Bindings {
@@ -1873,7 +1928,7 @@ impl MatchQuery<'_> {
                     // order: check the terminal node before evaluating WHERE.
                     // Both checks can emit warnings.
                     if (self.hops.len() == 1 || !scan_for_regex)
-                        && !self.matches_where(&path, &context)
+                        && !self.matches_where(&path, context)
                     {
                         continue;
                     }
@@ -1890,19 +1945,19 @@ impl MatchQuery<'_> {
                             if (!self.nodes[1].named
                                 && !self.nodes[2].named
                                 && next.id != last.id)
-                                || !self.matches_node(2, &last, &context)
+                                || !self.matches_node(2, &last, context)
                             {
                                 continue;
                             }
                             let mut path = path;
                             path.nodes[2] = Some(&last);
                             path.edges[1] = Some(&last_edge);
-                            if !self.matches_where(&path, &context) {
+                            if !self.matches_where(&path, context) {
                                 continue;
                             }
                             if !collect(
-                                &mut result,
-                                &mut collector,
+                                result,
+                                collector,
                                 &path.nodes,
                                 &path.edges,
                                 budget,
@@ -1912,8 +1967,8 @@ impl MatchQuery<'_> {
                         }
                     } else {
                         if !collect(
-                            &mut result,
-                            &mut collector,
+                            result,
+                            collector,
                             &path.nodes,
                             &path.edges,
                             budget,
@@ -1926,27 +1981,9 @@ impl MatchQuery<'_> {
         }
         budget.check()?;
         if let Some(walk) = walk {
-            walk.finish(&mut result);
+            walk.finish(result);
         }
-        match collector {
-            RowCollector::With(rows) => {
-                return self
-                    .with
-                    .as_ref()
-                    .unwrap()
-                    .finish(self, rows, result, &context, budget);
-            }
-            RowCollector::Count(counts) => {
-                result.rows =
-                    counts.rows(result.columns.len(), limit, budget)?;
-            }
-            RowCollector::Aggregate(groups) => {
-                groups.emit(self, &mut result, budget)?
-            }
-            RowCollector::All | RowCollector::Distinct(_) => {}
-        }
-        result.warnings.regex_refused |= context.regex_refused.get();
-        self.finish_rows(result, budget)
+        Ok(())
     }
 
     fn can_limit_during_scan(&self) -> bool {
@@ -1978,7 +2015,10 @@ impl MatchQuery<'_> {
         Ok(result)
     }
 
-    fn count_rows(&self, ordered_group_limit: usize) -> Option<CountRows> {
+    fn count_collector(
+        &self,
+        ordered_group_limit: usize,
+    ) -> Option<RowCollector> {
         if self.skip != 0 || self.distinct {
             return None;
         }
@@ -2008,26 +2048,24 @@ impl MatchQuery<'_> {
                     .position(|column| !fast_count(&column.expression))
                 {
                     let limit = self.limit.unwrap_or(ENGINE_LIMIT);
-                    // A positive ordered limit below the engine ceiling
-                    // needs every key ranked. C handles queries that exceed
-                    // the Rust limit. An unordered limit needs first-seen
-                    // keys only. At the engine ceiling, more keys cannot
-                    // change the error.
-                    let needs_all_groups = !self.order.is_empty()
-                        && (1..ENGINE_LIMIT).contains(&limit);
-                    let max_groups = if needs_all_groups {
-                        ordered_group_limit
+                    if !self.order.is_empty()
+                        && (1..ENGINE_LIMIT).contains(&limit)
+                    {
+                        RowCollector::OrderedCount(OrderedCount::new(
+                            column,
+                            ordered_group_limit,
+                        ))
                     } else {
-                        limit
-                    };
-                    CountRows::Grouped(CountGroups {
-                        column,
-                        max_groups,
-                        needs_all_groups,
-                        groups: HashMap::new(),
-                    })
+                        // An unordered limit needs only the first-seen keys.
+                        // More keys at the engine ceiling cannot change the error.
+                        RowCollector::Count(CountRows::Grouped(CountGroups {
+                            column,
+                            max_groups: limit,
+                            groups: HashMap::new(),
+                        }))
+                    }
                 } else {
-                    CountRows::Total(0)
+                    RowCollector::Count(CountRows::Total(0))
                 }
             })
     }
@@ -2066,17 +2104,22 @@ impl MatchQuery<'_> {
                 return Ok(true);
             }
             RowCollector::Count(CountRows::Grouped(counts)) => {
-                if counts.max_groups == 0 && !counts.needs_all_groups {
+                if counts.max_groups == 0 {
                     // LIMIT 0 still reads the graph and checks its budget.
                     return Ok(true);
                 }
                 let key = self.projections[counts.column]
                     .expression
                     .field_value(nodes, edges, context);
-                if !counts.record(&key) {
-                    budget.check()?;
-                    return Err(ExecutionError::Unsupported);
-                }
+                counts.record(&key);
+                return Ok(true);
+            }
+            RowCollector::OrderedCount(counts) => {
+                budget.step()?;
+                let key = self.projections[counts.column]
+                    .expression
+                    .field_value(nodes, edges, context);
+                counts.record(&key);
                 return Ok(true);
             }
             RowCollector::Distinct(distinct) => {
@@ -2204,9 +2247,7 @@ fn order_rows(
             budget.step()?;
             let cell = c_string_bytes(&row[key.column]);
             if !cell.is_empty() {
-                let digits = cell.strip_prefix(b"-").unwrap_or(cell);
-                numeric[index] =
-                    !digits.is_empty() && digits.iter().all(u8::is_ascii_digit);
+                numeric[index] = is_native_sort_number(cell);
                 break;
             }
         }
@@ -2247,6 +2288,17 @@ fn order_rows(
     budget.check()?;
     rows.extend(sortable.into_iter().take(limit).map(|(row, _)| row));
     Ok(())
+}
+
+fn count_group_key(key: &[u8]) -> &[u8] {
+    // Native clips grouped cells before grouping and output.
+    let key = c_string_bytes(key);
+    &key[..key.len().min(PROPERTY_LIMIT)]
+}
+
+fn is_native_sort_number(cell: &[u8]) -> bool {
+    let digits = cell.strip_prefix(b"-").unwrap_or(cell);
+    !digits.is_empty() && digits.iter().all(u8::is_ascii_digit)
 }
 
 fn c_string_bytes(cell: &[u8]) -> &[u8] {
@@ -2426,8 +2478,9 @@ mod count_tests {
     fn unordered_count_limit_keeps_only_first_keys_and_counts_late_matches() {
         let query =
             classify("MATCH (n) RETURN n.name, count(*) LIMIT 1").unwrap();
-        let Some(CountRows::Grouped(mut counts)) =
-            query.first_branch().count_rows(ORDERED_COUNT_GROUP_LIMIT)
+        let Some(RowCollector::Count(CountRows::Grouped(mut counts))) = query
+            .first_branch()
+            .count_collector(ORDERED_COUNT_GROUP_LIMIT)
         else {
             panic!("expected grouped count");
         };
@@ -2437,7 +2490,7 @@ mod count_tests {
             b"discarded-again",
             b"alpha",
         ] {
-            assert!(counts.record(key));
+            counts.record(key);
         }
         assert_eq!(counts.groups.len(), 1);
         assert_eq!(counts.groups.get(b"alpha".as_slice()), Some(&(0, 2)));
@@ -2449,13 +2502,14 @@ mod count_tests {
             "MATCH (n) RETURN n.name, count(*) AS total ORDER BY total",
         )
         .unwrap();
-        let Some(CountRows::Grouped(mut counts)) =
-            query.first_branch().count_rows(ORDERED_COUNT_GROUP_LIMIT)
+        let Some(RowCollector::Count(CountRows::Grouped(mut counts))) = query
+            .first_branch()
+            .count_collector(ORDERED_COUNT_GROUP_LIMIT)
         else {
             panic!("expected grouped count");
         };
         for index in 0..=ENGINE_LIMIT {
-            assert!(counts.record(&index.to_string().into_bytes()));
+            counts.record(index.to_string().as_bytes());
         }
         assert_eq!(counts.groups.len(), ENGINE_LIMIT);
         let mut budget = ExecutionBudget::new(&Instant::now, &|| true);

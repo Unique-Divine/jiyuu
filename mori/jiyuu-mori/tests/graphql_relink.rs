@@ -1775,17 +1775,22 @@ fn bounded_count_projects_native_groups_and_empty_results_in_rust() {
 
 #[cfg(debug_assertions)]
 #[test]
-fn ordered_count_overflow_falls_back_to_rank_late_groups() {
+fn ordered_count_overflow_ranks_late_groups_in_rust() {
     use cypher_linear::{ExecutionBudget, ExecutionError};
 
     const QUERY: &str = "MATCH (n:RankProbe) RETURN n.name, count(*) AS total ORDER BY total DESC LIMIT 1";
+    const TIES: &str = "MATCH (n:RankProbe) RETURN n.name, count(*) AS total ORDER BY total DESC LIMIT 3";
+    const NUMERIC: &str = "MATCH (n:RankProbe) RETURN n.name, count(*) AS total ORDER BY n.name DESC, total DESC LIMIT 3";
     const ZERO: &str = "MATCH (n:RankProbe) RETURN n.name, count(*) AS total ORDER BY total DESC LIMIT 0";
     let fixture = Fixture::new();
     let db = fixture.index(CLIENT);
     let mut tail = 0;
-    for (index, name) in ["alpha", "beta", "winner", "winner", "winner"]
-        .into_iter()
-        .enumerate()
+    for (index, name) in [
+        "10", "beta", "alpha", "winner", "winner", "winner", "2", "", "beta",
+        "alpha",
+    ]
+    .into_iter()
+    .enumerate()
     {
         tail = node(
             &db,
@@ -1799,18 +1804,45 @@ fn ordered_count_overflow_falls_back_to_rank_late_groups() {
     let mut budget = ExecutionBudget::new(&Instant::now, &|| false);
     budget.set_ordered_count_group_limit_for_tests(2);
     let query = cypher_linear::classify(QUERY).unwrap();
+    let result = query.execute_with_budget(&db, CLIENT, &mut budget).unwrap();
+    assert_eq!(utf8_rows(&result), [["winner", "3"]]);
+
+    let checks = Cell::new(0);
+    let cancelled = || {
+        checks.set(checks.get() + 1);
+        // Start and end of the first scan, overflow, pre/post sort, replay.
+        checks.get() >= 6
+    };
+    let mut budget = ExecutionBudget::new(&Instant::now, &cancelled);
+    budget.set_ordered_count_group_limit_for_tests(2);
     assert!(matches!(
         query.execute_with_budget(&db, CLIENT, &mut budget),
-        Err(ExecutionError::Unsupported)
+        Err(ExecutionError::Cancelled)
     ));
+    assert!(db.is_autocommit());
     drop(db);
 
     let pages = fixture.compare_query_pages_with_env(
-        &[(QUERY, 0, false), (ZERO, 0, true)],
+        &[
+            (QUERY, 0, true),
+            (TIES, 0, true),
+            (TIES, 1, true),
+            (TIES, 2, true),
+            (NUMERIC, 0, true),
+            (NUMERIC, 1, true),
+            (NUMERIC, 2, true),
+            (ZERO, 0, true),
+        ],
         &[("MORI_TEST_ORDERED_COUNT_GROUP_LIMIT", "2")],
     );
     assert_eq!(pages[0]["rows"], json!([["winner", "3"]]));
-    assert_eq!(pages[1]["rows"], json!([]));
+    assert_eq!(pages[1]["rows"], json!([["winner", "3"]]));
+    assert_eq!(pages[2]["rows"], json!([["beta", "2"]]));
+    assert_eq!(pages[3]["rows"], json!([["alpha", "2"]]));
+    assert_eq!(pages[4]["rows"], json!([["10", "1"]]));
+    assert_eq!(pages[5]["rows"], json!([["2", "1"]]));
+    assert_eq!(pages[6]["rows"], json!([["winner", "3"]]));
+    assert_eq!(pages[7]["rows"], json!([]));
 
     // A later SQLite error must still be detected for LIMIT 0.
     let db = fixture.db(CLIENT);
@@ -1821,6 +1853,34 @@ fn ordered_count_overflow_falls_back_to_rank_late_groups() {
         Err(ExecutionError::Storage(rusqlite::Error::SqliteFailure(_, Some(message))))
             if message == "integer overflow"
     ));
+}
+
+#[test]
+fn ordered_count_overflow_uses_rust_by_default() {
+    const QUERY: &str = "MATCH (n:RankProbe) RETURN n.name, count(*) AS total ORDER BY total DESC LIMIT 1";
+    let fixture = Fixture::new();
+    let db = fixture.index(CLIENT);
+    db.execute_batch(
+        "WITH RECURSIVE seq(n) AS (VALUES (1) UNION ALL SELECT n + 1 FROM seq WHERE n < 16387)
+         INSERT INTO nodes(project, label, name, qualified_name)
+         SELECT 'client', 'RankProbe',
+                CASE WHEN n > 16385 THEN 'winner' ELSE printf('key%05d', n) END,
+                printf('rank.%d', n) FROM seq;",
+    )
+    .unwrap();
+    drop(db);
+
+    let reference = fixture.query_reference_output(CLIENT, QUERY);
+    assert!(reference.status.success(), "{reference:?}");
+    let bin = Path::new(MORI);
+    fixture.start_query_daemon(bin, None);
+    let before = fixture.rust_query_count();
+    let candidate = fixture.query_output(bin, CLIENT, QUERY);
+    assert!(candidate.status.success(), "{candidate:?}");
+    assert_eq!(fixture.rust_query_count() - before, 1);
+    assert_eq!(candidate.stdout, reference.stdout);
+    let page: Value = serde_json::from_slice(&candidate.stdout).unwrap();
+    assert_eq!(page["rows"], json!([["winner", "2"]]));
 }
 
 #[test]
