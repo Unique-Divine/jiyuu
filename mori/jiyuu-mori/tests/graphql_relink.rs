@@ -14,6 +14,9 @@ use jiyuu_mori as _;
 use rusqlite::{Connection, OpenFlags, params};
 use serde_json::{Value, json};
 
+#[cfg(debug_assertions)]
+#[path = "../src/cypher_ffi.rs"]
+mod cypher_ffi;
 #[path = "../src/cypher_linear.rs"]
 mod cypher_linear;
 mod support;

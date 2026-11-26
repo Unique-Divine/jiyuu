@@ -217,6 +217,10 @@ impl<'a> Plan<'a> {
         })
     }
 
+    pub(super) fn has_ranged_hops(&self) -> bool {
+        self.ranged
+    }
+
     pub(super) fn into_optional(self) -> Result<Option<Self>, Unsupported> {
         if self.first_optional
             || self.clauses.iter().any(|clause| clause.optional)
@@ -571,6 +575,7 @@ impl<'plan, 'query, 'db> Walk<'plan, 'query, 'db> {
              node: &Node,
              edge: Option<&Edge>,
              budget: &mut ExecutionBudget<'_>| {
+                budget.step()?;
                 if bound.is_none_or(|id| id == node.id)
                     && target.matches(node, this.context)
                 {
@@ -904,6 +909,84 @@ mod tests {
             .unwrap_err(),
             ParseError::Unsupported,
         );
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    fn three_match_replay_meters_rejected_neighbors_after_overflow() {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch(GRAPH).unwrap();
+        db.execute_batch(
+            "INSERT INTO nodes VALUES
+                (4, 'p', 'Leaf', 'one', 'a', '', 1, 2, '{}'),
+                (5, 'p', 'Leaf', 'two', 'b', '', 1, 2, '{}'),
+                (6, 'p', 'Leaf', 'three', 'c', '', 1, 2, '{}'),
+                (7, 'p', 'Rejected', 'ignored', 'd', '', 1, 2, '{}');
+             INSERT INTO edges VALUES
+                (2, 'p', 3, 2, 'NEXT', '{}'),
+                (3, 'p', 2, 4, 'LAST', '{}'),
+                (4, 'p', 2, 5, 'LAST', '{}'),
+                (5, 'p', 2, 6, 'LAST', '{}');",
+        )
+        .unwrap();
+        let query = classify(
+            "MATCH (s:Start)-[:CALLS]->(hub)
+             MATCH (hub)-[:NEXT]->(middle)
+             MATCH (middle)-[:LAST]->(leaf:Leaf)
+             RETURN leaf.name, count(*) AS total ORDER BY leaf.name LIMIT 1",
+        )
+        .unwrap();
+        let now = Instant::now();
+        let clock = || now;
+        let remaining_steps = || {
+            let mut budget = ExecutionBudget::new(&clock, &|| false);
+            budget.set_ordered_count_group_limit_for_tests(2);
+            let result =
+                query.execute_with_budget(&db, "p", &mut budget).unwrap();
+            assert_eq!(result.rows, [[b"one".to_vec(), b"1".to_vec()]]);
+            budget.ordered_count_replay.unwrap().remaining_steps
+        };
+        let before = remaining_steps();
+        const REJECTED: usize = 16;
+        for id in 6..6 + REJECTED as i64 {
+            db.execute(
+                "INSERT INTO edges VALUES (?1, 'p', 2, 7, 'LAST', '{}')",
+                [id],
+            )
+            .unwrap();
+        }
+        // The suffix has already been loaded when the first scan overflows.
+        // Loading it on the second scan alone costs only REJECTED steps.
+        assert!(before - remaining_steps() >= 2 * REJECTED);
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    fn ranged_count_hands_off_at_first_overflow() {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch(GRAPH).unwrap();
+        db.execute_batch(
+            "INSERT INTO nodes VALUES
+                (4, 'p', 'Target', 'four', 'four', '', 1, 2, '{}'),
+                (5, 'p', 'Target', 'five', 'five', '', 1, 2, '{}');
+             INSERT INTO edges VALUES
+                (2, 'p', 1, 4, 'CALLS', '{}'),
+                (3, 'p', 1, 5, 'CALLS', '{}');",
+        )
+        .unwrap();
+        let query = classify(
+            "MATCH (s:Start)-[:CALLS*1..2]->(leaf:Target)
+             RETURN leaf.name, count(*) AS total ORDER BY leaf.name LIMIT 1",
+        )
+        .unwrap();
+        let mut budget = ExecutionBudget::new(&Instant::now, &|| false);
+        budget.set_ordered_count_group_limit_for_tests(2);
+        assert!(matches!(
+            query.execute_with_budget(&db, "p", &mut budget),
+            Err(ExecutionError::Unsupported)
+        ));
+        assert!(budget.ordered_count_replay.is_none());
+        assert!(db.is_autocommit());
     }
 
     #[test]

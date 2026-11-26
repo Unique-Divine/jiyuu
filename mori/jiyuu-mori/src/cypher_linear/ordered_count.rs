@@ -13,6 +13,7 @@ pub(super) struct OrderedCount {
     pub(super) column: usize,
     max_groups: usize,
     limit: usize,
+    replay_allowed: bool,
     batch_limit: usize,
     after: Option<Vec<u8>>,
     overflow: bool,
@@ -36,11 +37,17 @@ struct RankedGroup {
 }
 
 impl OrderedCount {
-    pub(super) fn new(column: usize, max_groups: usize, limit: usize) -> Self {
+    pub(super) fn new(
+        column: usize,
+        max_groups: usize,
+        limit: usize,
+        replay_allowed: bool,
+    ) -> Self {
         Self {
             column,
             max_groups,
             limit,
+            replay_allowed,
             batch_limit: max_groups,
             after: None,
             overflow: false,
@@ -76,7 +83,8 @@ impl OrderedCount {
         // map at the end was counted from its first occurrence in this scan.
         if self.groups.len() == self.batch_limit {
             if !self.overflow {
-                if self.passes + 1 == MAX_PASSES
+                if !self.replay_allowed
+                    || self.passes + 1 == MAX_PASSES
                     || self.batch_limit == 0
                     || self.limit >= ORDERED_COUNT_GROUP_LIMIT
                 {
@@ -183,7 +191,7 @@ mod tests {
 
     #[test]
     fn ordered_count_replay_refuses_on_overflow_in_the_final_pass() {
-        let mut counts = OrderedCount::new(0, 1, 1);
+        let mut counts = OrderedCount::new(0, 1, 1, true);
         let now = Instant::now();
         let clock = || now;
         let mut budget = ExecutionBudget::new(&clock, &|| false);
@@ -213,7 +221,8 @@ mod tests {
 
     #[test]
     fn ordered_count_wide_limit_refuses_on_first_overflow() {
-        let mut counts = OrderedCount::new(0, 1, ORDERED_COUNT_GROUP_LIMIT);
+        let mut counts =
+            OrderedCount::new(0, 1, ORDERED_COUNT_GROUP_LIMIT, true);
         let mut budget = ExecutionBudget::new(&Instant::now, &|| false);
         counts.record(b"first", &mut budget).unwrap();
         counts.record(b"first", &mut budget).unwrap();

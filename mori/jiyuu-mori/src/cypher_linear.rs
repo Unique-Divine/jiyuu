@@ -2110,10 +2110,15 @@ impl MatchQuery<'_> {
                     if !self.order.is_empty()
                         && (1..ENGINE_LIMIT).contains(&limit)
                     {
+                        // Recursive SQL checks the deadline without debiting replay work.
                         RowCollector::OrderedCount(OrderedCount::new(
                             column,
                             ordered_group_limit,
                             limit,
+                            !self
+                                .paths
+                                .as_ref()
+                                .is_some_and(paths::Plan::has_ranged_hops),
                         ))
                     } else {
                         // An unordered limit needs only the first-seen keys.
