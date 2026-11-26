@@ -1291,6 +1291,53 @@ TEST(gbuf_worker_merge_keeps_canonical_ids_and_edge_order) {
     PASS();
 }
 
+#if defined(CBM_MEM_TEST_API) && CBM_MEM_TEST_API
+TEST(gbuf_merge_reports_node_append_failure) {
+    cbm_gbuf_t *dst = cbm_gbuf_new("test", "/tmp");
+    cbm_gbuf_t *src = cbm_gbuf_new_worker("test", "/tmp", NULL);
+    ASSERT_NOT_NULL(dst);
+    ASSERT_NOT_NULL(src);
+    ASSERT_GT(cbm_gbuf_upsert_node(src, "Function", "f", "pkg.f", "f.go", 1, 4, "{}"), 0);
+
+    cbm_mem_test_fail_next_realloc(CBM_MEM_CLASS_DYN_ARRAY);
+    int rc = cbm_gbuf_merge(dst, src);
+    bool injected = cbm_mem_test_reset_realloc_failure();
+    int nodes = cbm_gbuf_node_count(dst);
+    cbm_gbuf_free(src);
+    cbm_gbuf_free(dst);
+
+    ASSERT(injected);
+    ASSERT_EQ(rc, -1);
+    ASSERT_EQ(nodes, 0);
+    PASS();
+}
+
+TEST(gbuf_merge_reports_edge_append_failure) {
+    _Atomic int64_t shared = 1;
+    cbm_gbuf_t *dst = cbm_gbuf_new_shared_ids("test", "/tmp", &shared);
+    cbm_gbuf_t *src = cbm_gbuf_new_worker("test", "/tmp", &shared);
+    ASSERT_NOT_NULL(dst);
+    ASSERT_NOT_NULL(src);
+    int64_t from = cbm_gbuf_upsert_node(dst, "Function", "f", "pkg.f", "f.go", 1, 4, "{}");
+    int64_t to = cbm_gbuf_upsert_node(dst, "Function", "g", "pkg.g", "f.go", 6, 8, "{}");
+    ASSERT_GT(from, 0);
+    ASSERT_GT(to, 0);
+    ASSERT_GT(cbm_gbuf_insert_edge(src, from, to, "CALLS", "{}"), 0);
+
+    cbm_mem_test_fail_next_realloc(CBM_MEM_CLASS_DYN_ARRAY);
+    int rc = cbm_gbuf_merge(dst, src);
+    bool injected = cbm_mem_test_reset_realloc_failure();
+    int edges = cbm_gbuf_edge_count(dst);
+    cbm_gbuf_free(src);
+    cbm_gbuf_free(dst);
+
+    ASSERT(injected);
+    ASSERT_EQ(rc, -1);
+    ASSERT_EQ(edges, 0);
+    PASS();
+}
+#endif
+
 TEST(gbuf_merge_populated_src_into_empty_dst) {
     cbm_gbuf_t *dst = cbm_gbuf_new("test", "/tmp");
     cbm_gbuf_t *src = cbm_gbuf_new("test", "/tmp");
@@ -1735,6 +1782,10 @@ SUITE(graph_buffer) {
     RUN_TEST(gbuf_merge_overlapping_qns);
     RUN_TEST(gbuf_merge_edge_dedup);
     RUN_TEST(gbuf_worker_merge_keeps_canonical_ids_and_edge_order);
+#if defined(CBM_MEM_TEST_API) && CBM_MEM_TEST_API
+    RUN_TEST(gbuf_merge_reports_node_append_failure);
+    RUN_TEST(gbuf_merge_reports_edge_append_failure);
+#endif
     RUN_TEST(gbuf_merge_empty_src_into_populated_dst);
     RUN_TEST(gbuf_merge_populated_src_into_empty_dst);
     RUN_TEST(gbuf_merge_null_args);

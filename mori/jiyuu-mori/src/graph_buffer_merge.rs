@@ -106,7 +106,8 @@ unsafe extern "C" fn mori_gbuf_source_wins(
 }
 
 /// Merge nodes before edges so both endpoints can use the canonical IDs.
-/// The node callback returns zero for a skipped node.
+/// The node callback returns zero for a skipped node or -1 on failure.
+/// Successful edge inserts and deduplications return a nonzero ID.
 ///
 /// # Safety
 /// The two buffers are distinct. The source arrays and their rows stay live
@@ -133,6 +134,9 @@ unsafe extern "C" fn mori_gbuf_merge_rows(
         };
         // SAFETY: the callback mutates only the separate destination buffer.
         let canonical_id = unsafe { merge_node(dst, src, node) };
+        if canonical_id == -1 {
+            return -1;
+        }
         if canonical_id != 0 && canonical_id != source_id {
             if remap.reserve(1).is_err() {
                 return -1;
@@ -144,7 +148,7 @@ unsafe extern "C" fn mori_gbuf_merge_rows(
     let canonical_id = |id| remap.ids.get(&id).copied().unwrap_or(id);
     for index in 0..edge_count {
         // SAFETY: inserting into the destination cannot invalidate this source row.
-        unsafe {
+        let inserted_id = unsafe {
             let edge = &**edges.add(index as usize);
             insert_edge(
                 dst,
@@ -152,7 +156,10 @@ unsafe extern "C" fn mori_gbuf_merge_rows(
                 canonical_id(edge.target_id),
                 edge.kind,
                 edge.properties_json,
-            );
+            )
+        };
+        if inserted_id == 0 {
+            return -1;
         }
     }
     0

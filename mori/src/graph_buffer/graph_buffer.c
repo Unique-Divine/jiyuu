@@ -2419,10 +2419,10 @@ static void merge_update_existing(cbm_gbuf_t *dst, cbm_gbuf_node_t *existing,
 }
 
 /* Copy a non-colliding src node into dst with its original ID. */
-static void merge_copy_new_node(cbm_gbuf_t *dst, const cbm_gbuf_node_t *sn) {
+static cbm_gbuf_node_t *merge_copy_new_node(cbm_gbuf_t *dst, const cbm_gbuf_node_t *sn) {
     cbm_gbuf_node_t *node = cbm_calloc(CBM_MEM_CLASS_GBUF_NODE, sizeof(cbm_gbuf_node_t));
     if (!node) {
-        return;
+        return NULL;
     }
 
     node->id = sn->id;
@@ -2434,32 +2434,51 @@ static void merge_copy_new_node(cbm_gbuf_t *dst, const cbm_gbuf_node_t *sn) {
     node->end_line = sn->end_line;
     node->properties_json = heap_strdup(sn->properties_json);
 
+    if (!node->label || !node->name || !node->qualified_name || !node->file_path ||
+        !node->properties_json) {
+        goto unowned;
+    }
+    int before = dst->nodes.count;
     cbm_da_push(&dst->nodes, node);
+    if (dst->nodes.count == before) {
+        goto unowned;
+    }
     register_node_in_indexes(dst, node);
+    if (cbm_gbuf_find_by_qn(dst, node->qualified_name) != node ||
+        (!dst->by_id_off && cbm_gbuf_find_by_id(dst, node->id) != node)) {
+        return NULL; /* The destination array now owns the node. */
+    }
 
     if (node->id >= dst->next_id) {
         dst->next_id = node->id + SKIP_ONE;
     }
+    return node;
+
+unowned:
+    free_node_strings(node);
+    cbm_free(CBM_MEM_CLASS_GBUF_NODE, node);
+    return NULL;
 }
 
-static int64_t merge_node(cbm_gbuf_t *dst, const cbm_gbuf_t *src,
-                          const cbm_gbuf_node_t *node) {
+static int64_t merge_node(cbm_gbuf_t *dst, const cbm_gbuf_t *src, const cbm_gbuf_node_t *node) {
     const char *qn = node->qualified_name;
     if (!qn || !cbm_ht_get(src->node_by_qn, qn)) {
         return 0;
     }
 
-    const gb_span_vec_t *spans =
-        src->variant_spans ? cbm_ht_get(src->variant_spans, qn) : NULL;
+    const gb_span_vec_t *spans = src->variant_spans ? cbm_ht_get(src->variant_spans, qn) : NULL;
     cbm_gbuf_node_t *existing = cbm_ht_get(dst->node_by_qn, qn);
     if (existing) {
         merge_update_existing(dst, existing, node, spans);
         return existing->id;
     }
 
-    merge_copy_new_node(dst, node);
-    gb_adopt_spans(dst, cbm_ht_get(dst->node_by_qn, qn), spans);
-    return node->id;
+    cbm_gbuf_node_t *copied = merge_copy_new_node(dst, node);
+    if (!copied) {
+        return CBM_NOT_FOUND;
+    }
+    gb_adopt_spans(dst, copied, spans);
+    return copied->id;
 }
 
 int cbm_gbuf_merge(cbm_gbuf_t *dst, cbm_gbuf_t *src) {
