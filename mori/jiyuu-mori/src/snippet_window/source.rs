@@ -2,7 +2,9 @@
 
 use super::Window;
 use std::alloc::{Layout, alloc, dealloc};
-use std::ffi::{CStr, c_char, c_int};
+#[cfg(test)]
+use std::ffi::c_int;
+use std::ffi::{CStr, c_char};
 use std::{ptr, slice};
 
 pub(super) fn physical_lines(bytes: &[u8]) -> impl Iterator<Item = &[u8]> {
