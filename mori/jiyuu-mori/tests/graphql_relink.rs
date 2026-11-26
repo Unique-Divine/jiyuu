@@ -1319,6 +1319,7 @@ fn ordered_graph_ui_calls_match_native_ties_limits_and_cursor_pages() {
     const OUT: &str = r#"MATCH (a)-[r:CALLS]->(b) WHERE a.qualified_name = "client.caller" RETURN b.name, b.qualified_name, b.file_path, b.start_line, r.line ORDER BY r.line LIMIT 4"#;
     const IN: &str = r#"MATCH (a)-[r:CALLS]->(b) WHERE b.qualified_name = "client.target" RETURN a.name, a.qualified_name, a.file_path, a.start_line, a.is_test, r.line ORDER BY r.line LIMIT 4"#;
     const ALIASED: &str = r#"MATCH (a)-[r:CALLS]->(b) WHERE b.qualified_name = "client.target" RETURN a.name AS symbol, r.line AS line ORDER BY line DESC, symbol ASC LIMIT 4"#;
+    const JOINED: &str = r#"MATCH (a)-[r:CALLS]->(b) MATCH (b)-[:CALLS]->(c) WHERE c.qualified_name = "client.caller" RETURN a.name AS symbol, r.line AS line ORDER BY line DESC, symbol ASC LIMIT 4"#;
     let fixture = Fixture::new();
     let db = fixture.index(CLIENT);
     let caller = node(
@@ -1337,6 +1338,7 @@ fn ordered_graph_ui_calls_match_native_ties_limits_and_cursor_pages() {
         "client.target",
         "calls.py",
     );
+    edge(&db, CLIENT, target, caller, "CALLS", json!({}));
     for (name, props) in [
         ("ten", json!({"line": 10})),
         ("two-z", json!({"line": 2})),
@@ -1378,7 +1380,7 @@ fn ordered_graph_ui_calls_match_native_ties_limits_and_cursor_pages() {
             page
         };
         let mut pages = Vec::new();
-        for cypher in [OUT, IN, ALIASED] {
+        for cypher in [OUT, IN, ALIASED, JOINED] {
             let first = query(
                 json!({"project":CLIENT,"query":cypher,"format":"json","max_rows":2}),
             );
@@ -1413,7 +1415,7 @@ fn ordered_graph_ui_calls_match_native_ties_limits_and_cursor_pages() {
                     .map(|row| row[0].as_str().unwrap())
             })
             .collect();
-        if index == 2 {
+        if index >= 2 {
             assert_eq!(first["columns"], json!(["symbol", "line"]));
             assert_eq!(names, ["ten", "prefix", "two-a", "two-z"]);
         } else {

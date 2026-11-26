@@ -1,4 +1,4 @@
-//! OPTIONAL MATCH and relationship-unique, bounded Cypher trails.
+//! Connected MATCH clauses, OPTIONAL MATCH and bounded Cypher trails.
 
 use std::cell::Cell;
 use std::ffi::{c_int, c_void};
@@ -219,20 +219,45 @@ impl<'a> Plan<'a> {
 
     pub(super) fn into_optional(self) -> Result<Option<Self>, Unsupported> {
         if self.first_optional
-            || self.ranged
             || self.clauses.iter().any(|clause| clause.optional)
         {
-            Ok(Some(self))
-        } else if self.clauses.is_empty()
-            && self.next_edge <= 2
-            && !self.first_slots.iter().enumerate().any(|(index, &slot)| {
-                index != slot && Some(slot) != self.anonymous_tail
-            })
-        {
-            Ok(None)
-        } else {
-            Err(Unsupported)
+            return Ok(Some(self));
         }
+        if self.clauses.is_empty() {
+            return if self.ranged {
+                Ok(Some(self))
+            } else if self.next_edge <= 2 && self.unique_first_bindings() {
+                Ok(None)
+            } else {
+                Err(Unsupported)
+            };
+        }
+
+        // Widen mandatory MATCH only to a pair of fixed single hops joined
+        // on a written node alias. The C evaluator still handles cross joins.
+        let [clause] = self.clauses.as_slice() else {
+            return Err(Unsupported);
+        };
+        let [tail] = clause.tails.as_slice() else {
+            return Err(Unsupported);
+        };
+        let shared = |endpoint: &Endpoint<'_>| {
+            endpoint.pattern.named && self.first_slots.contains(&endpoint.slot)
+        };
+        if self.ranged
+            || clause.first_edge != 1
+            || !self.unique_first_bindings()
+            || !(shared(&clause.head) || shared(tail))
+        {
+            return Err(Unsupported);
+        }
+        Ok(Some(self))
+    }
+
+    fn unique_first_bindings(&self) -> bool {
+        self.first_slots.iter().enumerate().all(|(index, &slot)| {
+            index == slot || Some(slot) == self.anonymous_tail
+        })
     }
 
     pub(super) fn first_slot(&self, index: usize) -> usize {
@@ -753,6 +778,110 @@ mod tests {
             (3, 'p', 'Target', 'three', 'three', '', 1, 2, '{}');
         INSERT INTO edges VALUES (1, 'p', 1, 3, 'CALLS', '{}');
     ";
+
+    #[test]
+    fn mandatory_join_orders_rows_before_paging() {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch(GRAPH).unwrap();
+        db.execute_batch(
+            "INSERT INTO nodes VALUES
+                (4, 'p', 'Leaf', 'zeta', 'zeta', '', 1, 2, '{}'),
+                (5, 'p', 'Leaf', 'alpha', 'alpha', '', 1, 2, '{}'),
+                (6, 'p', 'Target', 'dead', 'dead', '', 1, 2, '{}');
+             INSERT INTO edges VALUES
+                (2, 'p', 2, 3, 'CALLS', '{}'),
+                (3, 'p', 1, 6, 'CALLS', '{}'),
+                (4, 'p', 3, 4, 'NEXT', '{}'),
+                (5, 'p', 3, 5, 'NEXT', '{}');",
+        )
+        .unwrap();
+
+        let expected = [
+            [b"two".to_vec(), b"alpha".to_vec(), b"NEXT".to_vec()],
+            [b"one".to_vec(), b"alpha".to_vec(), b"NEXT".to_vec()],
+            [b"two".to_vec(), b"zeta".to_vec(), b"NEXT".to_vec()],
+            [b"one".to_vec(), b"zeta".to_vec(), b"NEXT".to_vec()],
+        ];
+        for join in
+            ["(hub)-[r:NEXT]->(leaf:Leaf)", "(leaf:Leaf)<-[r:NEXT]-(hub)"]
+        {
+            let source = format!(
+                "MATCH (s:Start)-[:CALLS]->(hub:Target) MATCH {join}
+                 WHERE leaf.name <> 'unused'
+                 RETURN s.name AS caller, leaf.name AS target, type(r) AS rel
+                 ORDER BY target, caller DESC"
+            );
+            let rows = classify(&source).unwrap().execute_on(&db, "p").unwrap();
+            assert_eq!(rows.columns, ["caller", "target", "rel"]);
+            assert_eq!(rows.rows, expected);
+            assert!(!rows.truncated);
+            for offset in 0..=expected.len() {
+                let page = format!("{source} SKIP {offset} LIMIT 1");
+                let page =
+                    classify(&page).unwrap().execute_on(&db, "p").unwrap();
+                let end = (offset + 1).min(expected.len());
+                assert_eq!(page.rows, expected[offset..end]);
+                assert!(!page.truncated);
+            }
+            let empty = format!("{source} LIMIT 0");
+            assert!(
+                classify(&empty)
+                    .unwrap()
+                    .execute_on(&db, "p")
+                    .unwrap()
+                    .rows
+                    .is_empty()
+            );
+        }
+
+        // A second clause with both endpoints bound must test the original
+        // pair. The same relationship can occur in separate MATCH clauses.
+        let bound_pair = classify(
+            "MATCH (s:Start)-[:CALLS]->(hub:Target {name: 'three'})
+             MATCH (s)-[t:CALLS]->(hub)
+             RETURN s.name, t.type ORDER BY s.name",
+        )
+        .unwrap()
+        .execute_on(&db, "p")
+        .unwrap();
+        assert_eq!(
+            bound_pair.rows,
+            [
+                [b"one".to_vec(), b"CALLS".to_vec()],
+                [b"two".to_vec(), b"CALLS".to_vec()]
+            ]
+        );
+    }
+
+    #[test]
+    fn mandatory_joins_outside_two_connected_fixed_hops_use_c() {
+        for pattern in [
+            "MATCH (a)-[:CALLS]->(b) MATCH (c)-[:CALLS]->(d)",
+            "MATCH (a)-[:CALLS]->() MATCH (c)-[:CALLS]->()",
+            "MATCH (a)-[:CALLS*1..2]->(b) MATCH (b)-[:CALLS]->(c)",
+            "MATCH (a)-[:CALLS]->(b) MATCH (b)-[:CALLS*1]->(c)",
+            "MATCH (a) MATCH (a)-[:CALLS]->(b)",
+            "MATCH (a)-[:CALLS]->(b) MATCH (b)",
+            "MATCH (a)-[:CALLS]->(b)-[:CALLS]->(c) MATCH (c)-[:CALLS]->(d)",
+            "MATCH (a)-[:CALLS]->(b) MATCH (b)-[:CALLS]->(c)-[:CALLS]->(d)",
+            "MATCH (a)-[:CALLS]->(b) MATCH (b)-[:CALLS]->(c) MATCH (c)-[:CALLS]->(d)",
+            "MATCH (a)-[r:CALLS]->(b) MATCH (b)-[r:CALLS]->(c)",
+        ] {
+            let source = format!("{pattern} RETURN a.name");
+            assert_eq!(
+                classify(&source).unwrap_err(),
+                ParseError::Unsupported,
+                "{source}"
+            );
+        }
+        assert_eq!(
+            classify(
+                "MATCH (a)-->(b) MATCH (b)-->(c) RETURN c.name LIMIT 100001"
+            )
+            .unwrap_err(),
+            ParseError::Unsupported,
+        );
+    }
 
     #[test]
     fn optional_paths_keep_unbound_columns_and_count_only_bound_aliases() {
