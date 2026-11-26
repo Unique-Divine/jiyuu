@@ -5,10 +5,10 @@
 
 /* All input and output views are borrowed for the duration of the call.
  * The result sink copies emitted text into the C result arena. */
-typedef void (*cbm_markdown_section_sink)(void *ctx, TSNode heading, const char *name,
+typedef void (*cbm_markdown_section_sink)(void *ctx, const TSNode *heading, const char *name,
                                           size_t name_len, const char *segment, size_t segment_len,
                                           const char *body, size_t body_len);
-typedef bool (*cbm_markdown_diagram_labels)(void *ctx, TSNode fence, const char **labels);
+typedef bool (*cbm_markdown_diagram_labels)(void *ctx, const TSNode *fence, const char **labels);
 
 typedef struct {
     uint64_t collection_steps;

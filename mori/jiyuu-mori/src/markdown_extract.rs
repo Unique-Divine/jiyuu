@@ -9,7 +9,7 @@ use crate::native_tree::{RawNode, TreeCursor};
 
 type EmitSection = unsafe extern "C" fn(
     *mut c_void,
-    RawNode,
+    *const RawNode,
     *const c_char,
     usize,
     *const c_char,
@@ -17,8 +17,11 @@ type EmitSection = unsafe extern "C" fn(
     *const c_char,
     usize,
 );
-type DiagramLabels =
-    unsafe extern "C" fn(*mut c_void, RawNode, *mut *const c_char) -> bool;
+type DiagramLabels = unsafe extern "C" fn(
+    *mut c_void,
+    *const RawNode,
+    *mut *const c_char,
+) -> bool;
 
 #[repr(C)]
 #[derive(Default)]
@@ -385,7 +388,7 @@ unsafe fn section_body(
         pending_space: false,
     };
     let mut start = heading.body.start;
-    for &fence in &heading.fences {
+    for fence in &heading.fences {
         // SAFETY: C lends the node and context, and any returned label string
         // belongs to the live result arena.
         unsafe {
@@ -433,7 +436,7 @@ unsafe extern "C" fn mori_markdown_extract_sections(
                 let body = section_body(heading, source, body_cap, ctx, diagram);
                 emit(
                     ctx,
-                    heading.node,
+                    &heading.node,
                     heading.name.as_ptr().cast(),
                     heading.name.len(),
                     name.as_ptr().cast(),

@@ -1,6 +1,7 @@
 #include "cbm.h"
 #include "graphql_extract.h"
 #include "markdown_extract.h"
+#include "native_tree_ffi.h"
 #include "callable_sig.h"
 #include "arena.h"   // CBMArena, cbm_arena_alloc/strdup/sprintf
 #include "doclink.h" // cbm_doclink_note_doc_line
@@ -13735,25 +13736,34 @@ static void walk_defs(CBMExtractCtx *ctx, TSNode root, const CBMLangSpec *spec, 
     }
 }
 
-static void markdown_emit_section(void *opaque, TSNode heading, const char *name, size_t name_len,
-                                  const char *segment, size_t segment_len, const char *body,
-                                  size_t body_len) {
+static void markdown_emit_section(void *opaque, const TSNode *heading, const char *name,
+                                  size_t name_len, const char *segment, size_t segment_len,
+                                  const char *body, size_t body_len) {
     CBMExtractCtx *ctx = opaque;
     CBMArena *arena = ctx->arena;
+    CBM_MSAN_WRITTEN(name, name_len);
+    if (segment_len) {
+        CBM_MSAN_WRITTEN(segment, segment_len);
+    }
     char *owned_name = cbm_arena_strndup(arena, name, name_len);
     const char *owned_segment = segment_len ? cbm_arena_strndup(arena, segment, segment_len) : "";
     if (owned_name && owned_segment) {
+        if (body_len) {
+            CBM_MSAN_WRITTEN(body, body_len);
+        }
         const char *docstring = body_len ? cbm_arena_strndup(arena, body, body_len) : NULL;
-        push_class_def_qn(ctx, heading, owned_name, owned_segment, "Section", docstring);
+        cbm_ffi_ts_node_written(heading);
+        push_class_def_qn(ctx, *heading, owned_name, owned_segment, "Section", docstring);
     }
 }
 
-static bool markdown_diagram_labels(void *opaque, TSNode fence, const char **labels) {
+static bool markdown_diagram_labels(void *opaque, const TSNode *fence, const char **labels) {
     CBMExtractCtx *ctx = opaque;
-    if (!cbm_diagram_fence_is_diagram(ctx->source, fence)) {
+    cbm_ffi_ts_node_written(fence);
+    if (!cbm_diagram_fence_is_diagram(ctx->source, *fence)) {
         return false;
     }
-    *labels = cbm_diagram_fence_labels(ctx, fence);
+    *labels = cbm_diagram_fence_labels(ctx, *fence);
     return true;
 }
 
@@ -13763,6 +13773,8 @@ void cbm_extract_definitions_without_module(CBMExtractCtx *ctx) {
             cbm_markdown_work_t work = mori_markdown_extract_sections(
                 ctx->root, ctx->source, (size_t)ctx->source_len, MAX_COMMENT_LEN, ctx,
                 markdown_emit_section, markdown_diagram_labels);
+            CBM_MSAN_WRITTEN(&work.collection_steps, sizeof(work.collection_steps));
+            CBM_MSAN_WRITTEN(&work.name_checks, sizeof(work.name_checks));
             ctx->result->markdown_collection_steps += work.collection_steps;
             ctx->result->markdown_name_checks += work.name_checks;
             cbm_log_debug("extract.markdown_sections", "implementation", "rust");

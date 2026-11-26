@@ -40,6 +40,7 @@
 #include "arena.h"
 #include "foundation/constants.h"
 #include "foundation/mem_core.h"
+#include "foundation/sanitized.h"
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -1042,6 +1043,11 @@ static void md_emit(md_scan_t *s, int syntax, const char *text, int n) {
     }
     const cbm_markdown_section_owner_t *sec =
         mori_markdown_reference_owner(s->secs, (size_t)s->nsecs, s->line);
+    if (sec) {
+        /* Sorting moved these fields in Rust. The QN string stays C-owned. */
+        CBM_MSAN_WRITTEN(&sec->qn, sizeof(sec->qn));
+        CBM_MSAN_WRITTEN(&sec->line, sizeof(sec->line));
+    }
     char *raw = cbm_arena_strndup(s->ctx->arena, text, (size_t)n);
     if (!raw) {
         md_fail(s);
