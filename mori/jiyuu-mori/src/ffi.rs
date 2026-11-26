@@ -4,7 +4,6 @@ use std::ffi::{CStr, CString, OsStr, c_char, c_int, c_void};
 use std::os::unix::ffi::OsStrExt;
 use std::{panic, ptr};
 
-use crate::stdio::c_transport;
 use crate::store::Store;
 use crate::tools;
 use jiyuu_mori::startup::{
@@ -288,7 +287,6 @@ pub unsafe extern "C" fn main(argc: c_int, argv: *mut *mut c_char) -> c_int {
         }
         #[cfg(unix)]
         jiyuu_mori::mori_register_staged_graph_writer();
-        c_transport::register();
         crate::repair_recovery::register();
         crate::named_watch::register();
         crate::index_route::register();

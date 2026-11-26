@@ -50,7 +50,7 @@ src/foundation/yaml.c	10
 src/git/git_context.c	18
 src/main.c	32
 src/mcp/compact_out.c	39
-src/mcp/index_supervisor.c	8
+src/mcp/index_supervisor.c	6
 src/mcp/mcp.c	765
 src/pipeline/artifact.c	38
 src/pipeline/fqn.c	23
