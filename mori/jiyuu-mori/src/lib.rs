@@ -6,6 +6,8 @@ pub mod ipc;
 mod ansible;
 #[cfg(feature = "native-engine-abi")]
 mod architecture_projection;
+#[cfg(feature = "native-engine-abi")]
+mod closure_plan;
 #[cfg(any(feature = "native-engine-abi", test))]
 mod complexity;
 #[cfg(feature = "native-engine-abi")]
