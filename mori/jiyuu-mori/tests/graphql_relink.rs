@@ -1783,8 +1783,24 @@ fn ordered_count_overflow_ranks_late_groups_in_rust() {
     const NUMERIC: &str = "MATCH (n:RankProbe) RETURN n.name, count(*) AS total ORDER BY n.name DESC, total DESC LIMIT 3";
     const ZERO: &str = "MATCH (n:RankProbe) RETURN n.name, count(*) AS total ORDER BY total DESC LIMIT 0";
     const WIDE: &str = "MATCH (n:RankProbe) RETURN n.name, count(*) AS total ORDER BY total DESC LIMIT 16384";
+    const THREE_MATCH: &str = "MATCH (a:RankStart)-[:CALLS]->(hub:RankHub)
+        MATCH (hub)-[:STEP]->(m:RankMiddle)
+        MATCH (m)-[:FINISH]->(n:RankProbe)
+        RETURN n.name, count(*) AS total ORDER BY total DESC LIMIT 1";
     let fixture = Fixture::new();
     let db = fixture.index(CLIENT);
+    let start = node(&db, CLIENT, "RankStart", "start", "rank.start", "rank.py");
+    let hub = node(&db, CLIENT, "RankHub", "hub", "rank.hub", "rank.py");
+    let middle = node(
+        &db,
+        CLIENT,
+        "RankMiddle",
+        "middle",
+        "rank.middle",
+        "rank.py",
+    );
+    edge(&db, CLIENT, start, hub, "CALLS", json!({}));
+    edge(&db, CLIENT, hub, middle, "STEP", json!({}));
     let mut tail = 0;
     for (index, name) in [
         "10", "beta", "alpha", "winner", "winner", "winner", "2", "", "beta",
@@ -1801,6 +1817,7 @@ fn ordered_count_overflow_ranks_late_groups_in_rust() {
             &format!("rank.{index}"),
             "rank.py",
         );
+        edge(&db, CLIENT, middle, tail, "FINISH", json!({}));
     }
     let mut budget = ExecutionBudget::new(&Instant::now, &|| false);
     budget.set_ordered_count_group_limit_for_tests(2);
@@ -1834,6 +1851,7 @@ fn ordered_count_overflow_ranks_late_groups_in_rust() {
             (NUMERIC, 2, true),
             (ZERO, 0, true),
             (WIDE, 0, false),
+            (THREE_MATCH, 0, true),
         ],
         &[("MORI_TEST_ORDERED_COUNT_GROUP_LIMIT", "2")],
     );
@@ -1846,6 +1864,7 @@ fn ordered_count_overflow_ranks_late_groups_in_rust() {
     assert_eq!(pages[6]["rows"], json!([["winner", "3"]]));
     assert_eq!(pages[7]["rows"], json!([]));
     assert_eq!(pages[8]["rows"], json!([["winner", "3"]]));
+    assert_eq!(pages[9]["rows"], json!([["winner", "3"]]));
 
     let db = fixture.db(CLIENT);
     fail_node_read(&db, tail);
