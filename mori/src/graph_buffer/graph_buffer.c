@@ -2134,7 +2134,11 @@ int64_t cbm_gbuf_insert_edge(cbm_gbuf_t *gb, int64_t source_id, int64_t target_i
             }
         }
         if (replace) {
-            existing->properties_json = (char *)gb_intern(gb, properties_json);
+            const char *replacement = gb_intern(gb, properties_json);
+            if (!replacement) {
+                return 0;
+            }
+            existing->properties_json = (char *)replacement;
         }
         return existing->id;
     }
@@ -2151,6 +2155,10 @@ int64_t cbm_gbuf_insert_edge(cbm_gbuf_t *gb, int64_t source_id, int64_t target_i
     edge->target_id = target_id;
     edge->type = (char *)gb_intern(gb, type);
     edge->properties_json = (char *)gb_intern(gb, properties_json);
+    if (!edge->type || !edge->properties_json) {
+        cbm_free(CBM_MEM_CLASS_GBUF_EDGE, edge);
+        return 0;
+    }
 
     /* Publication reads this primary array. Do not register a missing edge
      * in secondary indexes or report success when array growth fails. */

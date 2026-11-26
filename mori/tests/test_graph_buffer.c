@@ -1369,6 +1369,45 @@ TEST(gbuf_merge_reports_edge_append_failure) {
     ASSERT_EQ(edges, 0);
     PASS();
 }
+
+TEST(gbuf_merge_reports_edge_payload_failure) {
+    static const char payload[] = "{\"edge_payload\":42}";
+    for (int replace = 0; replace <= 1; replace++) {
+        _Atomic int64_t shared = 1;
+        cbm_gbuf_t *dst = cbm_gbuf_new_shared_ids("test", "/tmp", &shared);
+        cbm_gbuf_t *src = cbm_gbuf_new_worker("test", "/tmp", &shared);
+        ASSERT_NOT_NULL(dst);
+        ASSERT_NOT_NULL(src);
+        int64_t from = cbm_gbuf_upsert_node(dst, "Function", "f", "pkg.f", "f.go", 1, 4, "{}");
+        int64_t to = cbm_gbuf_upsert_node(dst, "Function", "g", "pkg.g", "f.go", 6, 8, "{}");
+        ASSERT_GT(from, 0);
+        ASSERT_GT(to, 0);
+        if (replace) {
+            ASSERT_GT(cbm_gbuf_insert_edge(dst, from, to, "CALLS", "{}"), 0);
+        }
+        ASSERT_GT(cbm_gbuf_insert_edge(src, from, to, "CALLS", payload), 0);
+
+        cbm_mem_test_fail_alloc_size(CBM_MEM_CLASS_GBUF_STRING, sizeof(payload));
+        int rc = cbm_gbuf_merge(dst, src);
+        bool injected = cbm_mem_test_reset_alloc_failure();
+
+        const cbm_gbuf_edge_t **edges = NULL;
+        int count = 0;
+        cbm_gbuf_find_edges_by_source_type(dst, from, "CALLS", &edges, &count);
+        bool preserved = !replace || (count == 1 && edges[0]->properties_json &&
+                                      strcmp(edges[0]->properties_json, "{}") == 0);
+        int total_edges = cbm_gbuf_edge_count(dst);
+        cbm_gbuf_free(src);
+        cbm_gbuf_free(dst);
+
+        ASSERT(injected);
+        ASSERT_EQ(rc, -1);
+        ASSERT_EQ(total_edges, replace);
+        ASSERT_EQ(count, replace);
+        ASSERT(preserved);
+    }
+    PASS();
+}
 #endif
 
 TEST(gbuf_merge_populated_src_into_empty_dst) {
@@ -1819,6 +1858,7 @@ SUITE(graph_buffer) {
     RUN_TEST(gbuf_merge_keeps_collision_fields_on_property_failure);
     RUN_TEST(gbuf_merge_reports_node_append_failure);
     RUN_TEST(gbuf_merge_reports_edge_append_failure);
+    RUN_TEST(gbuf_merge_reports_edge_payload_failure);
 #endif
     RUN_TEST(gbuf_merge_empty_src_into_populated_dst);
     RUN_TEST(gbuf_merge_populated_src_into_empty_dst);
