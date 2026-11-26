@@ -752,7 +752,7 @@ EXISTING_C_SRCS = $(EXTRACTION_SRCS) $(LSP_SRCS) $(TS_RUNTIME_SRC) \
                   $(GRAMMAR_SRCS) $(AC_LZ4_SRCS) $(ZSTD_SRCS) $(SQLITE_WRITER_SRC)
 
 # Project headers, as prerequisites for the targets built in one compiler
-# invocation from sources (test-runner, test-repro-runner, test-runner-tsan,
+# invocation from sources (test-repro-runner, test-runner-tsan,
 # codebase-memory-mcp, test-foundation). Those rules list only .c files, so
 # editing a header changed nothing make could see and the target was NOT
 # rebuilt — an incremental build then silently tested the OLD header value.
@@ -1264,11 +1264,64 @@ $(UNIXCODER_OBJ): $(UNIXCODER_BLOB_SRC) vendored/nomic/code_vectors.bin | $(BUIL
 OBJS_VENDORED_TEST = $(MIMALLOC_OBJ_TEST) $(SQLITE3_OBJ_TEST) $(TRE_OBJ_TEST) $(GRAMMAR_OBJS_TEST) $(TS_RUNTIME_OBJ_TEST) $(LSP_OBJ_TEST) $(PP_OBJ_TEST) $(LZ4_OBJ_TEST) $(ZSTD_OBJ_TEST) $(UNIXCODER_OBJ)
 OBJS_VENDORED_TSAN = $(MIMALLOC_OBJ_TSAN) $(SQLITE3_OBJ_TSAN) $(TRE_OBJ_TSAN) $(GRAMMAR_OBJS_TSAN) $(TS_RUNTIME_OBJ_TSAN) $(LSP_OBJ_TSAN) $(PP_OBJ_TSAN) $(LZ4_OBJ_TSAN) $(ZSTD_OBJ_TSAN) $(UNIXCODER_OBJ)
 
-$(BUILD_DIR)/test-runner: $(ALL_TEST_SRCS) $(PROD_SRCS) $(EXTRACTION_SRCS) $(AC_LZ4_SRCS) $(ZSTD_SRCS) $(SQLITE_WRITER_SRC) $(OBJS_VENDORED_TEST) $(PROJECT_HDRS) $(NATIVE_ENGINE_TEST_ARCHIVE) | $(BUILD_DIR)
-	$(CC) $(CFLAGS_TEST) -Itests -Itests/repro -o $@ \
-		$(ALL_TEST_SRCS) $(PROD_SRCS) \
-		$(EXTRACTION_SRCS) $(AC_LZ4_SRCS) $(ZSTD_SRCS) $(SQLITE_WRITER_SRC) \
-		$(OBJS_VENDORED_TEST) $(NATIVE_ENGINE_TEST_ARCHIVE) \
+# Keep source order at link time. Per-source objects let Make schedule the
+# formerly serial compiler work and let compiler caches reuse each result.
+TEST_RUNNER_DIR = $(BUILD_DIR)/test-obj
+test-runner-objects = $(patsubst %.c,$(TEST_RUNNER_DIR)/%.o,$(1))
+TEST_RUNNER_TEST_OBJS := $(call test-runner-objects,$(ALL_TEST_SRCS))
+TEST_RUNNER_PROD_OBJS := $(call test-runner-objects,$(PROD_SRCS))
+TEST_RUNNER_EXTRACT_OBJS := $(call test-runner-objects,$(EXTRACTION_SRCS) $(AC_LZ4_SRCS) $(ZSTD_SRCS) $(SQLITE_WRITER_SRC))
+TEST_RUNNER_OBJS := $(TEST_RUNNER_TEST_OBJS) $(TEST_RUNNER_PROD_OBJS) $(TEST_RUNNER_EXTRACT_OBJS)
+TEST_RUNNER_CONFIG = $(BUILD_DIR)/.test-build-config
+TEST_RUNNER_CONFIG_SIG := CC=$(CC)|CXX=$(CXX)|CFLAGS_TEST=$(CFLAGS_TEST)|CXXFLAGS_TEST=$(CXXFLAGS_TEST)|\
+                          LDFLAGS_TEST=$(LDFLAGS_TEST)|NATIVE_LIBS=$(NATIVE_ENGINE_TEST_SYSTEM_LIBS)|\
+                          GRAMMAR=$(GRAMMAR_CFLAGS_TEST)|MIMALLOC=$(MIMALLOC_CFLAGS_TEST)|\
+                          SQLITE=$(SQLITE3_CFLAGS_TEST)|TRE=$(TRE_CFLAGS)|ZSTD=$(ZSTD_EXTRA_CFLAGS)
+
+# Reuse the same directory for the documented SANITIZE= repeat without
+# retaining any vendor instrumentation built for the previous settings.
+# The shared assembly data blob is built without sanitizer flags.
+$(filter-out $(UNIXCODER_OBJ),$(OBJS_VENDORED_TEST)): $(TEST_RUNNER_CONFIG)
+
+.PHONY: test-build-config-check
+test-build-config-check:
+$(TEST_RUNNER_CONFIG): test-build-config-check | $(BUILD_DIR)
+	@printf '%s\n' '$(TEST_RUNNER_CONFIG_SIG)' > $@.tmp
+	@if cmp -s $@.tmp $@; then rm -f $@.tmp; else mv -f $@.tmp $@; fi
+
+# Publish the object only after its dependency file.
+$(TEST_RUNNER_OBJS): $(TEST_RUNNER_DIR)/%.o: %.c $(TEST_RUNNER_CONFIG) | $(BUILD_DIR)
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS_TEST) -Itests -Itests/repro -MMD -MP -MQ $@ -MF $(@:.o=.d).tmp -c -o $@.tmp $<
+	@rm -f $@
+	@mv -f $(@:.o=.d).tmp $(@:.o=.d)
+	@mv -f $@.tmp $@
+
+TEST_RUNNER_DEPS := $(TEST_RUNNER_OBJS:.o=.d)
+TEST_RUNNER_KNOWN_DEPS := $(wildcard $(TEST_RUNNER_DEPS))
+TEST_RUNNER_MISSING_DEPS := $(filter-out $(TEST_RUNNER_KNOWN_DEPS),$(TEST_RUNNER_DEPS))
+ifneq ($(TEST_RUNNER_MISSING_DEPS),)
+.PHONY: test-runner-missing-depfile
+$(TEST_RUNNER_MISSING_DEPS:.d=.o): test-runner-missing-depfile
+endif
+-include $(TEST_RUNNER_KNOWN_DEPS)
+
+TEST_RUNNER_LINK_INPUTS = $(TEST_RUNNER_OBJS) $(OBJS_VENDORED_TEST) $(NATIVE_ENGINE_TEST_ARCHIVE)
+ifeq ($(IS_MINGW),yes)
+# The expanded input list can exceed the Windows process command-line limit.
+# Write it in batches so each shell command stays under the same limit.
+TEST_RUNNER_LINK_INPUTS = @$@.rsp $(OBJS_VENDORED_TEST) $(NATIVE_ENGINE_TEST_ARCHIVE)
+define test-runner-link-inputs
+	@printf '%s\n' $(TEST_RUNNER_TEST_OBJS) > $@.rsp
+	@printf '%s\n' $(TEST_RUNNER_PROD_OBJS) >> $@.rsp
+	@printf '%s\n' $(TEST_RUNNER_EXTRACT_OBJS) >> $@.rsp
+endef
+endif
+
+$(BUILD_DIR)/test-runner: $(TEST_RUNNER_OBJS) $(OBJS_VENDORED_TEST) $(NATIVE_ENGINE_TEST_ARCHIVE) Makefile.cbm | $(BUILD_DIR)
+	$(test-runner-link-inputs)
+	$(CC) -g $(filter -fprofile-instr-generate%,$(TEST_COVERAGE_FLAGS)) -o $@ \
+		$(TEST_RUNNER_LINK_INPUTS) \
 		$(LDFLAGS_TEST) $(NATIVE_ENGINE_TEST_SYSTEM_LIBS)
 
 test: $(BUILD_DIR)/test-runner
