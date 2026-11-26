@@ -1338,17 +1338,6 @@ void cbm_linked_startup_print_help(void) {
 
 extern int cbm_rust_test_impact_cli(int argc, char **argv, FILE *out, FILE *err);
 
-/* Keep stream operations in the same CRT that owns the FILE, including on Windows. */
-bool cbm_test_impact_cli_write(FILE *stream, const unsigned char *bytes, size_t len, bool newline);
-bool cbm_test_impact_cli_write(FILE *stream, const unsigned char *bytes, size_t len, bool newline) {
-    return fwrite(bytes, 1, len, stream) == len && (!newline || fputc('\n', stream) != EOF);
-}
-
-bool cbm_test_impact_cli_close(FILE *stream);
-bool cbm_test_impact_cli_close(FILE *stream) {
-    return fclose(stream) == 0;
-}
-
 static int handle_subcommand(int argc, char **argv, cbm_project_lock_manager_t *project_locks,
                              main_local_maintenance_context_t *maintenance_context) {
     main_enable_requested_profile(argc, argv);
