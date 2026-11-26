@@ -68,3 +68,12 @@ An output allow-list cannot waive this check. The dispatch diagnostic
 records the call ID and event count. After a side B timeout, later Rust
 execution checks fail because the timed-out request may still write to the
 daemon log.
+
+### Frozen C Reference Cache
+
+CI and release dry runs use exact cache keys with no fallback prefix.
+A restore that fails verification is discarded and rebuilt for the current
+run. GitHub Actions cache entries are immutable. If the same key repeatedly
+reports an invalid restore, locate it with `gh cache list --key <key>`,
+delete the entry by ID with `gh cache delete <id>`, and rerun the build.
+Seed release-version caches with a dry run on `main`.
