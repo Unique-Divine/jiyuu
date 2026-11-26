@@ -297,6 +297,48 @@ fn list_projects_matches_c() {
 }
 
 #[test]
+fn cli_and_stdio_route_project_listing_through_rust() {
+    let bin = Path::new(MORI);
+    let scratch = Scratch::new("project-dispatch");
+    let start = command_in(bin, &scratch)
+        .env("CBM_LOG_LEVEL", "debug")
+        .env("CBM_LOG_FORMAT", "text")
+        .args(["daemon", "start"])
+        .output()
+        .unwrap();
+    assert!(start.status.success(), "{start:?}");
+    let cli = run_in(bin, &scratch, &["cli", "--quiet", "list_projects"]);
+    let stdio = run_stdio_in(
+        bin,
+        &scratch,
+        &[],
+        concat!(
+            r#"{"jsonrpc":"2.0","id":"catalog","method":"tools/call","params":{"name":"list_projects","arguments":{"format":"json"}}}"#,
+            "\n"
+        ),
+    );
+    let stop = run_in(bin, &scratch, &["daemon", "stop"]);
+    assert!(stop.status.success(), "{stop:?}");
+    assert!(cli.status.success(), "{cli:?}");
+    assert!(stdio.status.success(), "{stdio:?}");
+
+    let reply: serde_json::Value =
+        serde_json::from_slice(&stdio.stdout).unwrap();
+    assert_eq!(reply["id"], "catalog");
+    assert_eq!(reply["result"]["structuredContent"]["total"], 0);
+    let log =
+        fs::read_to_string(scratch.0.join("cache/logs/cbm-daemon.log")).unwrap();
+    assert_eq!(
+        log.lines()
+            .filter(|line| line
+                .contains("msg=list_projects.dispatch implementation=rust"))
+            .count(),
+        2,
+        "{bin:?}: {log}"
+    );
+}
+
+#[test]
 fn cli_output_controls_match_c() {
     assert_same(&["cli", "--quiet", "list_projects"]);
     assert_same(&["cli", "--verbose", "list_projects", "--quiet"]);

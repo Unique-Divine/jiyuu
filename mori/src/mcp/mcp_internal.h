@@ -9,7 +9,28 @@
 
 #include <yyjson/yyjson.h>
 
-/* Shared compact transport for the C and Rust project response writers. */
+/* The Rust request opens the native directory, pulls one owned row at a
+ * time, and hydrates only selected rows before releasing them. A failed
+ * open returns an owned MCP error through error. */
+typedef struct cbm_mcp_project_catalog cbm_mcp_project_catalog_t;
+typedef enum {
+    CBM_MCP_CATALOG_END = 0,
+    CBM_MCP_CATALOG_RECORD = 1,
+    CBM_MCP_CATALOG_FAILED = 2,
+    CBM_MCP_CATALOG_CANCELLED = 3,
+} cbm_mcp_project_catalog_result_t;
+
+cbm_mcp_project_catalog_t *cbm_mcp_project_catalog_open(cbm_mcp_server_t *server, char **error);
+cbm_mcp_project_catalog_result_t cbm_mcp_project_catalog_next(
+    cbm_mcp_project_catalog_t *catalog, cbm_mcp_project_record_t *record);
+cbm_mcp_project_catalog_result_t cbm_mcp_project_catalog_hydrate(
+    cbm_mcp_project_catalog_t *catalog, cbm_mcp_project_record_t *record, bool include_stats);
+void cbm_mcp_project_catalog_release_record(cbm_mcp_project_record_t *record);
+void cbm_mcp_project_catalog_close(cbm_mcp_project_catalog_t *catalog);
+
+char *cbm_rust_mcp_list_projects(cbm_mcp_server_t *server, const char *args_json);
+
+/* Compact table rendering retains the C emitter's escaping and column profiles. */
 void cbm_mcp_render_project_table(cbm_sb_t *sb, const cbm_mcp_project_record_t *records,
                                    int page_count, bool metadata_only, bool include_stats);
 

@@ -62,52 +62,66 @@ struct StageFinalize {
     _opaque: [u8; 0],
 }
 
-type Check = unsafe extern "C" fn(*mut StageFinalize) -> bool;
-type Cleanup = unsafe extern "C" fn(*mut StageFinalize);
-
-#[repr(C)]
-struct FinalizeOps {
-    abort_preserve_db: c_int,
-    persist_failed: c_int,
-    remove_sidecars: Check,
-    cancelled: Check,
-    prepare: Check,
-    rollback: Check,
-    rename: Check,
-    release: Cleanup,
-    discard: Cleanup,
+unsafe extern "C" {
+    fn cbm_stage_install_remove_sidecars(run: *mut StageFinalize) -> bool;
+    fn cbm_stage_install_cancelled(run: *mut StageFinalize) -> bool;
+    fn cbm_stage_install_clean_destination_sidecars(
+        run: *mut StageFinalize,
+    ) -> bool;
+    fn cbm_stage_install_prepare_destination(run: *mut StageFinalize) -> bool;
+    fn cbm_stage_install_rollback(run: *mut StageFinalize) -> bool;
+    fn cbm_stage_install_rename(run: *mut StageFinalize) -> bool;
+    fn cbm_stage_install_release(run: *mut StageFinalize);
+    fn cbm_stage_install_discard(run: *mut StageFinalize);
 }
 
 #[cfg_attr(feature = "native-engine-abi", unsafe(no_mangle))]
 unsafe extern "C" fn cbm_rust_stage_finalize(
     run: *mut StageFinalize,
-    ops: &FinalizeOps,
+    destination_known_healthy: bool,
+    abort_preserve_db: c_int,
+    persist_failed: c_int,
 ) -> c_int {
-    // SAFETY: C lends the closed stage and its matching callbacks. Prepare
-    // owns recovery from its own errors. After it succeeds the driver owns
-    // rollback, and each exit either discards or releases the stage.
+    // SAFETY: The caller lends a live native context for the closed stage and
+    // retains ownership of the paths. Preparation owns recovery from its own
+    // errors. Every exit either discards the stage or releases its lock.
     unsafe {
-        let status = if !(ops.remove_sidecars)(run) {
-            ops.persist_failed
-        } else if (ops.cancelled)(run) {
-            ops.abort_preserve_db
-        } else if !(ops.prepare)(run) {
-            ops.persist_failed
-        } else if (ops.cancelled)(run) {
-            if (ops.rollback)(run) {
-                ops.abort_preserve_db
+        let status = if !cbm_stage_install_remove_sidecars(run) {
+            persist_failed
+        } else if cbm_stage_install_cancelled(run) {
+            abort_preserve_db
+        } else if !prepare_destination(run, destination_known_healthy) {
+            persist_failed
+        } else if cbm_stage_install_cancelled(run) {
+            if cbm_stage_install_rollback(run) {
+                abort_preserve_db
             } else {
-                ops.persist_failed
+                persist_failed
             }
-        } else if (ops.rename)(run) {
-            (ops.release)(run);
+        } else if cbm_stage_install_rename(run) {
+            cbm_stage_install_release(run);
             return 0;
         } else {
-            (ops.rollback)(run);
-            ops.persist_failed
+            cbm_stage_install_rollback(run);
+            persist_failed
         };
-        (ops.discard)(run);
+        cbm_stage_install_discard(run);
         status
+    }
+}
+
+unsafe fn prepare_destination(
+    run: *mut StageFinalize,
+    destination_known_healthy: bool,
+) -> bool {
+    // SAFETY: This step uses the same native context as finalization.
+    unsafe {
+        if destination_known_healthy {
+            // A successful delta clone and patch already checked the database.
+            cbm_stage_install_clean_destination_sidecars(run)
+        } else {
+            cbm_stage_install_prepare_destination(run)
+        }
     }
 }
 
@@ -307,79 +321,6 @@ mod tests {
         }
     }
 
-    #[derive(Default)]
-    struct FinalizeTrace {
-        calls: Vec<&'static str>,
-        cancel_at: Option<&'static str>,
-        fail_at: &'static str,
-        rollback_fails: bool,
-        prepared: bool,
-    }
-
-    fn finalize_step(run: *mut StageFinalize, action: &'static str) -> bool {
-        // SAFETY: the test lends this live trace for the driver call.
-        let trace = unsafe { &mut *run.cast::<FinalizeTrace>() };
-        trace.calls.push(action);
-        trace.fail_at != action
-    }
-
-    unsafe extern "C" fn remove_sidecars(run: *mut StageFinalize) -> bool {
-        finalize_step(run, "sidecars")
-    }
-
-    unsafe extern "C" fn cancelled(run: *mut StageFinalize) -> bool {
-        // SAFETY: the test lends this live trace for the driver call.
-        let trace = unsafe { &mut *run.cast::<FinalizeTrace>() };
-        let step = if trace.prepared {
-            "late_cancel"
-        } else {
-            "early_cancel"
-        };
-        trace.calls.push(step);
-        trace.cancel_at == Some(step)
-    }
-
-    unsafe extern "C" fn prepare(run: *mut StageFinalize) -> bool {
-        if !finalize_step(run, "prepare") {
-            return false;
-        }
-        // SAFETY: the test lends this live trace for the driver call.
-        unsafe { (*run.cast::<FinalizeTrace>()).prepared = true };
-        true
-    }
-
-    unsafe extern "C" fn rollback(run: *mut StageFinalize) -> bool {
-        finalize_step(run, "rollback");
-        // SAFETY: the test lends this live trace for the driver call.
-        unsafe { !(*run.cast::<FinalizeTrace>()).rollback_fails }
-    }
-
-    unsafe extern "C" fn rename(run: *mut StageFinalize) -> bool {
-        finalize_step(run, "rename")
-    }
-
-    unsafe extern "C" fn release(run: *mut StageFinalize) {
-        finalize_step(run, "release");
-    }
-
-    unsafe extern "C" fn discard(run: *mut StageFinalize) {
-        finalize_step(run, "discard");
-    }
-
-    const ABORT: c_int = -7;
-    const PERSIST: c_int = -8;
-    const FINALIZE_OPS: FinalizeOps = FinalizeOps {
-        abort_preserve_db: ABORT,
-        persist_failed: PERSIST,
-        remove_sidecars,
-        cancelled,
-        prepare,
-        rollback,
-        rename,
-        release,
-        discard,
-    };
-
     #[test]
     fn closure_refresh_runs_only_after_metadata_succeeds() {
         for (fail_at, last_call) in
@@ -402,6 +343,103 @@ mod tests {
             assert_eq!(trace.calls.last(), Some(&last_call));
         }
     }
+}
+
+// Pure Rust tests lend an opaque trace to the production driver and define
+// its native symbols. The linked build exercises the real leaves in C tests.
+#[cfg(all(test, not(feature = "native-engine-abi")))]
+mod finalize_tests {
+    use super::*;
+
+    #[derive(Default)]
+    struct FinalizeTrace {
+        calls: Vec<&'static str>,
+        cancel_at: Option<&'static str>,
+        fail_at: &'static str,
+        rollback_fails: bool,
+        prepared: bool,
+    }
+
+    fn finalize_step(run: *mut StageFinalize, action: &'static str) -> bool {
+        // SAFETY: the test lends this live trace for the driver call.
+        let trace = unsafe { &mut *run.cast::<FinalizeTrace>() };
+        trace.calls.push(action);
+        trace.fail_at != action
+    }
+
+    #[unsafe(no_mangle)]
+    unsafe extern "C" fn cbm_stage_install_remove_sidecars(
+        run: *mut StageFinalize,
+    ) -> bool {
+        finalize_step(run, "sidecars")
+    }
+
+    #[unsafe(no_mangle)]
+    unsafe extern "C" fn cbm_stage_install_cancelled(
+        run: *mut StageFinalize,
+    ) -> bool {
+        // SAFETY: the test lends this live trace for the driver call.
+        let trace = unsafe { &mut *run.cast::<FinalizeTrace>() };
+        let step = if trace.prepared {
+            "late_cancel"
+        } else {
+            "early_cancel"
+        };
+        trace.calls.push(step);
+        trace.cancel_at == Some(step)
+    }
+
+    #[unsafe(no_mangle)]
+    unsafe extern "C" fn cbm_stage_install_prepare_destination(
+        run: *mut StageFinalize,
+    ) -> bool {
+        finish_prepare(run, "prepare")
+    }
+
+    #[unsafe(no_mangle)]
+    unsafe extern "C" fn cbm_stage_install_clean_destination_sidecars(
+        run: *mut StageFinalize,
+    ) -> bool {
+        finish_prepare(run, "clean_destination")
+    }
+
+    fn finish_prepare(run: *mut StageFinalize, action: &'static str) -> bool {
+        if !finalize_step(run, action) {
+            return false;
+        }
+        // SAFETY: the test lends this live trace for the driver call.
+        unsafe { (*run.cast::<FinalizeTrace>()).prepared = true };
+        true
+    }
+
+    #[unsafe(no_mangle)]
+    unsafe extern "C" fn cbm_stage_install_rollback(
+        run: *mut StageFinalize,
+    ) -> bool {
+        finalize_step(run, "rollback");
+        // SAFETY: the test lends this live trace for the driver call.
+        unsafe { !(*run.cast::<FinalizeTrace>()).rollback_fails }
+    }
+
+    #[unsafe(no_mangle)]
+    unsafe extern "C" fn cbm_stage_install_rename(
+        run: *mut StageFinalize,
+    ) -> bool {
+        finalize_step(run, "rename")
+    }
+
+    #[unsafe(no_mangle)]
+    unsafe extern "C" fn cbm_stage_install_release(run: *mut StageFinalize) {
+        finalize_step(run, "release");
+    }
+
+    #[unsafe(no_mangle)]
+    unsafe extern "C" fn cbm_stage_install_discard(run: *mut StageFinalize) {
+        finalize_step(run, "discard");
+    }
+
+    const ABORT: c_int = -7;
+    const PERSIST: c_int = -8;
 
     #[test]
     fn finalization_rolls_back_only_after_destination_preparation() {
@@ -506,12 +544,40 @@ mod tests {
                 unsafe {
                     cbm_rust_stage_finalize(
                         (&raw mut trace).cast(),
-                        &FINALIZE_OPS,
+                        false,
+                        ABORT,
+                        PERSIST,
                     )
                 },
                 status
             );
             assert_eq!(trace.calls, calls);
         }
+    }
+
+    #[test]
+    fn known_healthy_destination_only_cleans_sidecars() {
+        let mut trace = FinalizeTrace::default();
+        // SAFETY: the driver and mocks borrow the live trace exclusively.
+        let result = unsafe {
+            cbm_rust_stage_finalize(
+                (&raw mut trace).cast(),
+                true,
+                ABORT,
+                PERSIST,
+            )
+        };
+        assert_eq!(result, 0);
+        assert_eq!(
+            trace.calls,
+            [
+                "sidecars",
+                "early_cancel",
+                "clean_destination",
+                "late_cancel",
+                "rename",
+                "release",
+            ],
+        );
     }
 }

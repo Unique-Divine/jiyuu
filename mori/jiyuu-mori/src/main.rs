@@ -73,10 +73,6 @@ mod ingest_trace;
 #[cfg(any(feature = "c-backend", test))]
 mod mcp_dispatch;
 #[cfg(any(feature = "c-backend", test))]
-mod project_page;
-#[cfg(all(feature = "c-backend", not(test)))]
-mod project_response;
-#[cfg(any(feature = "c-backend", test))]
 mod tool_list;
 
 #[cfg(not(feature = "c-backend"))]

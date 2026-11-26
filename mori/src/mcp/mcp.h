@@ -425,28 +425,6 @@ typedef struct {
     bool populated;
 } cbm_mcp_project_record_t;
 
-typedef struct {
-    int limit;
-    int offset;
-    int start;
-    int end;
-} cbm_mcp_project_page_t;
-
-/* Register before request threads start. The callback sorts the borrowed records
- * in place and clamps limit/offset before returning the half-open page bounds.
- * The array may be NULL when count is zero. C owns all records and strings. */
-typedef void (*cbm_mcp_project_page_builder_fn)(cbm_mcp_project_record_t *records, int count,
-                                                cbm_mcp_project_page_t *page);
-void cbm_mcp_set_project_page_builder(cbm_mcp_project_page_builder_fn builder);
-
-/* The renderer borrows the selected page and returns an owned payload. */
-typedef char *(*cbm_mcp_project_list_renderer_fn)(const cbm_mcp_project_record_t *page_records,
-                                                  int total, const cbm_mcp_project_page_t *page,
-                                                  bool metadata_only, bool include_stats,
-                                                  bool wants_json);
-void cbm_mcp_set_project_list_renderer(cbm_mcp_project_list_renderer_fn renderer,
-                                        cbm_mcp_read_override_free_fn release);
-
 /* Diagnostic JSON is an ordered object produced by native collectors. Strings
  * and the report are borrowed for the render call. */
 typedef struct {
