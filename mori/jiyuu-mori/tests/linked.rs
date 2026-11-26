@@ -98,22 +98,31 @@ fn assert_same(args: &[&str]) {
 /// `mori --version` names `mori`; the version and everything else match C.
 #[test]
 fn version_matches_c() {
-    let c = run(&c_binary(), "c", &["--version"]);
-    let rs = run(Path::new(MORI), "rs", &["--version"]);
-    assert!(c.status.success() && rs.status.success());
-    let c_out = String::from_utf8_lossy(&c.stdout);
-    let rs_out = String::from_utf8_lossy(&rs.stdout);
-    let version = c_out
-        .strip_prefix("codebase-memory-mcp ")
-        .unwrap_or_else(|| panic!("C --version printed {c_out:?}"));
-    assert_eq!(rs_out, format!("mori {version}"));
-    assert_eq!(c.stderr, rs.stderr);
+    let reference = c_binary();
+    for args in [
+        &["--version"][..],
+        &["--version", "--profile"],
+        &["--profile", "--version", "--help"],
+        &["daemon", "--version", "--help"],
+    ] {
+        let c = run(&reference, "c", args);
+        let rs = run(Path::new(MORI), "rs", args);
+        assert!(c.status.success() && rs.status.success(), "{args:?}");
+        let version = c
+            .stdout
+            .strip_prefix(b"codebase-memory-mcp ")
+            .unwrap_or_else(|| panic!("C {args:?} printed {:?}", c.stdout));
+        assert_eq!(rs.stdout, [b"mori ", version].concat(), "{args:?}");
+        assert_eq!(c.stderr, rs.stderr, "{args:?}");
+    }
 }
 
 #[test]
 fn top_level_command_precedence_matches_c() {
     for args in [
         &["--profile", "--help", "cli"][..],
+        &["--help", "--version"],
+        &["-h", "--profile"],
         &["cli", "--help", "--version"],
         &["cli", "list_projects", "--help"],
         &["daemon", "--help"],
@@ -125,6 +134,29 @@ fn top_level_command_precedence_matches_c() {
         &["--tool-profile=invalid"],
     ] {
         assert_same(args);
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn informational_commands_match_c_when_stdout_fails() {
+    let reference = c_binary();
+    for name in ["--version", "--help"] {
+        let run = |bin: &Path| {
+            let full = fs::OpenOptions::new()
+                .write(true)
+                .open("/dev/full")
+                .unwrap();
+            command_in(bin, &Scratch::new("full-info"))
+                .arg(name)
+                .stdout(full)
+                .output()
+                .unwrap()
+        };
+        let c = run(&reference);
+        let rs = run(Path::new(MORI));
+        assert!(c.status.success() && rs.status.success(), "{name}");
+        assert_eq!(c.stderr, rs.stderr, "{name}");
     }
 }
 
