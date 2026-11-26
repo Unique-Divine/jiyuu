@@ -511,6 +511,10 @@ jobs:
             runner: ubuntu-24.04-arm
     env:
       CCACHE_MAXSIZE: 1G
+      MORI_CANDIDATE_SUITES: >-
+        edge_types_probe lang_contract cross_repo extraction graph_buffer pipeline yaml language
+        config_text_edit doclinks doc_links_pdf watcher daemon_ipc
+        store_graph_digest pipeline_frozen httpd
     steps:
       - name: Unaffected project
         if: needs.changes.outputs.mori != 'true'
@@ -519,6 +523,7 @@ jobs:
         if: needs.changes.outputs.mori == 'true'
         with:
           persist-credentials: false
+          fetch-depth: 2
       - name: Install build dependencies
         if: needs.changes.outputs.mori == 'true'
         run: |
@@ -575,13 +580,28 @@ jobs:
           scripts/security-vendored.sh
           just parity-test
       - name: Run candidate grammar and extraction suites
+        id: mori-native-baseline
         if: needs.changes.outputs.mori == 'true'
         working-directory: mori
+        run: |
+          set -o pipefail
+          scripts/test.sh --suites "$MORI_CANDIDATE_SUITES" 2>&1 | tee "$RUNNER_TEMP/mori-native-baseline.log"
+      - name: Report shadow native suite selection
+        if: >-
+          always() && (steps.mori-native-baseline.outcome == 'success' ||
+          steps.mori-native-baseline.outcome == 'failure')
+        continue-on-error: true
+        env:
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          MORI_ARCH: ${{ matrix.arch }}
+          BASELINE_OUTCOME: ${{ steps.mori-native-baseline.outcome }}
         run: >-
-          scripts/test.sh --suites
-          "edge_types_probe lang_contract cross_repo extraction graph_buffer pipeline yaml language
-          config_text_edit doclinks doc_links_pdf watcher daemon_ipc
-          store_graph_digest pipeline_frozen httpd"
+          python3 mori/scripts/ci/mori_ci_shadow.py
+          --base "$PR_BASE" --head "$PR_HEAD" --tested "$GITHUB_SHA"
+          --arch "$MORI_ARCH" --outcome "$BASELINE_OUTCOME"
+          --baseline-suites "$MORI_CANDIDATE_SUITES"
+          --log "$RUNNER_TEMP/mori-native-baseline.log"
       - name: Run Rust, JVM, and C# documentation-link suites
         if: needs.changes.outputs.mori == 'true'
         working-directory: mori
