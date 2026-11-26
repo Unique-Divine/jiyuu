@@ -1,8 +1,8 @@
-//! Builds and links the native Mori archive when `link-native` is enabled.
+//! Builds the native Mori archive when `link-native` is enabled.
 //!
 //! Steps: check that the pinned grammars are installed, run
-//! `make -f Makefile.cbm libmori-c` in `mori/`, then link the archive whole
-//! plus the system libraries the C binary links. The script never reaches
+//! `make -f Makefile.cbm libmori-c` in `mori/`, then pass its directory to
+//! the executable package for linking. The script never reaches
 //! the network: `just --justfile mori/justfile grammars` installs the
 //! grammars, and this script only compares `mori/.grammars.stamp` with
 //! `mori/grammars.lock.json` and the installed tree. `Makefile.cbm` stays the
