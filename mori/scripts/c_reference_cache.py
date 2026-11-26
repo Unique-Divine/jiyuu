@@ -6,7 +6,9 @@ import json
 import os
 import platform
 import shlex
+import shutil
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
@@ -32,6 +34,8 @@ PROCESS_ENV = (
     "HOME",
     "TMPDIR",
     "MORI_MAKE_JOBS",
+    "CCACHE_COMPILERCHECK",
+    "CCACHE_MAXSIZE",
     "HTTP_PROXY",
     "HTTPS_PROXY",
     "NO_PROXY",
@@ -68,6 +72,9 @@ def identity(target: str) -> dict[str, str]:
         else output("dpkg-query", "-W", "libc6-dev", "zlib1g-dev")
     )
     ui = os.environ.get("MORI_WITH_UI") == "1"
+    linker = shutil.which("ld") if system == "Linux" else None
+    if system == "Linux" and linker is None:
+        raise ValueError("Linux reference build requires ld on PATH")
     return {
         "reference": REFERENCE,
         "grammars": GRAMMARS,
@@ -75,6 +82,9 @@ def identity(target: str) -> dict[str, str]:
         "system": system,
         "architecture": platform.machine(),
         "sdk": sdk,
+        "linker": digest(Path(linker))
+        if linker is not None
+        else output("xcodebuild", "-version"),
         "dependencies": dependency_versions,
         "cc": output(*shlex.split(cc), "--version"),
         "cxx": output(*shlex.split(cxx), "--version"),
@@ -93,23 +103,38 @@ def key(inputs: dict[str, str]) -> str:
     return hashlib.sha256(json.dumps(inputs, sort_keys=True).encode()).hexdigest()
 
 
-def build_or_verify(directory: Path, inputs: dict[str, str]) -> None:
+def verify(directory: Path, inputs: dict[str, str]) -> None:
     binary = directory / EXECUTABLE
     manifest = directory / MANIFEST
+    if binary.is_symlink() or manifest.is_symlink():
+        raise ValueError(f"reference cache contains a symbolic link in {directory}")
+    expected = json.loads(manifest.read_text())
+    if expected != {"inputs": inputs, "sha256": digest(binary)}:
+        raise ValueError(
+            f"reference cache identity or checksum mismatch in {directory}"
+        )
+    if not os.access(binary, os.X_OK):
+        raise ValueError(f"reference is not executable: {binary}")
+
+
+def build_or_verify(directory: Path, inputs: dict[str, str]) -> None:
+    if directory.is_symlink():
+        raise ValueError(f"cache destination must not be a symbolic link: {directory}")
     if directory.exists():
-        if not directory.is_dir() or directory.is_symlink():
+        if not directory.is_dir() or any(
+            child.name not in {EXECUTABLE, MANIFEST} for child in directory.iterdir()
+        ):
             raise ValueError(f"invalid reference cache directory {directory}")
-        if binary.is_symlink() or manifest.is_symlink():
-            raise ValueError(f"reference cache contains a symbolic link in {directory}")
-        expected = json.loads(manifest.read_text())
-        if expected != {"inputs": inputs, "sha256": digest(binary)}:
-            raise ValueError(
-                f"reference cache identity or checksum mismatch in {directory}"
+        try:
+            verify(directory, inputs)
+        except (OSError, ValueError) as error:
+            print(
+                f"Discarding restored C reference {key(inputs)}: {error}",
+                file=sys.stderr,
             )
-        if not os.access(binary, os.X_OK):
-            raise ValueError(f"reference is not executable: {binary}")
-        print(f"Verified cached C reference {key(inputs)}")
-        return
+        else:
+            print(f"Verified cached C reference {key(inputs)}")
+            return
 
     directory.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(dir=directory.parent) as scratch:
@@ -133,6 +158,8 @@ def build_or_verify(directory: Path, inputs: dict[str, str]) -> None:
             )
             + "\n"
         )
+        if directory.exists():
+            directory.rename(Path(scratch) / "rejected")
         staged.rename(directory)
     print(f"Built C reference {key(inputs)}")
 
