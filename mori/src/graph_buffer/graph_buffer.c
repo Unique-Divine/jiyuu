@@ -2109,8 +2109,8 @@ static void gb_gql_ops_free(cbm_gbuf_t *gb) {
     }
 }
 
-int64_t cbm_gbuf_insert_edge(cbm_gbuf_t *gb, int64_t source_id, int64_t target_id, const char *type,
-                             const char *properties_json) {
+static int64_t gbuf_insert_edge(cbm_gbuf_t *gb, int64_t source_id, int64_t target_id,
+                                const char *type, const char *properties_json, bool strict_payload) {
     if (!gb || !type) {
         return 0;
     }
@@ -2135,7 +2135,7 @@ int64_t cbm_gbuf_insert_edge(cbm_gbuf_t *gb, int64_t source_id, int64_t target_i
         }
         if (replace) {
             const char *replacement = gb_intern(gb, properties_json);
-            if (!replacement) {
+            if (strict_payload && !replacement) {
                 return 0;
             }
             existing->properties_json = (char *)replacement;
@@ -2155,7 +2155,7 @@ int64_t cbm_gbuf_insert_edge(cbm_gbuf_t *gb, int64_t source_id, int64_t target_i
     edge->target_id = target_id;
     edge->type = (char *)gb_intern(gb, type);
     edge->properties_json = (char *)gb_intern(gb, properties_json);
-    if (!edge->type || !edge->properties_json) {
+    if (strict_payload && (!edge->type || !edge->properties_json)) {
         cbm_free(CBM_MEM_CLASS_GBUF_EDGE, edge);
         return 0;
     }
@@ -2176,6 +2176,12 @@ int64_t cbm_gbuf_insert_edge(cbm_gbuf_t *gb, int64_t source_id, int64_t target_i
     register_edge_in_indexes(gb, edge);
 
     return id;
+}
+
+int64_t cbm_gbuf_insert_edge(cbm_gbuf_t *gb, int64_t source_id, int64_t target_id, const char *type,
+                             const char *properties_json) {
+    /* Worker callers rely on keeping a relationship when its payload is unavailable. */
+    return gbuf_insert_edge(gb, source_id, target_id, type, properties_json, false);
 }
 
 int cbm_gbuf_find_edges_by_source_type(const cbm_gbuf_t *gb, int64_t source_id, const char *type,
@@ -2497,6 +2503,12 @@ static int64_t merge_node(cbm_gbuf_t *dst, const cbm_gbuf_t *src, const cbm_gbuf
     return copied->id;
 }
 
+static int64_t merge_insert_edge(cbm_gbuf_t *dst, int64_t source_id, int64_t target_id,
+                                 const char *type, const char *properties_json) {
+    /* A destination write can abort the merge and discard staging. */
+    return gbuf_insert_edge(dst, source_id, target_id, type, properties_json, true);
+}
+
 int cbm_gbuf_merge(cbm_gbuf_t *dst, cbm_gbuf_t *src) {
     if (!dst || !src) {
         return CBM_NOT_FOUND;
@@ -2506,7 +2518,7 @@ int cbm_gbuf_merge(cbm_gbuf_t *dst, cbm_gbuf_t *src) {
     }
     return mori_gbuf_merge_rows(dst, src, src->nodes.items, src->nodes.count,
                                src->edges.items, src->edges.count, merge_node,
-                               cbm_gbuf_insert_edge, merge_account_remap);
+                               merge_insert_edge, merge_account_remap);
 }
 
 /* ── Dump / Flush ────────────────────────────────────────────────── */
