@@ -1398,6 +1398,17 @@ check, asset names, checksums and the draft step; test it with
 `bun test scripts/release.test.ts`. Run the parity check locally with
 `just --justfile jiyuu-mori/justfile parity`.
 
+To warm the four release C reference caches after merging a version bump,
+dispatch the release workflow on `main` with both inputs enabled.
+
+```bash
+gh workflow run mori-release.yml --ref main -f dry_run=true -f prewarm_oracle=true
+```
+
+The workflow validates the release version and verifies or builds the four C
+references. A later release can reuse those caches when the version and build
+environment match.
+
 ## Credits
 
 Mori is built on [Codebase Memory MCP](https://github.com/DeusData/codebase-memory-mcp)
