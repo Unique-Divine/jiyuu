@@ -3533,448 +3533,41 @@ static void mk_closure_file(mk_closure_t *cl, const char *rel) {
     cbm_free(CBM_MEM_CLASS_OTHER, src);
 }
 
-static const char *mk_rule_key(CBMArena *a, const char *file, const char *name) {
-    return cbm_arena_sprintf(a, "%s\x1f%s", file, name);
-}
+/* The Rust linker requests each distinct makefile's include order once.
+ * The parser, environment and file list are alive only during the callback. */
+typedef void (*sh_make_files_fn)(const char *const *, int, void *);
 
-/* Each make hit's target: the rule node of that name in the makefile, else
- * in the files it includes, in reading order (the first rule of a file).
- * Read here, when linking, so an unchanged makefile is read too. */
-static void sh_make_resolve(sh_pass_t *p, cbm_pipeline_ctx_t *ctx, sh_hits_t *h) {
+void cbm_shell_make_files(void *collector, const char *file, sh_make_files_fn emit, void *data) {
+    sh_pass_t *p = collector;
+    cbm_pipeline_ctx_t *ctx = p->ix->ctx;
     CBMArena a;
     cbm_arena_init(&a);
-    CBMHashTable *closures = cbm_ht_create(0); /* makefile -> mk_closure_t */
-    CBMHashTable *want = cbm_ht_create(0);     /* every file a closure reads */
-    CBMHashTable *rules = cbm_ht_create(0);    /* file \x1f name -> rule node */
-    for (int i = 0; closures && want && i < h->count; i++) {
-        const sh_hit_t *x = &h->items[i];
-        if (!x->make || cbm_ht_get(closures, x->path)) {
-            continue;
-        }
-        mk_closure_t *cl = cbm_arena_alloc(&a, sizeof(*cl));
-        if (!cl) {
-            continue;
-        }
-        const char *dir = sh_dirname(&a, x->path);
-        *cl = (mk_closure_t){.p = p,
-                             .ctx = ctx,
-                             .a = &a,
-                             .seen = cbm_ht_create(0),
-                             .vars = cbm_ht_create(0),
-                             .mkdir = dir && strcmp(dir, ".") != 0 ? dir : ""};
-        if (cl->seen && cl->vars) {
-            mk_closure_file(cl, x->path);
-        }
-        for (int k = 0; k < cl->n; k++) {
-            cbm_ht_set(want, cl->order[k], (void *)cl->order[k]);
-        }
-        cbm_ht_set(closures, x->path, cl);
+    const char *dir = sh_dirname(&a, file);
+    mk_closure_t cl = {.p = p,
+                       .ctx = ctx,
+                       .a = &a,
+                       .seen = cbm_ht_create(0),
+                       .vars = cbm_ht_create(0),
+                       .mkdir = dir && strcmp(dir, ".") != 0 ? dir : ""};
+    if (cl.seen && cl.vars) {
+        mk_closure_file(&cl, file);
     }
-    const cbm_gbuf_node_t **nodes = NULL;
-    int count = 0;
-    if (rules && want && cbm_ht_count(want) > 0 &&
-        cbm_gbuf_find_by_label(ctx->gbuf, "Function", &nodes, &count) == 0) {
-        for (int i = 0; i < count; i++) {
-            const char *fp = nodes[i]->file_path;
-            if (!fp || !nodes[i]->name || !cbm_ht_get(want, fp)) {
-                continue;
-            }
-            const char *key = mk_rule_key(&a, fp, nodes[i]->name);
-            const cbm_gbuf_node_t *old = key ? cbm_ht_get(rules, key) : NULL;
-            if (key && (!old || nodes[i]->start_line < old->start_line)) {
-                cbm_ht_set(rules, key, (void *)nodes[i]);
-            }
-        }
-    }
-    for (int i = 0; rules && closures && i < h->count; i++) {
-        sh_hit_t *x = &h->items[i];
-        const mk_closure_t *cl = x->make ? cbm_ht_get(closures, x->path) : NULL;
-        for (int k = 0; cl && k < cl->n && x->tgt <= 0; k++) {
-            atomic_fetch_add_explicit(&g_sh_candidates, SKIP_ONE, memory_order_relaxed);
-            const char *key = mk_rule_key(&a, cl->order[k], x->ext);
-            const cbm_gbuf_node_t *rule = key ? cbm_ht_get(rules, key) : NULL;
-            x->tgt = rule ? rule->id : 0;
-        }
-    }
-    for (int i = 0; closures && i < h->count; i++) {
-        mk_closure_t *cl = h->items[i].make ? cbm_ht_get(closures, h->items[i].path) : NULL;
-        if (cl) {
-            cbm_ht_delete(closures, h->items[i].path);
-            cbm_ht_free(cl->seen);
-            cbm_ht_free(cl->vars);
-            cbm_free(CBM_MEM_CLASS_OTHER, (void *)cl->order);
-        }
-    }
-    if (closures) {
-        cbm_ht_free(closures);
-    }
-    if (want) {
-        cbm_ht_free(want);
-    }
-    if (rules) {
-        cbm_ht_free(rules);
-    }
+    emit(cl.order, cl.n, data);
+    cbm_ht_free(cl.seen);
+    cbm_ht_free(cl.vars);
+    cbm_free(CBM_MEM_CLASS_OTHER, (void *)cl.order);
     cbm_arena_destroy(&a);
 }
 
-/* ── Edges ─────────────────────────────────────────────────────────── */
-
-typedef struct {
-    const char *file;
-    const cbm_gbuf_node_t *node;
-} sh_span_t;
-
-static int sh_cmp_span(const void *a, const void *b) {
-    const sh_span_t *x = a;
-    const sh_span_t *y = b;
-    return strcmp(x->file, y->file);
+/* Keep updates to the native complexity counter on the C side. */
+void cbm_shell_count_make_candidates(uint64_t count) {
+    atomic_fetch_add_explicit(&g_sh_candidates, count, memory_order_relaxed);
 }
 
-typedef struct {
-    const cbm_gbuf_node_t **items;
-    int count;
-    int cap;
-} sh_srcs_t;
-
-static int sh_cmp_node_qn(const void *a, const void *b) {
-    const cbm_gbuf_node_t *x = *(const cbm_gbuf_node_t *const *)a;
-    const cbm_gbuf_node_t *y = *(const cbm_gbuf_node_t *const *)b;
-    return strcmp(x->qualified_name ? x->qualified_name : "",
-                  y->qualified_name ? y->qualified_name : "");
-}
-
-/* The innermost Function around `line` in `file`, else its Module, else its
- * File node. Into `twins` (when given): every Function of exactly that
- * span, in QN order -- the targets of one Make rule share it, and the
- * rule's recipe runs for each of them. */
-static int64_t sh_source(cbm_pipeline_ctx_t *ctx, const sh_span_t *spans, int n,
-                         CBMHashTable *modules, const char *file, int line, sh_srcs_t *twins) {
-    int lo = 0;
-    int hi = n;
-    while (lo < hi) {
-        int mid = lo + (hi - lo) / PAIR_LEN;
-        if (strcmp(spans[mid].file, file) < 0) {
-            lo = mid + SKIP_ONE;
-        } else {
-            hi = mid;
-        }
-    }
-    const cbm_gbuf_node_t *best = NULL;
-    for (int i = lo; i < n && strcmp(spans[i].file, file) == 0; i++) {
-        const cbm_gbuf_node_t *f = spans[i].node;
-        if (f->start_line > line || f->end_line < line) {
-            continue;
-        }
-        int w = f->end_line - f->start_line;
-        int bw = best ? best->end_line - best->start_line : 0;
-        if (!best || w < bw ||
-            (w == bw && strcmp(f->qualified_name ? f->qualified_name : "",
-                               best->qualified_name ? best->qualified_name : "") < 0)) {
-            best = f;
-        }
-    }
-    if (best) {
-        for (int i = lo; twins && i < n && strcmp(spans[i].file, file) == 0; i++) {
-            const cbm_gbuf_node_t *f = spans[i].node;
-            if (f->start_line == best->start_line && f->end_line == best->end_line &&
-                sh_grow((void **)&twins->items, &twins->cap, twins->count, sizeof(*twins->items))) {
-                twins->items[twins->count++] = f;
-            }
-        }
-        if (twins && twins->count > SKIP_ONE) {
-            qsort((void *)twins->items, (size_t)twins->count, sizeof(*twins->items),
-                  sh_cmp_node_qn);
-        }
-        return best->id;
-    }
-    int64_t mod = (int64_t)(intptr_t)cbm_ht_get(modules, file);
-    if (mod > 0) {
-        return mod;
-    }
-    const cbm_gbuf_node_t *fn = cbm_pipeline_file_node(ctx->gbuf, ctx->project_name, file);
-    return fn ? fn->id : 0;
-}
-
-/* The external Chart of `name` a helm command names: the hit keeps no
- * repository URL (a `repo/name` alias, an oci:// reference's last segment),
- * so the per-project one. */
-static int64_t sh_external_chart(cbm_pipeline_ctx_t *ctx, const char *name, const char *file) {
-    return cbm_pipeline_external_chart(ctx, name, NULL, file);
-}
-
-/* A hit's CI context as JSON members (`,"ci":..,"job":..`); "" for none. */
-static void sh_ci_props(const sh_hit_t *x, char *out, size_t sz) {
-    out[0] = '\0';
-    if (!x->ci) {
-        return;
-    }
-    char job[CBM_SZ_512];
-    cbm_json_escape(job, (int)sizeof(job), x->job ? x->job : "");
-    if (x->job) {
-        snprintf(out, sz, ",\"ci\":\"%s\",\"job\":\"%s\"", x->ci, job);
-    } else {
-        snprintf(out, sz, ",\"ci\":\"%s\"", x->ci);
-    }
-}
-
-/* SPAWNS to the rule `x->tgt` of a make target, the script `x->tgt` (its
- * Module, else its File) or the Process of `x->ext`, as pass_spawns.c draws
- * it. */
-static int sh_link_spawn(cbm_pipeline_ctx_t *ctx, int64_t src, const sh_hit_t *x,
-                         CBMHashTable *modules) {
-    char program[CBM_SZ_128];
-    cbm_json_escape(program, (int)sizeof(program), x->make ? "make" : x->ext);
-    char path[CBM_SZ_2K];
-    path[0] = '\0';
-    int64_t tgt = 0;
-    if (x->make) {
-        char esc[CBM_SZ_1K];
-        char target[CBM_SZ_512];
-        cbm_json_escape(esc, (int)sizeof(esc), x->path);
-        cbm_json_escape(target, (int)sizeof(target), x->ext);
-        snprintf(path, sizeof(path), ",\"path\":\"%s\",\"target\":\"%s\"", esc, target);
-        tgt = x->tgt;
-    } else if (x->tgt > 0) {
-        int64_t mod = (int64_t)(intptr_t)cbm_ht_get(modules, x->path);
-        tgt = mod > 0 ? mod : x->tgt;
-        char esc[CBM_SZ_1K];
-        cbm_json_escape(esc, (int)sizeof(esc), x->path);
-        snprintf(path, sizeof(path), ",\"path\":\"%s\"", esc);
-    } else {
-        char qn[CBM_SZ_256];
-        snprintf(qn, sizeof(qn), "__process__%s", x->ext);
-        char node_props[CBM_SZ_256];
-        snprintf(node_props, sizeof(node_props), "{\"program\":\"%s\"}", program);
-        tgt = cbm_gbuf_upsert_node(ctx->gbuf, "Process", x->ext, qn, "", 0, 0, node_props);
-    }
-    if (tgt <= 0 || tgt == src) {
-        return 0;
-    }
-    char ci[CBM_SZ_1K];
-    sh_ci_props(x, ci, sizeof(ci));
-    char props[CBM_SZ_4K];
-    snprintf(props, sizeof(props),
-             "{\"api\":\"%s\",\"program\":\"%s\"%s%s,\"line\":%d,\"confidence\":1.00}", x->via,
-             program, path, ci, x->line);
-    cbm_gbuf_insert_edge(ctx->gbuf, src, tgt, "SPAWNS", props);
-    return SKIP_ONE;
-}
-
-/* The edge hit `x` draws from source `src`; 1 when drawn. */
-/* An image a build command makes DEPENDS_ON {via:build} the Dockerfile
- * it is built from (edges recomputed whole every run, as the image belongs
- * to no file). */
-static int sh_link_build(cbm_pipeline_ctx_t *ctx, const sh_hit_t *x, CBMHashTable *modules) {
-    int64_t mod = (int64_t)(intptr_t)cbm_ht_get(modules, x->path);
-    int64_t img = mod > 0 ? cbm_pipeline_image_node(ctx, x->ext) : 0;
-    if (img <= 0) {
-        return 0;
-    }
-    char esc_file[CBM_SZ_1K];
-    char esc_img[CBM_SZ_1K];
-    char ci[CBM_SZ_1K];
-    cbm_json_escape(esc_file, (int)sizeof(esc_file), x->file);
-    cbm_json_escape(esc_img, (int)sizeof(esc_img), x->ext);
-    sh_ci_props(x, ci, sizeof(ci));
-    /* sized to what it holds: default_of and build_args are never cut */
-    size_t pn = strlen(esc_file) + strlen(esc_img) + strlen(ci) +
-                (x->default_of ? strlen(x->default_of) : 0) +
-                (x->build_args ? strlen(x->build_args) : 0) + CBM_SZ_256;
-    char *props = cbm_alloc(CBM_MEM_CLASS_OTHER, pn);
-    if (!props) {
-        return 0;
-    }
-    snprintf(props, pn,
-             "{\"via\":\"build\",\"tool\":\"docker-build\",\"file\":\"%s\",\"image\":\"%s\"%s,"
-             "\"line\":%d%s%s%s%s}",
-             esc_file, esc_img, ci, x->line, x->default_of ? ",\"default_of\":" : "",
-             x->default_of ? x->default_of : "", x->build_args ? ",\"build_args\":" : "",
-             x->build_args ? x->build_args : "");
-    cbm_gbuf_insert_edge(ctx->gbuf, img, mod, "DEPENDS_ON", props);
-    cbm_free(CBM_MEM_CLASS_OTHER, props);
-    return SKIP_ONE;
-}
-
-/* A host that is a service of the repository: one DNS label or a
- * `<svc>.<ns>.svc...` name whose first label names a Kubernetes Service of
- * it. Its Route is the path alone, where that service's handler of the path
- * meets it, as code clients do; any other host -- a download, a
- * port-forwarded localhost -- stays in the Route, so it never meets a
- * handler it does not reach. (Not a compose service: the Docker pass makes
- * those after this one in a full run, while a repair holds them already;
- * the QN tells them apart, as a repair's proxies carry no properties.) */
-static bool sh_http_service(cbm_pipeline_ctx_t *ctx, const char *host) {
-    const char *first_dot = strchr(host, '.');
-    const char *svc = first_dot ? strchr(first_dot + SKIP_ONE, '.') : NULL;
-    bool dns_form = !first_dot || (svc && sh_starts(svc, ".svc") &&
-                                   (svc[strlen(".svc")] == '\0' || svc[strlen(".svc")] == '.'));
-    if (!dns_form || strcmp(host, "localhost") == 0) {
-        return false;
-    }
-    char name[CBM_SZ_256];
-    snprintf(name, sizeof(name), "Service/%.*s",
-             (int)(first_dot ? (size_t)(first_dot - host) : strlen(host)), host);
-    const cbm_gbuf_node_t **nodes = NULL;
-    int n = 0;
-    if (cbm_gbuf_find_by_name(ctx->gbuf, name, &nodes, &n) != 0) {
-        return false;
-    }
-    for (int i = 0; i < n; i++) {
-        if (nodes[i]->label && strcmp(nodes[i]->label, "Resource") == 0 &&
-            nodes[i]->qualified_name && !strstr(nodes[i]->qualified_name, "::compose/")) {
-            return true;
-        }
-    }
-    return false;
-}
-
-/* An HTTP request a script makes: HTTP_CALLS {via: curl | wget, method,
- * url_path, host} to its Route (sh_http_service). */
-static int sh_link_http(cbm_pipeline_ctx_t *ctx, int64_t src, const sh_hit_t *x) {
-    const char *auth = strstr(x->ext, "://");
-    if (!auth || src <= 0) {
-        return 0;
-    }
-    auth += strlen("://");
-    size_t al = strcspn(auth, "/");
-    char host[CBM_SZ_256];
-    size_t hl = auth[0] == '[' ? strcspn(auth, "]") + SKIP_ONE : strcspn(auth, ":/");
-    if (hl == 0 || hl > al || hl >= sizeof(host)) {
-        return 0;
-    }
-    for (size_t i = 0; i < hl; i++) {
-        host[i] = (char)tolower((unsigned char)auth[i]);
-    }
-    host[hl] = '\0';
-    const char *path = auth + al;
-    char cpath[CBM_SZ_2K];
-    cbm_route_canon_path(path, cpath, sizeof(cpath));
-    bool local = sh_http_service(ctx, host);
-    char qn[CBM_ROUTE_QN_SIZE];
-    snprintf(qn, sizeof(qn), "__route__%s__%.*s%s", x->path, local ? 0 : (int)(auth + al - x->ext),
-             x->ext, cpath);
-    char authority[CBM_SZ_256]; /* the host with its port */
-    if (al >= sizeof(authority)) {
-        return 0;
-    }
-    for (size_t i = 0; i < al; i++) {
-        authority[i] = (char)tolower((unsigned char)auth[i]);
-    }
-    authority[al] = '\0';
-    char ehost[CBM_SZ_512];
-    char epath[CBM_SZ_4K];
-    cbm_json_escape(ehost, (int)sizeof(ehost), authority);
-    cbm_json_escape(epath, (int)sizeof(epath), path);
-    char rprops[CBM_SZ_1K];
-    if (local) {
-        snprintf(rprops, sizeof(rprops), "{\"method\":\"%s\"}", x->path);
-    } else {
-        snprintf(rprops, sizeof(rprops), "{\"method\":\"%s\",\"host\":\"%s\",\"external\":true}",
-                 x->path, ehost);
-    }
-    int64_t route =
-        cbm_gbuf_upsert_node(ctx->gbuf, "Route", local ? path : x->ext, qn, "", 0, 0, rprops);
-    if (route <= 0 || route == src) {
-        return 0;
-    }
-    char ci[CBM_SZ_1K];
-    sh_ci_props(x, ci, sizeof(ci));
-    char props[CBM_SZ_4K + CBM_SZ_1K];
-    snprintf(props, sizeof(props),
-             "{\"via\":\"%s\",\"method\":\"%s\",\"url_path\":\"%s\",\"host\":\"%s\"%s,\"line\":%d}",
-             x->via, x->path, epath, ehost, ci, x->line);
-    cbm_gbuf_insert_edge(ctx->gbuf, src, route, "HTTP_CALLS", props);
-    return SKIP_ONE;
-}
-
-static int sh_link_hit(cbm_pipeline_ctx_t *ctx, const sh_hit_t *x, int64_t src,
-                       CBMHashTable *modules) {
-    if (x->spawn) {
-        return src > 0 ? sh_link_spawn(ctx, src, x, modules) : 0;
-    }
-    if (x->http) {
-        return sh_link_http(ctx, src, x);
-    }
-    int64_t tgt = x->tgt > 0 ? x->tgt : sh_external_chart(ctx, x->ext, x->file);
-    if (src <= 0 || tgt <= 0 || src == tgt) {
-        return 0;
-    }
-    char esc[CBM_SZ_1K];
-    char ci[CBM_SZ_1K];
-    char props[CBM_SZ_4K];
-    cbm_json_escape(esc, (int)sizeof(esc), x->path ? x->path : "");
-    sh_ci_props(x, ci, sizeof(ci));
-    snprintf(props, sizeof(props), "{\"via\":\"%s\",\"%s\":\"%s\"%s%s,\"line\":%d}", x->via,
-             x->chart ? "chart" : "path", esc, x->tgt > 0 ? "" : ",\"external\":true", ci, x->line);
-    cbm_gbuf_insert_edge(ctx->gbuf, src, tgt, "DEPLOYS", props);
-    return SKIP_ONE;
-}
-
-static int sh_link(cbm_pipeline_ctx_t *ctx, const sh_hits_t *h) {
-    CBMHashTable *files = cbm_ht_create(0);
-    CBMHashTable *modules = cbm_ht_create(0);
-    if (!files || !modules) {
-        if (files) {
-            cbm_ht_free(files);
-        }
-        if (modules) {
-            cbm_ht_free(modules);
-        }
-        return 0;
-    }
-    for (int i = 0; i < h->count; i++) {
-        const sh_hit_t *x = &h->items[i];
-        cbm_ht_set(files, x->file, (void *)x->file);
-        if ((x->spawn && x->tgt > 0) || x->build) {
-            cbm_ht_set(files, x->path,
-                       (void *)x->path); /* a spawned script's / Dockerfile's Module */
-        }
-    }
-    sh_span_t *spans = NULL;
-    int n = 0;
-    int cap = 0;
-    const cbm_gbuf_node_t **nodes = NULL;
-    int count = 0;
-    if (cbm_gbuf_find_by_label(ctx->gbuf, "Function", &nodes, &count) == 0) {
-        for (int i = 0; i < count; i++) {
-            const char *fp = nodes[i]->file_path;
-            const char *key = fp ? cbm_ht_get_key(files, fp) : NULL;
-            if (key && sh_grow((void **)&spans, &cap, n, sizeof(*spans))) {
-                spans[n++] = (sh_span_t){key, nodes[i]};
-            }
-        }
-    }
-    if (n > SKIP_ONE) {
-        qsort(spans, (size_t)n, sizeof(*spans), sh_cmp_span);
-    }
-    if (cbm_gbuf_find_by_label(ctx->gbuf, "Module", &nodes, &count) == 0) {
-        for (int i = 0; i < count; i++) {
-            const char *fp = nodes[i]->file_path;
-            const char *key = fp ? cbm_ht_get_key(files, fp) : NULL;
-            if (key && !cbm_ht_get(modules, key)) {
-                cbm_ht_set(modules, key, (void *)(intptr_t)nodes[i]->id);
-            }
-        }
-    }
-    int edges = 0;
-    sh_srcs_t twins = {0};
-    for (int i = 0; i < h->count; i++) {
-        const sh_hit_t *x = &h->items[i];
-        if (x->build) {
-            edges += sh_link_build(ctx, x, modules);
-            continue;
-        }
-        twins.count = 0;
-        int64_t one = sh_source(ctx, spans, n, modules, x->file, x->line, &twins);
-        for (int k = 0; k < (twins.count ? twins.count : SKIP_ONE); k++) {
-            edges += sh_link_hit(ctx, x, twins.count ? twins.items[k]->id : one, modules);
-        }
-    }
-    cbm_free(CBM_MEM_CLASS_OTHER, (void *)twins.items);
-    cbm_free(CBM_MEM_CLASS_OTHER, spans);
-    cbm_ht_free(files);
-    cbm_ht_free(modules);
-    return edges;
+/* Accessors keep the pipeline context layout private to C. */
+int64_t cbm_shell_file_id(cbm_pipeline_ctx_t *ctx, const char *file) {
+    const cbm_gbuf_node_t *node = cbm_pipeline_file_node(ctx->gbuf, ctx->project_name, file);
+    return node ? node->id : 0;
 }
 
 /* ── CI configurations (pass_ci.c) ─────────────────────────────────── */
@@ -4082,38 +3675,12 @@ static void sh_pass_file(sh_pass_t *p, cbm_pipeline_ctx_t *ctx, CBMHashTable *pr
     cbm_free(CBM_MEM_CLASS_OTHER, src);
 }
 
-/* Mark the File node of each file running a container build
- * {"declares_build":true} -- resolved or not: an incremental run reads these
- * files again, as the image build edges are recomputed whole
- * (pipeline_incremental.c). The mark lives and dies with its file's node. */
-static void sh_mark_declarers(cbm_pipeline_ctx_t *ctx, CBMHashTable *declarers) {
-    static const char MARK[] = "\"declares_build\":true";
-    const cbm_gbuf_node_t **nodes = NULL;
-    int n = 0;
-    if (cbm_ht_count(declarers) == 0 ||
-        cbm_gbuf_find_by_label(ctx->gbuf, "File", &nodes, &n) != 0) {
-        return;
-    }
-    for (int i = 0; i < n; i++) {
-        cbm_gbuf_node_t *f = (cbm_gbuf_node_t *)nodes[i];
-        const char *props = f->properties_json ? f->properties_json : "{}";
-        if (!f->file_path || !cbm_ht_get(declarers, f->file_path) || strstr(props, MARK)) {
-            continue;
-        }
-        size_t pl = strlen(props);
-        char buf[CBM_SZ_4K];
-        bool empty = pl < PAIR_LEN || strcmp(props, "{}") == 0;
-        if (props[pl - SKIP_ONE] != '}' || pl + sizeof(MARK) + PAIR_LEN > sizeof(buf)) {
-            continue;
-        }
-        snprintf(buf, sizeof(buf), "%.*s%s%s}", (int)(pl - SKIP_ONE), empty ? "{" : props,
-                 empty ? "" : ",", MARK);
-        (void)cbm_gbuf_node_set_properties_json(f, buf);
-    }
-}
+/* The publisher borrows the graph and collected facts synchronously. */
+typedef int (*sh_publish_fn)(cbm_pipeline_ctx_t *, cbm_gbuf_t *, void *, const sh_hit_t *,
+                             int, const CBMHashTable *);
 
-void cbm_pipeline_pass_shell(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t *files,
-                             int file_count) {
+void cbm_shell_collect(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t *files, int file_count,
+                       sh_publish_fn publish) {
     sh_index_t ix = {0};
     sh_hits_t hits = {0};
     cbm_arena_init(&hits.arena);
@@ -4148,14 +3715,8 @@ void cbm_pipeline_pass_shell(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t *fil
     if (prow) {
         cbm_ht_free(prow);
     }
-    if (hits.count > 0 && p.ix_ok && p.parser) {
-        sh_make_resolve(&p, ctx, &hits);
-    }
-    int edges = hits.count > 0 ? sh_link(ctx, &hits) : 0;
-    if (hits.declarers) {
-        sh_mark_declarers(ctx, hits.declarers);
-        cbm_ht_free(hits.declarers);
-    }
+    int edges = publish(ctx, ctx->gbuf, &p, hits.items, hits.count, hits.declarers);
+    cbm_ht_free(hits.declarers);
     if (p.parser) {
         ts_parser_delete(p.parser);
     }

@@ -49,6 +49,8 @@ from typing import (
 
 from telethon import TelegramClient, errors
 
+from telegram_mcp.call_history import record_failure
+
 CLIENT_FLOOD_SLEEP_THRESHOLD = 10
 
 LimitKind = Literal["flood_wait", "slow_mode", "premium_flood_wait"]
@@ -222,7 +224,15 @@ class RequestTimedOut(Exception):
 
 def format_request_error(error: Union[RequestLimited, RequestTimedOut]) -> str:
     """Return the JSON tool result for a typed request failure."""
-    detail = error.limit if isinstance(error, RequestLimited) else error.timeout
+    if isinstance(error, RequestLimited):
+        detail = error.limit
+        if detail.source == "cooldown":
+            record_failure("retry", "cooldown", detail.wait_seconds)
+        else:
+            record_failure("flood", detail.kind, detail.wait_seconds)
+    else:
+        detail = error.timeout
+        record_failure("timeout", "timeout")
     return json.dumps(detail.to_payload(), ensure_ascii=False)
 
 

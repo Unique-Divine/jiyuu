@@ -1,6 +1,7 @@
-//! Run the native publication hooks with each source publication backend.
+//! Exercise the native pipeline hooks through Rust source publication.
 #![cfg(all(feature = "c-backend", unix))]
 
+use jiyuu_mori as _;
 use std::ffi::{CStr, CString, c_char, c_int, c_void};
 use std::fs;
 use std::os::unix::ffi::OsStrExt;
@@ -250,12 +251,7 @@ fn before_publish_preserves_serving_generation() {
         // SAFETY: this separate process runs only this test and has not
         // started indexing or used SQLite.
         unsafe { cbm_alloc_init() };
-        let backend = std::env::var("MORI_IMPL_SOURCE_PUBLISH").unwrap();
-        if backend == "rust" {
-            // SAFETY: this is the only test and indexing has not started.
-            unsafe { jiyuu_mori::mori_register_source_publish() };
-        }
-        exercise(&PathBuf::from(root).join(backend));
+        exercise(&PathBuf::from(root));
         return;
     }
 
@@ -270,36 +266,29 @@ fn before_publish_preserves_serving_generation() {
     let cache = root.join("cache");
     fs::create_dir(&cache).unwrap();
     fs::set_permissions(&cache, fs::Permissions::from_mode(0o700)).unwrap();
-    let outputs = ["c", "rust"].map(|backend| {
-        let output = Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "before_publish_preserves_serving_generation",
-                "--nocapture",
-            ])
-            .env_clear()
-            .env("PATH", std::env::var_os("PATH").unwrap_or_default())
-            .env("HOME", &root)
-            .env("CBM_CACHE_DIR", &cache)
-            .env("CBM_WORKERS", "1")
-            .env("MORI_IMPL_SOURCE_PUBLISH", backend)
-            .env(ROOT, &root)
-            .output()
-            .unwrap();
-        (backend, output)
-    });
+    let output = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "before_publish_preserves_serving_generation",
+            "--nocapture",
+        ])
+        .env_clear()
+        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .env("HOME", &root)
+        .env("CBM_CACHE_DIR", &cache)
+        .env("CBM_WORKERS", "1")
+        .env(ROOT, &root)
+        .output()
+        .unwrap();
     fs::remove_dir_all(root).unwrap();
-    for (backend, output) in outputs {
-        let logs = String::from_utf8_lossy(&output.stderr);
-        assert!(
-            output.status.success(),
-            "{backend}: {}\n{logs}",
-            String::from_utf8_lossy(&output.stdout)
-        );
-        assert_eq!(
-            logs.contains("msg=pipeline.source_publish implementation=rust"),
-            backend == "rust",
-            "{logs}"
-        );
-    }
+    let logs = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "{}\n{logs}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert!(
+        logs.contains("msg=pipeline.source_publish implementation=rust"),
+        "{logs}"
+    );
 }

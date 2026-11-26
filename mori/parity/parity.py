@@ -182,6 +182,7 @@ class Side:
   graphql_mode: Literal["c", "rust"] | None = None
   profile: bool = False
   workers: int | None = None
+  verify_rust_queries: bool = False
 
   def env(self) -> dict[str, str]:
     env = {
@@ -196,6 +197,9 @@ class Side:
       env["CBM_WORKERS"] = str(self.workers)
     if self.profile or self.graphql_mode is not None:
       env["CBM_PROFILE"] = "1"
+    if self.verify_rust_queries:
+      env.update(MORI_IMPL_QUERY="rust", CBM_LOG_LEVEL="debug",
+                 CBM_LOG_FORMAT="text")
     return env
 
   def cli(self, tool: str, args: dict[str, Any], timeout: int
@@ -205,6 +209,15 @@ class Side:
       env=self.env(), capture_output=True, text=True, timeout=timeout,
       stdin=subprocess.DEVNULL)
     return p.returncode, p.stdout, p.stderr
+
+  def disable_ui(self) -> None:
+    p = subprocess.run(
+      [self.bin, "config", "set", "ui_enabled", "false"], cwd="/",
+      env=self.env(), capture_output=True, text=True, timeout=120,
+      stdin=subprocess.DEVNULL)
+    if p.returncode != 0:
+      raise RuntimeError(f"side {self.name}: could not disable the Graph UI "
+                         "before verifying Rust query execution")
 
   def daemon(self, action: str) -> int:
     p = subprocess.run([self.bin, "daemon", action], cwd="/",
@@ -520,16 +533,55 @@ def node_names(side: Side, projects: dict[str, str],
   return out
 
 
+RUST_QUERY_LOG = b"level=debug msg=query_graph.evaluator backend=rust"
+RUST_DISPATCH_KEY = "query_graph:$.rust_dispatch"
+
+
+def query_log_position(path: Path) -> tuple[int, int, int] | None:
+  try:
+    state = path.stat()
+  except FileNotFoundError:
+    return None
+  return state.st_dev, state.st_ino, state.st_size
+
+
+def rust_query_events(path: Path, position: tuple[int, int, int] | None
+                      ) -> int | None:
+  """Count the Rust dispatch events appended during one request.
+
+  The replay daemon serves one request at a time in a private runtime.
+  Missing, truncated, or replaced logs cannot establish which code ran.
+  """
+  if position is None:
+    return None
+  dev, inode, offset = position
+  try:
+    with path.open("rb") as log_file:
+      state = os.fstat(log_file.fileno())
+      if (state.st_dev, state.st_ino) != (dev, inode) or state.st_size < offset:
+        return None
+      log_file.seek(offset)
+      return sum(line.rstrip(b"\n") == RUST_QUERY_LOG for line in log_file)
+  except FileNotFoundError:
+    return None
+
+
 def replay(sides: list[Side], call_list: list[dict[str, Any]],
            roots: dict[str, str], projects: list[dict[str, str]],
-           entries: list[allowlist.Entry]
+           entries: list[allowlist.Entry],
+           require_rust: frozenset[str] = frozenset()
            ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
   """L4: run each call on both sides and diff normalized output. Result
   tables are gated row by row (calls.diff_call); a call whose output was
   cut is replayed once more without its limit."""
   rep_by_repo: dict[str, DiffReport] = {}
+  dispatch = DiffReport()
   stats = {"calls": 0, "skipped": 0, "differing": 0, "errors_a": 0,
            "unlimited_replays": 0, "timeouts": 0, "wall_s": 0.0}
+  if require_rust:
+    stats["rust_query_checks"] = 0
+    stats["rust_query_failures"] = 0
+  query_log = Path(sides[1].cache) / "logs/cbm-daemon.log"
   norms = [calls_mod.OutputNormalizer(
     roots, projects[i], {"cache": s.cache, "rt": s.rt})
     for i, s in enumerate(sides)]
@@ -537,37 +589,72 @@ def replay(sides: list[Side], call_list: list[dict[str, Any]],
            for i, s in enumerate(sides)]
   t0 = time.monotonic()
   pool = ThreadPoolExecutor(max_workers=len(sides))
+  side_b_timed_out = False
 
-  def run_sides(per_side: list[dict[str, Any] | None], tool: str
+  def run_sides(per_side: list[dict[str, Any] | None], tool: str,
+                check_rust: bool
                 ) -> list[dict[str, Any] | None]:
+    nonlocal side_b_timed_out
+
     def one(i: int) -> dict[str, Any] | None:
       if per_side[i] is None:
         return None
       args = calls_mod.resolve(per_side[i], roots, projects[i])
+      observe = check_rust and i == 1 and not side_b_timed_out
+      position = query_log_position(query_log) if observe else None
       try:
         code, out, err = sides[i].cli(tool, args, CALL_TIMEOUT_S)
       except subprocess.TimeoutExpired:
         stats["timeouts"] += 1
         return {"exit": -1, "out": "", "err": "", "timed_out": True}
-      return norms[i].output(code, out, err)
+      output = norms[i].output(code, out, err)
+      if observe:
+        output["rust_query_events"] = rust_query_events(query_log, position)
+      return output
     # Both sides run at once: they share nothing but the machine.
-    return list(pool.map(one, range(len(sides))))
+    outputs = list(pool.map(one, range(len(sides))))
+    if require_rust and outputs[1] is not None and outputs[1].get("timed_out"):
+      # The daemon can finish a timed-out request after the CLI has exited.
+      # An event appended by that work cannot prove a subsequent dispatch.
+      side_b_timed_out = True
+    return outputs
 
   for n, c in enumerate(call_list):
+    tool = c["tool"]
+    group = calls_mod.call_id(tool, c["args"])
+    check_rust = group in require_rust
     need = calls_mod.placeholders(c["args"])
     dirs = sorted({d for _, d in need})
     if any(d not in roots for d in dirs):
       stats["skipped"] += 1
+      if check_rust:
+        stats["rust_query_checks"] += 1
+        stats["rust_query_failures"] += 1
+        dispatch.add("L4", RUST_DISPATCH_KEY, group, 1,
+                     "query skipped", "initial request")
       continue
     repo = ",".join(dirs) or "-"
-    tool = c["tool"]
-    outs = run_sides([c["args"], c["args"]], tool)
+    outs = run_sides([c["args"], c["args"]], tool, check_rust)
     stats["calls"] += 1
     if outs[0]["exit"] != 0:
       stats["errors_a"] += 1
     rep = rep_by_repo.setdefault(repo, DiffReport())
-    where = f"#{n} {tool} {json.dumps(c['args'], sort_keys=True)}"
-    group = calls_mod.call_id(tool, c["args"])
+    where = f"#{n} {tool} {group}" if check_rust else (
+      f"#{n} {tool} {json.dumps(c['args'], sort_keys=True)}")
+    def check_dispatch(output: dict[str, Any] | None, request: str) -> None:
+      if not check_rust or output is None:
+        return
+      stats["rust_query_checks"] += 1
+      events = output.pop("rust_query_events", None)
+      if events != 1:
+        stats["rust_query_failures"] += 1
+        observed = "evidence unavailable" if events is None else events
+        if side_b_timed_out:
+          observed = "evidence unavailable after side B timeout"
+        dispatch.add("L4", RUST_DISPATCH_KEY, group, 1,
+                     observed, request)
+
+    check_dispatch(outs[1], "initial request")
     if any(o.get("timed_out") for o in outs):
       # A call that times out compared nothing, so it is a difference
       # even when both sides time out.
@@ -580,17 +667,21 @@ def replay(sides: list[Side], call_list: list[dict[str, Any]],
     def rerun(per_side: list[dict[str, Any] | None], tool: str = tool
               ) -> list[dict[str, Any] | None]:
       stats["unlimited_replays"] += 1
-      return run_sides(per_side, tool)
+      rerun_outputs = run_sides(per_side, tool, check_rust)
+      check_dispatch(rerun_outputs[1], "unlimited replay")
+      return rerun_outputs
 
-    if calls_mod.diff_call(rep, tool, c["args"], group, where[:300],
-                           outs[0], outs[1], rerun,
-                           (names[0].get, names[1].get)):
+    changed = calls_mod.diff_call(rep, tool, c["args"], group, where[:300],
+                                  outs[0], outs[1], rerun,
+                                  (names[0].get, names[1].get))
+    if changed:
       stats["differing"] += 1
   pool.shutdown()
   stats["wall_s"] = round(time.monotonic() - t0, 1)
   diffs = []
   for repo, rep in sorted(rep_by_repo.items()):
     diffs.extend(classify(rep.diffs(), repo, entries))
+  diffs.extend(classify(dispatch.diffs(), "-", []))
   return diffs, stats
 
 
@@ -654,14 +745,19 @@ def print_summary(results: list[RepoResult], l4: list[dict[str, Any]],
     for f in flags:
       print(f"  {f}")
   if l4_stats is not None:
-    s = layer_summary(l4)["L4"]
+    reply_diffs = [d for d in l4 if d["key"] != RUST_DISPATCH_KEY]
+    s = layer_summary(reply_diffs)["L4"]
     print(f"\nL4: {l4_stats['calls']} calls replayed, "
           f"{l4_stats['unlimited_replays']} unlimited replay pages, "
           f"{l4_stats['skipped']} skipped (repo not in run), "
           f"{l4_stats.get('dropped', 0)} dropped (project not a corpus "
           f"placeholder), {l4_stats['errors_a']} error results, "
           f"{l4_stats['timeouts']} call timeouts, {l4_stats['differing']} "
-          f"differing, {l4_stats['wall_s']} s: {cell(s)}")
+          f"with reply differences or timeouts, {l4_stats['wall_s']} s: {cell(s)}")
+    if "rust_query_checks" in l4_stats:
+      failed = l4_stats["rust_query_failures"]
+      passed = l4_stats["rust_query_checks"] - failed
+      print(f"Rust execution checks on side B: {passed} passed, {failed} failed")
   unlisted = [d for r in results for d in r.diffs if not d["allowed"]]
   unlisted += [d for d in l4 if not d["allowed"]]
   if unlisted:
@@ -731,8 +827,19 @@ def verify_worker_paths(index: dict[str, dict[str, Any]], fixture: bool) -> str 
 
 def run(repos: list[tuple[str, str]], call_list: list[dict[str, Any]] | None,
         dropped: int, a: argparse.Namespace, meta: dict[str, Any]) -> int:
+  require_rust = frozenset(a.require_rust_query)
+  if require_rust:
+    available = {calls_mod.call_id(c["tool"], c["args"])
+                 for c in call_list or [] if c["tool"] == "query_graph"}
+    if unknown := require_rust - available:
+      raise ValueError("unknown query_graph call ids: " + ", ".join(sorted(unknown)))
+    meta = {**meta, "require_rust_query": sorted(require_rust)}
   entries = allowlist.load_all(a.allowlist)
   sides = make_sides(a.bin_a, a.bin_b, a.work, a.rt_prefix, a.scratch_root)
+  if require_rust:
+    # An HTTP query can write the same witness to the daemon log. Disable
+    # that entry point in the private cache before any command starts it.
+    sides[1].disable_ui()
   for side, exporter, graphql_mode in zip(
       sides, (a.export_a, a.export_b), (a.graphql_a, a.graphql_b)):
     side.exporter = exporter
@@ -789,9 +896,12 @@ def run(repos: list[tuple[str, str]], call_list: list[dict[str, Any]] | None,
       projects[0][r.dir] = r.index["a"]["project"]
       projects[1][r.dir] = r.index["b"]["project"]
     log(f"L4: replaying {len(call_list)} calls")
+    sides[1].verify_rust_queries = bool(require_rust)
     started = [s.daemon("start") == 0 for s in sides]
     try:
-      l4, l4_stats = replay(sides, call_list, roots, projects, entries)
+      if require_rust and not started[1]:
+        raise RuntimeError("side b: could not start the isolated replay daemon")
+      l4, l4_stats = replay(sides, call_list, roots, projects, entries, require_rust)
       l4_stats["dropped"] = dropped
     finally:
       for s, ok in zip(sides, started):
@@ -1044,6 +1154,9 @@ def main(argv: list[str]) -> int:
                    "(repeatable)")
     p.add_argument("--calls")
     p.add_argument("--skip-l4", action="store_true")
+    p.add_argument("--require-rust-query", action="append", default=[],
+                   help="require Rust dispatch on side b for this query_graph "
+                        "call id (repeatable)")
     p.add_argument("--path-parity", action="store_true",
                    help="compare one worker on side a with defaults on side b; "
                         "ci uses a fixture with more than 50 files")
@@ -1094,6 +1207,10 @@ def main(argv: list[str]) -> int:
       ap.error("--path-parity compares graph rows without call replay")
     a.profile = True
     a.skip_l4 = True
+  if a.cmd in ("run", "ci") and a.require_rust_query and a.skip_l4:
+    ap.error("--require-rust-query requires tool-call replay")
+  if a.cmd == "ci" and a.require_rust_query and a.corrupt:
+    ap.error("--require-rust-query cannot be combined with --corrupt")
   if getattr(a, "scratch_root", None) is None and a.cmd in ("run", "ci"):
     a.scratch_root = default_scratch_roots()
   base = None

@@ -175,6 +175,82 @@ static inline char *th_mktempdir(const char *prefix) {
     return buf;
 }
 
+#ifdef _WIN32
+/* Build a real Windows path of the specified UTF-8 byte length. Each
+ * directory is short enough for NTFS, and the filename uses multibyte UTF-8
+ * so a UTF-16 length check cannot accidentally satisfy the fixture. An
+ * extended drive path keeps the fixture independent of LongPathsEnabled. */
+typedef struct {
+    char path[4097];
+    size_t parents[24];
+    size_t parent_count;
+} th_windows_long_path_t;
+
+static inline int th_windows_long_path_cleanup(th_windows_long_path_t *fixture) {
+    int result = 0;
+    if (fixture->parent_count > 0U) {
+        if (cbm_file_exists(fixture->path) && !cbm_is_dir(fixture->path)) {
+            result = th_unlink_force(fixture->path);
+        }
+        while (fixture->parent_count > 0U) {
+            fixture->path[fixture->parents[--fixture->parent_count]] = '\0';
+            if (cbm_rmdir(fixture->path) != 0) {
+                result = -1;
+            }
+        }
+    }
+    return result;
+}
+
+static inline int th_windows_long_path_init(th_windows_long_path_t *fixture, size_t path_bytes) {
+    if (path_bytes < 512U || path_bytes >= sizeof(fixture->path)) {
+        return -1;
+    }
+    const char *root = th_mktempdir("cbm_long_path");
+    if (!root) {
+        return -1;
+    }
+    const size_t root_length = strlen(root);
+    if (root_length < 3U || root[1] != ':' || (root[2] != '\\' && root[2] != '/')) {
+        (void)cbm_rmdir(root);
+        return -1;
+    }
+    const char prefix[] = "\\\\?\\";
+    const size_t prefix_length = sizeof(prefix) - 1U;
+    memcpy(fixture->path, prefix, prefix_length);
+    for (size_t i = 0U; i < root_length; i++) {
+        fixture->path[prefix_length + i] = root[i] == '/' ? '\\' : root[i];
+    }
+    size_t length = prefix_length + root_length;
+    fixture->path[length] = '\0';
+    fixture->parents[fixture->parent_count++] = length;
+    while (path_bytes - length > 220U) {
+        fixture->path[length++] = '\\';
+        memset(fixture->path + length, 'd', 195U);
+        length += 195U;
+        fixture->path[length] = '\0';
+        wchar_t *wide = cbm_path_to_wide(fixture->path);
+        BOOL created = wide && CreateDirectoryW(wide, NULL);
+        free(wide);
+        if (!created) {
+            (void)th_windows_long_path_cleanup(fixture);
+            return -1;
+        }
+        fixture->parents[fixture->parent_count++] = length;
+    }
+    fixture->path[length++] = '\\';
+    while (path_bytes - length >= 2U) {
+        memcpy(fixture->path + length, "\xC3\xA9", 2U);
+        length += 2U;
+    }
+    if (length < path_bytes) {
+        fixture->path[length++] = 'x';
+    }
+    fixture->path[length] = '\0';
+    return 0;
+}
+#endif
+
 /* Runtime IPC validates the complete Windows directory ancestry, so an MSYS2
  * TEMP rooted under C:/msys64/tmp is intentionally unsuitable even when the
  * leaf made by cbm_mkdtemp() has a private DACL. Keep these security-sensitive

@@ -1,17 +1,10 @@
-# Mori release: builds the Rust binary mori (crate mori/jiyuu-mori with the C
-# program linked in) for Linux x64 and arm64 and macOS arm64 and x64, checks
-# its CLI against codebase-memory-mcp built from a pinned C source commit,
-# replays graph fixtures against the published C 0.13.1 where available, and
-# publishes a DRAFT GitHub release for a mori/v* tag. See mori/README.md
-# "Release".
-#
-# - Tag push mori/vX.Y.Z: the tag must equal mori/VERSION. Builds, packages,
-#   attests and creates a draft release that is not marked latest.
-# - workflow_dispatch: dry_run (default true) builds and uploads workflow
-#   artifacts only. dry_run=false publishes only when run on a mori/v* tag.
+# Mori package previews, daily checks, and tagged releases share the same
+# per-target build and parity workflow.
 name: Mori release
 
 on:
+  schedule:
+    - cron: "23 4 * * *"
   push:
     tags: ["mori/v*"]
   workflow_dispatch:
@@ -20,22 +13,35 @@ on:
         description: Build and upload artifacts only; create no release
         type: boolean
         default: true
+      prewarm_oracle:
+        description: Populate the three preview C reference caches on main
+        type: boolean
+        default: false
+      daily_check:
+        description: Run the four daily checks on main without filing issues
+        type: boolean
+        default: false
 
 permissions:
   contents: read
 
 concurrency:
-  group: mori-release-${{ github.ref }}
+  group: mori-release-${{ (github.event_name == 'schedule' || inputs.daily_check) && 'daily' || github.ref }}
   cancel-in-progress: false
 
 jobs:
   validate:
+    name: Validate release request
+    if: github.event_name != 'schedule' || (github.repository == 'Unique-Divine/jiyuu' && github.ref == 'refs/heads/main')
     runs-on: ubuntu-latest
     outputs:
-      version: ${{ steps.version.outputs.version }}
-      tag: ${{ steps.version.outputs.tag }}
-      publish: ${{ steps.version.outputs.publish }}
-      source_sha: ${{ steps.version.outputs.source_sha }}
+      version: ${{ steps.plan.outputs.version }}
+      tag: ${{ steps.plan.outputs.tag }}
+      publish: ${{ steps.plan.outputs.publish }}
+      source_sha: ${{ steps.plan.outputs.source_sha }}
+      mode: ${{ steps.plan.outputs.mode }}
+      matrix: ${{ steps.plan.outputs.matrix }}
+      artifact: ${{ steps.plan.outputs.artifact }}
     defaults:
       run:
         working-directory: mori
@@ -43,371 +49,48 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
+          ref: ${{ github.sha }}
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version: 1.4.3
       - run: bun test scripts/release.test.ts
-      - name: Check the tag against mori/VERSION
-        id: version
+      - run: python3 -I -m unittest discover -s scripts -p c_reference_cache_test.py
+      - name: Select package targets and validate the version
+        id: plan
         env:
           EVENT_NAME: ${{ github.event_name }}
           REF: ${{ github.ref }}
-          REF_NAME: ${{ github.ref_name }}
           DRY_RUN: ${{ inputs.dry_run }}
+          PREWARM_ORACLE: ${{ inputs.prewarm_oracle }}
+          DAILY_CHECK: ${{ inputs.daily_check }}
         run: |
           set -euo pipefail
-          publish=false
-          if [[ "$REF" == refs/tags/mori/v* ]]; then
-            version="$(bun scripts/release.ts validate "$REF_NAME")"
-            if [[ "$EVENT_NAME" == push || "$DRY_RUN" == false ]]; then
-              publish=true
-            fi
-          else
-            if [[ "$DRY_RUN" == false ]]; then
-              echo "::error::dry_run=false needs a mori/v* tag ref."
-              exit 1
-            fi
-            version="$(bun scripts/release.ts validate)"
-          fi
+          plan="$(bun scripts/release.ts plan "$EVENT_NAME" "$REF" "$GITHUB_REPOSITORY" "$DRY_RUN" "$PREWARM_ORACLE" "$DAILY_CHECK")"
+          sha="$(git rev-parse HEAD)"
           {
-            echo "version=$version"
-            echo "tag=mori/v$version"
-            echo "publish=$publish"
-            echo "source_sha=$(git rev-parse HEAD)"
+            jq -r 'to_entries[] | "\(.key)=\(.value | if type == "string" then . else tojson end)"' <<< "$plan"
+            echo "source_sha=$sha"
+            jq -r --arg sha "$sha" '"artifact=mori\(if .mode == "preview" then "-preview" else "" end)-\(.version)-\($sha)"' <<< "$plan"
           } >> "$GITHUB_OUTPUT"
-          echo "Mori $version, publish=$publish" >> "$GITHUB_STEP_SUMMARY"
+          jq -r '"Mori \(.version), mode \(.mode), publish \(.publish)"' <<< "$plan" >> "$GITHUB_STEP_SUMMARY"
 
-  build:
+  platform:
+    name: ${{ matrix.target }}
     needs: validate
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - target: linux-x64
-            goos: linux
-            goarch: amd64
-            rust_target: x86_64-unknown-linux-gnu
-            runner: ubuntu-latest
-            c_reference_sha256: ba3cbc562e6c41585144e78857a54a51badae99bdb5e6050cedc79089817ed07
-          - target: linux-arm64
-            goos: linux
-            goarch: arm64
-            rust_target: aarch64-unknown-linux-gnu
-            runner: ubuntu-24.04-arm
-            c_reference_sha256: a4984606e39dcdf6e5d4a86f31ceea4d0f49761fe4dc3eb91544cdc86e26e1bb
-          # Apple silicon. The macOS 14.0 minimum comes from Makefile.cbm
-          # (the C objects) and MACOSX_DEPLOYMENT_TARGET (the Rust link), not
-          # from this runner's SDK.
-          - target: darwin-arm64
-            goos: darwin
-            goarch: arm64
-            arch: arm64
-            rust_target: aarch64-apple-darwin
-            runner: macos-15
-            c_reference_sha256: 3fb0ebdf5416fbabfb81e48754275b5f01088faac3dc5f015cbe6a84d743e837
-          # Intel Macs, built and smoke-tested natively on GitHub's x86_64
-          # macOS runner. Same 14.0 minimum as arm64.
-          - target: darwin-x64
-            goos: darwin
-            goarch: amd64
-            arch: x86_64
-            rust_target: x86_64-apple-darwin
-            runner: macos-15-intel
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 120
-    defaults:
-      run:
-        working-directory: mori
-    env:
-      VERSION: ${{ needs.validate.outputs.version }}
-      RUST_TARGET: ${{ matrix.rust_target }}
-      CC: ${{ matrix.goos == 'linux' && 'gcc' || 'cc' }}
-      CXX: ${{ matrix.goos == 'linux' && 'g++' || 'c++' }}
-      MACOSX_DEPLOYMENT_TARGET: "14.0"
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          persist-credentials: false
-          ref: ${{ needs.validate.outputs.source_sha }}
-      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
-        with:
-          bun-version: 1.4.3
-      # npm builds the graph UI (mori/graph-ui), which the binary embeds.
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
-        with:
-          node-version: 24
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
-        with:
-          toolchain: stable
-          targets: ${{ matrix.rust_target }}
-      - name: Name the binaries
-        run: |
-          {
-            echo "BIN=$RUNNER_TEMP/selected/mori"
-            echo "C_BIN=$RUNNER_TEMP/selected/codebase-memory-mcp"
-          } >> "$GITHUB_ENV"
-      - name: Install build dependencies (Linux)
-        if: matrix.goos == 'linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y zlib1g-dev zstd
-      # The macOS SDK ships zlib; the image usually has zstd already.
-      - name: Install build dependencies (macOS)
-        if: matrix.goos == 'darwin'
-        run: command -v zstd || brew install zstd
-      - name: Cache grammar archive
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ~/.cache/jiyuu-mori/grammars
-          key: mori-grammars-${{ hashFiles('mori/grammars.lock.json') }}
-      - name: Fetch grammars
-        run: bun scripts/grammars-fetch.ts
-      # Cargo's build.rs links the libmori-c archive whole. MORI_WITH_UI=1
-      # embeds the graph UI, as scripts/build.sh --with-ui does.
-      # Linux links glibc statically (+crt-static), like the C release's
-      # STATIC=1, so one binary runs on any distro. macOS has no static libc:
-      # the binary links libSystem, libz and libc++ from the OS.
-      - name: Build mori
-        env:
-          MORI_WITHOUT_C_INDEX_DRIVERS: "1"
-          MORI_WITH_UI: "1"
-        run: |
-          set -euo pipefail
-          export CFLAGS_EXTRA="-DCBM_VERSION=\"\\\"$VERSION\\\"\""
-          MORI_MAKE_JOBS="$(getconf _NPROCESSORS_ONLN)"
-          export MORI_MAKE_JOBS
-          if [[ "$RUNNER_OS" == Linux ]]; then
-            export RUSTFLAGS="-C target-feature=+crt-static"
-          fi
-          cargo build --release --locked --features c-backend \
-            --target "$RUST_TARGET" --manifest-path jiyuu-mori/Cargo.toml
-          archive_members="$(ar t build/mori-rs/libmori-c.a)"
-          if grep -Fxq index_drivers_reference.o <<< "$archive_members"; then
-            echo "::error::release archive includes the retired C index drivers"
-            exit 1
-          fi
-          mkdir -p "$(dirname "$BIN")"
-          cp "../target/$RUST_TARGET/release/mori" "$BIN.unstripped"
-      - name: Verify retired native implementations before stripping
-        run: |
-          set -euo pipefail
-          archive_members="$(ar t build/mori-rs/libmori-c.a)"
-          for object in fts_writer_reference.o config_text_edit.o pass_complexity.o \
-            pass_similarity.o pass_doclinks.o doc_links_pdf.o; do
-            if grep -Fxq "$object" <<< "$archive_members"; then
-              echo "::error::release archive includes retired object $object"
-              exit 1
-            fi
-          done
-          defined_symbols="$(nm "$BIN.unstripped" | awk 'NF >= 3 && $2 ~ /^[Tt]$/ {sub(/^_/, "", $NF); print $NF}')"
-          for symbol in mori_fts_write \
-            mori_complexity_buffer mori_complexity_stage mori_similarity_buffer \
-            mori_explicit_override mori_doc_file_links_run mori_pdf_links_resolve \
-            cbm_rust_watcher_poll mori_ipc_frame_header_decode mori_daemon_job_recover; do
-            if ! grep -Fxq "$symbol" <<< "$defined_symbols"; then
-              echo "::error::release executable is missing $symbol"
-              exit 1
-            fi
-          done
-          if ! grep -Eq '^cbm_text_(upsert_managed_block(_limited)?|write_owned_document(_if_unchanged)?|migrate_owned_document(_mode)?|owned_document_status)$' <<< "$defined_symbols"; then
-            echo "::error::release executable is missing the Rust managed-text editor"
-            exit 1
-          fi
-          if grep -Fxq cbm_store_fts_write_reference <<< "$defined_symbols"; then
-            echo "::error::release executable includes the retired C FTS writer"
-            exit 1
-          fi
-          if grep -Eq '^cbm_text_set_.*_hook_for_testing$' <<< "$defined_symbols"; then
-            echo "::error::release executable includes managed-text test hooks"
-            exit 1
-          fi
-          {
-            printf '### Native retirement on %s\n' "$RUST_TARGET"
-            shasum -a 256 "$BIN.unstripped" build/mori-rs/libmori-c.a
-          } >> "$GITHUB_STEP_SUMMARY"
-      - name: Strip and check static linking (Linux)
-        if: matrix.goos == 'linux'
-        run: |
-          set -euo pipefail
-          strip --strip-all -o "$BIN" "$BIN.unstripped"
-          file "$BIN"
-          # ldd exits 1 on a static binary, so read its message instead.
-          linkage="$(ldd "$BIN" 2>&1 || true)"
-          echo "$linkage"
-          grep -Eq 'not a dynamic executable|statically linked' <<< "$linkage"
-      # Apple's strip rejects --strip-all, and stripping breaks the linker's
-      # ad-hoc signature, which arm64 macOS needs to run the binary at all.
-      # Re-sign ad hoc, as upstream did. There is no Developer ID signature
-      # and no notarization.
-      - name: Strip, sign ad hoc and check linking (macOS)
-        if: matrix.goos == 'darwin'
-        env:
-          ARCH: ${{ matrix.arch }}
-        run: |
-          set -euo pipefail
-          cp "$BIN.unstripped" "$BIN"
-          strip "$BIN"
-          codesign --sign - --force --timestamp=none "$BIN"
-          codesign --verify --strict --verbose=2 "$BIN"
-          file "$BIN"
-          archs="$(lipo -archs "$BIN")"
-          [ "$archs" = "$ARCH" ]
-          otool -l "$BIN" | grep -A4 LC_BUILD_VERSION
-          load_cmds="$(otool -l "$BIN")"
-          printf '%s\n' "$load_cmds" | grep -E 'minos 14\.0$' >/dev/null
-          # Only libraries every Mac has: nothing from Homebrew or elsewhere.
-          libs="$(otool -L "$BIN" | tail -n +2 | awk '{print $1}')"
-          echo "$libs"
-          if grep -Ev '^(/usr/lib/|/System/Library/)' <<< "$libs"; then
-            echo "::error::links a library outside the OS"
-            exit 1
-          fi
-      - name: Smoke-test version, a tiny index and the graph UI
-        run: |
-          set -euo pipefail
-          got="$("$BIN" --version)"
-          if [[ "$got" != "mori $VERSION" ]]; then
-            echo "::error::--version printed '$got'"
-            exit 1
-          fi
-          # The runtime dir must exist and stay short: it holds the CLI
-          # coordination socket, and macOS caps socket paths at 104 bytes,
-          # which its default mktemp dir under /var/folders nearly fills.
-          scratch="$(mktemp -d /tmp/mori.XXXXXX)"
-          repo="$scratch/repo"
-          mkdir -p "$repo" "$scratch/home"
-          mkdir -m 700 "$scratch/run"
-          printf 'def greet(name):\n    return helper(name)\n\n' \
-            > "$repo/app.py"
-          printf 'def helper(name):\n    return "hi " + name\n' \
-            >> "$repo/app.py"
-          export HOME="$scratch/home"
-          export CBM_CACHE_DIR="$scratch/cache"
-          export CBM_RUNTIME_DIR="$scratch/run"
-          CBM_PROFILE=1 "$BIN" cli index_repository --repo-path "$repo" \
-            | tee "$scratch/index.json"
-          project="$(jq -r .project "$scratch/index.json")"
-          test "$(jq -r .status "$scratch/index.json")" = indexed
-          grep -F 'msg=pipeline.full_build_driver implementation=rust' "$CBM_CACHE_DIR"/logs/.worker-log-*
-          grep -F 'msg=pipeline.source_publish implementation=rust' "$CBM_CACHE_DIR"/logs/.worker-log-*
-          "$BIN" cli trace_path --project "$project" --function-name greet \
-            --direction outbound | tee "$scratch/trace"
-          grep -q '\.app\.helper 1$' "$scratch/trace"
-          # The embedded graph UI: a daemon on a free port serves its index.
-          port="$(python3 -c 'import socket; s = socket.socket(); \
-            s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')"
-          "$BIN" daemon start --port="$port"
-          trap '"$BIN" daemon stop || true' EXIT
-          for _ in $(seq 1 30); do
-            if curl -fsS "http://127.0.0.1:$port/" -o "$scratch/ui.html" \
-              2>/dev/null; then
-              break
-            fi
-            sleep 1
-          done
-          head -c 300 "$scratch/ui.html"; echo
-          grep -qi '<!doctype html>' "$scratch/ui.html"
-      - name: Build pinned C binary for CLI parity
-        env:
-          C_REFERENCE_SHA: 8bdd8fc20327fcfea4d920138fef77a3b00ca1ef
-        run: |
-          set -euo pipefail
-          reference_dir="$(mktemp -d "$RUNNER_TEMP/mori-c-reference.XXXXXX")"
-          trap 'rm -rf "$reference_dir"' EXIT
-          git -C "$reference_dir" init --quiet
-          git -C "$reference_dir" fetch --quiet --depth=1 --no-tags \
-            https://github.com/Unique-Divine/jiyuu.git "$C_REFERENCE_SHA"
-          git -C "$reference_dir" checkout --quiet --detach FETCH_HEAD
-          test "$(git -C "$reference_dir" rev-parse HEAD)" = "$C_REFERENCE_SHA"
-          echo "C CLI reference commit $C_REFERENCE_SHA"
-          cd "$reference_dir/mori"
-          bun scripts/grammars-fetch.ts
-
-          # CLI parity compares --version, so report the candidate version.
-          export CFLAGS_EXTRA="-DCBM_VERSION=\"\\\"$VERSION\\\"\""
-          make -f Makefile.cbm -j"$(getconf _NPROCESSORS_ONLN)" cbm-with-ui \
-            BUILD_DIR=build/release-reference CC="$CC" CXX="$CXX" \
-            MEMWASTE=0 MEMWASTE_ACCESS=0 MEMWASTE_PROFILE=0 TEST_COVERAGE=0
-          cp build/release-reference/codebase-memory-mcp "$C_BIN"
-      - name: CLI parity with codebase-memory-mcp
-        run: bun scripts/cli-parity.ts --mori "$BIN" --c "$C_BIN"
-      # 0.13.1 had no Intel macOS archive. All targets run the smoke tests
-      # and CLI comparison with the pinned C build above.
-      - name: Replay graph fixtures against the published C 0.13.1
-        if: matrix.c_reference_sha256 != ''
-        env:
-          GH_TOKEN: ${{ github.token }}
-          TARGET: ${{ matrix.target }}
-          REFERENCE_SHA256: ${{ matrix.c_reference_sha256 }}
-        run: |
-          set -euo pipefail
-          reference_dir="$(mktemp -d "$RUNNER_TEMP/mori-reference.XXXXXX")"
-          trap 'rm -rf "$reference_dir"' EXIT
-          archive="codebase-memory-mcp-0.13.1-$TARGET.tar.gz"
-          gh release download mori/v0.13.1 --repo "$GITHUB_REPOSITORY" \
-            --pattern "$archive" --dir "$reference_dir"
-          printf '%s  %s\n' "$REFERENCE_SHA256" "$reference_dir/$archive" | shasum -a 256 -c
-          tar -xzf "$reference_dir/$archive" -C "$reference_dir" codebase-memory-mcp
-          reference="$reference_dir/codebase-memory-mcp"
-          test "$("$reference" --version)" = "codebase-memory-mcp 0.13.1"
-          replay="$(mktemp -d /tmp/mori-release-replay.XXXXXX)"
-          python3 parity/parity.py ci --bin-a "$reference" --bin-b "$BIN" \
-            --profile --export-b rust --verify-export \
-            --work "$replay/w" --rt-prefix "$replay/r"
-          grep -E 'msg=pass\.route_nodes\.graphql routes=[1-9][0-9]* .*planner=rust writer=rust' \
-            "$replay"/w/b/cache/logs/.worker-log-*
-          python3 - "$replay/w/b/cache" <<'PY'
-          from pathlib import Path
-          import sqlite3
-          import sys
-
-          [graph] = Path(sys.argv[1]).glob("*-fx-polyglot.db")
-          with sqlite3.connect(graph.as_uri() + "?mode=ro", uri=True) as database:
-              row = database.execute("""
-                  SELECT h.name
-                  FROM edges AS e
-                  JOIN nodes AS h ON h.id = e.source_id
-                  JOIN nodes AS r ON r.id = e.target_id
-                  WHERE e.type = 'HANDLES' AND r.qualified_name = '__graphql__Query.fixtureItem'
-              """).fetchone()
-          if row != ("FixtureItem",):
-              raise SystemExit(f"FixtureItem resolver missing from the graph: {row}")
-          PY
-      - name: Package archive
-        id: package
-        env:
-          TARGET: ${{ matrix.target }}
-          GOOS: ${{ matrix.goos }}
-          GOARCH: ${{ matrix.goarch }}
-        run: |
-          set -euo pipefail
-          asset="$(bun scripts/release.ts asset-name "$VERSION" "$TARGET")"
-          sha="$(shasum -a 256 "$BIN" | cut -d' ' -f1)"
-          scripts/package-release.sh "$GOOS" "$GOARCH" \
-            --selected-binary "$BIN" --expected-sha256 "$sha" \
-            --out-dir "$RUNNER_TEMP/dist" --archive-name "${asset%.tar.gz}" \
-            --binary-name mori
-          tar -tzvf "$RUNNER_TEMP/dist/$asset"
-          # C collation: macOS sort would otherwise put lowercase first.
-          members="$(tar -tzf "$RUNNER_TEMP/dist/$asset" | LC_ALL=C sort \
-            | tr '\n' ' ')"
-          want='LICENSE NOTICE THIRD_PARTY_NOTICES.md mori '
-          if [[ "$members" != "$want" ]]; then
-            echo "::error::unexpected archive members: $members"
-            exit 1
-          fi
-          echo "asset=$asset" >> "$GITHUB_OUTPUT"
-      # Only the .tar.gz ships. package-release.sh also writes an .mcpb
-      # bundle for darwin, which this upload leaves out.
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: mori-build-${{ matrix.target }}
-          path: ${{ runner.temp }}/dist/${{ steps.package.outputs.asset }}
-          if-no-files-found: error
+      matrix: ${{ fromJSON(needs.validate.outputs.matrix) }}
+    uses: ./.github/workflows/mori-package-target.yml
+    with:
+      platform: ${{ toJSON(matrix) }}
+      source_sha: ${{ needs.validate.outputs.source_sha }}
+      version: ${{ needs.validate.outputs.version }}
+      mode: ${{ needs.validate.outputs.mode }}
 
   prepare:
-    needs: [validate, build]
+    name: Prepare package bundle
+    needs: [validate, platform]
+    if: needs.validate.outputs.mode != 'prewarm'
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -430,21 +113,28 @@ jobs:
           VERSION: ${{ needs.validate.outputs.version }}
           TAG: ${{ needs.validate.outputs.tag }}
           SOURCE_SHA: ${{ needs.validate.outputs.source_sha }}
+          MODE: ${{ needs.validate.outputs.mode }}
         run: |
           set -euo pipefail
-          bun scripts/release.ts prepare "$VERSION" ../release-assets \
+          command=prepare
+          if [[ "$MODE" == preview ]]; then
+            command=prepare-preview
+          fi
+          bun scripts/release.ts "$command" "$VERSION" ../release-assets \
             --tag "$TAG" --commit "$SOURCE_SHA"
           cat ../release-assets/checksums.txt
           cat ../release-assets/release-notes.md >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: mori-${{ needs.validate.outputs.version }}-${{ needs.validate.outputs.source_sha }}
+          name: ${{ needs.validate.outputs.artifact }}
           path: release-assets/
           if-no-files-found: error
+          overwrite: true
+          retention-days: ${{ needs.validate.outputs.mode == 'daily' && 7 || 0 }}
 
   publish:
     needs: [validate, prepare]
-    if: needs.validate.outputs.publish == 'true'
+    if: needs.validate.outputs.mode == 'tag' && needs.validate.outputs.publish == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -463,7 +153,7 @@ jobs:
           bun-version: 1.4.3
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          name: mori-${{ needs.validate.outputs.version }}-${{ needs.validate.outputs.source_sha }}
+          name: ${{ needs.validate.outputs.artifact }}
           path: release-assets
       - name: Attest build provenance
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
@@ -477,3 +167,34 @@ jobs:
           TAG: ${{ needs.validate.outputs.tag }}
           REPO: ${{ github.repository }}
         run: bun scripts/release.ts publish "$TAG" ../release-assets --repo "$REPO"
+
+  report-daily-failures:
+    name: Report daily package failures
+    needs: [validate, platform, prepare]
+    if: >-
+      !cancelled() && failure() && github.event_name == 'schedule' &&
+      github.repository == 'Unique-Divine/jiyuu' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+      issues: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          ref: ${{ github.sha }}
+      - name: Group and report failed jobs
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 -I mori/scripts/ci/report_daily_packages.py
+      - name: Retain daily failure evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: mori-daily-failures-${{ github.run_attempt }}
+          path: daily-package-failures.json
+          if-no-files-found: ignore
+          retention-days: 30
+          overwrite: true

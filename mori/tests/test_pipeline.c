@@ -5215,6 +5215,49 @@ TEST(incremental_env_edit_replaces_scoped_envvars) {
     PASS();
 }
 
+TEST(deploy_image_reference_validation_and_identity) {
+    ASSERT_TRUE(cbm_image_ref_valid("localhost:5000/team/foo__bar:_RC.1"));
+    ASSERT_TRUE(cbm_image_ref_valid("[::1]:5000/team/foo"));
+    ASSERT_TRUE(cbm_image_ref_valid("foo:tag@sha256:0123456789abcdef0123456789abcdef"));
+    ASSERT_FALSE(cbm_image_ref_valid("foo@sha256:0123"));
+    ASSERT_FALSE(cbm_image_ref_valid("foo___bar:tag"));
+    ASSERT_FALSE(cbm_image_ref_valid("foo//bar:tag"));
+    ASSERT_FALSE(cbm_image_ref_valid("<.Values.image>"));
+    ASSERT_FALSE(cbm_image_ref_valid(NULL));
+
+    char tag[4 + 129 + 1] = "foo:";
+    memset(tag + 4, 't', 129);
+    tag[4 + 128] = '\0';
+    ASSERT_TRUE(cbm_image_ref_valid(tag));
+    tag[4 + 128] = 't';
+    ASSERT_FALSE(cbm_image_ref_valid(tag));
+
+    cbm_pipeline_ctx_t ctx = {.gbuf = cbm_gbuf_new("image-ref", "/unused")};
+    ASSERT_NOT_NULL(ctx.gbuf);
+    int64_t redis = cbm_pipeline_image_node(&ctx, "registry-1.docker.io/redis:7");
+    ASSERT_GT(redis, 0);
+    ASSERT_EQ(redis, cbm_pipeline_image_node(&ctx, "index.docker.io/library/redis@sha256:0123"));
+    ASSERT_NEQ(redis, cbm_pipeline_image_node(&ctx, "redis:7"));
+    ASSERT_EQ(cbm_pipeline_image_node(&ctx, "SCRATCH"), 0);
+    const cbm_gbuf_node_t *node = cbm_gbuf_find_by_qn(ctx.gbuf, "__image__docker.io/library/redis");
+    ASSERT_NOT_NULL(node);
+    ASSERT_STR_EQ(node->properties_json,
+                  "{\"repository\":\"docker.io/library/redis\",\"registry\":\"docker.io\"}");
+
+    char long_ref[520];
+    memset(long_ref, 'x', sizeof(long_ref) - 1);
+    long_ref[sizeof(long_ref) - 1] = '\0';
+    int64_t long_image = cbm_pipeline_image_node(&ctx, long_ref);
+    ASSERT_GT(long_image, 0);
+    long_ref[511] = '\0';
+    ASSERT_EQ(long_image, cbm_pipeline_image_node(&ctx, long_ref));
+    long_ref[511] = 'x';
+    long_ref[512] = '$';
+    ASSERT_EQ(cbm_pipeline_image_node(&ctx, long_ref), 0);
+    cbm_gbuf_free(ctx.gbuf);
+    PASS();
+}
+
 /* A repository split by component (pass_docker.c P4.2b). `rename`: component
  * b becomes bee -- the split changes, and the reference in compose.run.yaml,
  * a file this run does not repair, must leave the old Image `*-b`: a closure
@@ -9978,6 +10021,41 @@ TEST(pipeline_full_cancel_after_destination_prepare_preserves_previous_generatio
     ASSERT_EQ(cancelled_rc, CBM_PIPELINE_ABORT_PRESERVE_DB);
     ASSERT_EQ(before_count, 1);
     ASSERT_EQ(after_count, 0);
+    ASSERT_EQ(stage_count, 0);
+    PASS();
+}
+
+TEST(pipeline_stage_install_rename_failure_keeps_destination_and_releases_owner) {
+    char tmp[256];
+    snprintf(tmp, sizeof(tmp), "/tmp/cbm_stage_install_rename_XXXXXX");
+    ASSERT_NOT_NULL(cbm_mkdtemp(tmp));
+    char db_path[512];
+    snprintf(db_path, sizeof(db_path), "%s/generation.db", tmp);
+    cbm_store_t *store = cbm_store_open_path(db_path);
+    ASSERT_NOT_NULL(store);
+    ASSERT_EQ(cbm_store_upsert_project(store, "previous", tmp), CBM_STORE_OK);
+    cbm_store_close(store);
+
+    char *stage = cbm_pipeline_create_staging_path(db_path);
+    ASSERT_NOT_NULL(stage);
+    /* Leave the owner lock in place and make the final rename fail. */
+    ASSERT_EQ(cbm_unlink(stage), 0);
+    int rc = cbm_pipeline_finalize_staged_generation(stage, db_path, NULL, true);
+    int stage_count = count_generation_stage_artifacts(tmp, "generation.db");
+    free(stage);
+
+    cbm_project_t previous = {0};
+    store = cbm_store_open_path_query(db_path);
+    ASSERT_NOT_NULL(store);
+    int previous_rc = cbm_store_get_project(store, "previous", &previous);
+    free((char *)previous.name);
+    free((char *)previous.indexed_at);
+    free((char *)previous.root_path);
+    cbm_store_close(store);
+    th_rmtree(tmp);
+
+    ASSERT_EQ(rc, CBM_PIPELINE_PERSIST_FAILED);
+    ASSERT_EQ(previous_rc, CBM_STORE_OK);
     ASSERT_EQ(stage_count, 0);
     PASS();
 }
@@ -33005,9 +33083,9 @@ TEST(pipeline_python_iris_cls_class_aware_calls) {
  * hit. It used to write nodes_fts with a hand-rolled four-column INSERT of
  * its own; with a fifth `body` column that literal leaves prose NULL for every
  * node arriving by delta, invisibly — a full reindex still looks perfect.
- * Routing the write through cbm_store_fts_rebuild() is what this test binds:
- * revert pipeline_delta.c to a four-column INSERT and it fails. */
-TEST(pipeline_delta_patch_indexes_docstring_into_fts_body) {
+ * Check that the delta patch retains the source prose for the final staged
+ * publisher's shared FTS refresh. */
+TEST(pipeline_delta_patch_preserves_docstrings_for_fts) {
     char *td = th_mktempdir("cbm_delta_fts");
     ASSERT_NOT_NULL(td);
     char dbpath[512];
@@ -33041,6 +33119,10 @@ TEST(pipeline_delta_patch_indexes_docstring_into_fts_body) {
 
     ASSERT_EQ(cbm_delta_patch(store, proj, gb, max_db_id, NULL, 0), 0);
     cbm_gbuf_free(gb);
+    ASSERT_EQ(cbm_store_begin(store), CBM_STORE_OK);
+    ASSERT_EQ(cbm_store_fts_refresh_closure(store, NULL, NULL), CBM_STORE_OK);
+    ASSERT_EQ(cbm_store_commit(store), CBM_STORE_OK);
+
 
     /* nodes_fts is contentless, so a column-filtered MATCH is the only way to
      * observe WHICH column a token landed in — and the only assertion that
@@ -35683,7 +35765,7 @@ SUITE(pipeline) {
     RUN_TEST(pipeline_ensemble_routing_attr_does_not_leak_across_items);
     RUN_TEST(pipeline_ensemble_routing_settings_targets);
     RUN_TEST(pipeline_ensemble_routing_unterminated_item_is_safe);
-    RUN_TEST(pipeline_delta_patch_indexes_docstring_into_fts_body);
+    RUN_TEST(pipeline_delta_patch_preserves_docstrings_for_fts);
     RUN_TEST(pipeline_markdown_and_config_prose_reaches_fts_body);
     RUN_TEST(pipeline_semantic_edges_no_functions);
     RUN_TEST(pipeline_semantic_batched_matches_unbatched);
@@ -35725,6 +35807,7 @@ SUITE(pipeline_semantic_manifest_repro) {
     RUN_TEST(incremental_edit_keeps_retrofit_http_calls_issue2723);
     RUN_TEST(incremental_compose_edit_replaces_build_edges);
     RUN_TEST(incremental_env_edit_replaces_scoped_envvars);
+    RUN_TEST(deploy_image_reference_validation_and_identity);
     RUN_TEST(incremental_image_split_change_rebuilds);
     RUN_TEST(incremental_helm_values_edit_keeps_chart_edge);
     RUN_TEST(incremental_werf_values_edit_keeps_chart_edge);
@@ -35811,6 +35894,7 @@ SUITE(pipeline_semantic_manifest_repro) {
     RUN_TEST(pipeline_existing_artifact_refreshes_after_default_forced_full_reindex);
     RUN_TEST(pipeline_full_cancel_after_predump_preserves_previous_generation);
     RUN_TEST(pipeline_full_cancel_after_destination_prepare_preserves_previous_generation);
+    RUN_TEST(pipeline_stage_install_rename_failure_keeps_destination_and_releases_owner);
     RUN_TEST(pipeline_full_persist_failure_after_stage_dump_preserves_previous_generation);
     RUN_TEST(pipeline_incremental_persist_failure_preserves_previous_generation_and_retries);
     RUN_TEST(pipeline_incremental_successful_publication_preserves_adr);

@@ -511,6 +511,10 @@ jobs:
             runner: ubuntu-24.04-arm
     env:
       CCACHE_MAXSIZE: 1G
+      MORI_CANDIDATE_SUITES: >-
+        edge_types_probe lang_contract cross_repo extraction graph_buffer pipeline yaml language
+        config_text_edit doclinks doc_links_pdf watcher daemon_ipc
+        store_graph_digest pipeline_frozen httpd
     steps:
       - name: Unaffected project
         if: needs.changes.outputs.mori != 'true'
@@ -519,6 +523,7 @@ jobs:
         if: needs.changes.outputs.mori == 'true'
         with:
           persist-credentials: false
+          fetch-depth: 2
       - name: Install build dependencies
         if: needs.changes.outputs.mori == 'true'
         run: |
@@ -575,37 +580,49 @@ jobs:
           scripts/security-vendored.sh
           just parity-test
       - name: Run candidate grammar and extraction suites
+        id: mori-native-baseline
         if: needs.changes.outputs.mori == 'true'
         working-directory: mori
+        run: |
+          set -o pipefail
+          scripts/test.sh --suites "$MORI_CANDIDATE_SUITES" 2>&1 | tee "$RUNNER_TEMP/mori-native-baseline.log"
+      - name: Report shadow native suite selection
+        if: >-
+          always() && (steps.mori-native-baseline.outcome == 'success' ||
+          steps.mori-native-baseline.outcome == 'failure')
+        continue-on-error: true
+        env:
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          MORI_ARCH: ${{ matrix.arch }}
+          BASELINE_OUTCOME: ${{ steps.mori-native-baseline.outcome }}
         run: >-
-          scripts/test.sh --suites
-          "edge_types_probe lang_contract cross_repo extraction graph_buffer pipeline yaml language
-          config_text_edit doclinks doc_links_pdf watcher daemon_ipc"
-      - name: Smoke-test the candidate standalone executable
+          python3 mori/scripts/ci/mori_ci_shadow.py
+          --base "$PR_BASE" --head "$PR_HEAD" --tested "$GITHUB_SHA"
+          --arch "$MORI_ARCH" --outcome "$BASELINE_OUTCOME"
+          --baseline-suites "$MORI_CANDIDATE_SUITES"
+          --log "$RUNNER_TEMP/mori-native-baseline.log"
+      - name: Run Rust, JVM, and C# documentation-link suites
         if: needs.changes.outputs.mori == 'true'
+        working-directory: mori
+        run: scripts/test.sh --suites "doc_mentions_rs doc_mentions_jvm doc_mentions"
+      # Mori PRs run the same gate against the linked candidate below.
+      - name: Smoke-test the candidate standalone executable
+        id: standalone-smoke
+        if: github.event_name != 'pull_request' && needs.changes.outputs.mori == 'true'
         working-directory: mori
         run: |
           set -euo pipefail
           scripts/build.sh BUILD_DIR=build/candidate-standalone
-          binary="$PWD/build/candidate-standalone/codebase-memory-mcp"
-          scratch="$(mktemp -d /tmp/mori-native.XXXXXX)"
-          mkdir "$scratch/home" "$scratch/rt" "$scratch/cache"
-          chmod 700 "$scratch/home" "$scratch/rt" "$scratch/cache"
-          candidate=(env -i "PATH=$PATH" "HOME=$scratch/home"
-            "CBM_RUNTIME_DIR=$scratch/rt" "CBM_CACHE_DIR=$scratch/cache" "$binary")
-          cleanup() {
-            "${candidate[@]}" daemon stop >/dev/null 2>&1 || true
-            rm -rf "$scratch"
-          }
-          trap cleanup EXIT
-          "${candidate[@]}" cli --quiet index_repository --repo_path "$PWD/tests/fixtures/parity-repo" |
-            jq -e '.status == "indexed"'
-          symbols="$(nm --defined-only "$binary")"
-          grep -Eq '[[:space:]][Tt] mori_fts_write$' <<< "$symbols"
-          if grep -Eq '[[:space:]][Tt] cbm_text_set_.*_hook_for_testing$' <<< "$symbols"; then
-            echo 'unexpected managed-text fixture hooks in standalone candidate' >&2
-            exit 1
-          fi
+          scripts/smoke-built-binary.sh "$PWD/build/candidate-standalone/codebase-memory-mcp"
+      - name: Report standalone smoke result
+        if: always() && github.event_name != 'pull_request' && needs.changes.outputs.mori == 'true'
+        env:
+          ARCH: ${{ matrix.arch }}
+          SMOKE_RESULT: ${{ steps.standalone-smoke.outcome }}
+        run: |
+          printf 'Standalone smoke for %s (fixture index, Rust FTS symbol, no test hooks): **%s**\n' \
+            "$ARCH" "$SMOKE_RESULT" >> "$GITHUB_STEP_SUMMARY"
       - name: Verify native fixtures exercised Rust GraphQL callbacks
         if: needs.changes.outputs.mori == 'true'
         run: just --justfile mori/justfile test-graphql-rust build/c
@@ -721,14 +738,29 @@ jobs:
       - name: Reset compiler cache statistics
         if: needs.changes.outputs.mori_linked == 'true'
         run: ccache --zero-stats
-      - name: Build pinned C reference
+      - name: Identify the frozen C test reference
         if: needs.changes.outputs.mori_linked == 'true'
+        id: c-oracle
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: |
+          key="$(python3 mori/scripts/c_reference_cache.py key "linux-$ARCH")"
+          printf 'key=%s\n' "$key" >> "$GITHUB_OUTPUT"
+      - name: Cache the frozen C test reference
+        if: needs.changes.outputs.mori_linked == 'true'
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/mori-test-c-reference
+          key: mori-c-reference-${{ steps.c-oracle.outputs.key }}
+      - name: Verify or build the frozen C test reference
+        if: needs.changes.outputs.mori_linked == 'true'
+        env:
+          ARCH: ${{ matrix.arch }}
         run: |
           set -euo pipefail
-          reference="$RUNNER_TEMP/codebase-memory-mcp"
-          just --justfile mori/jiyuu-mori/justfile build-c-reference "$reference"
-          test -x "$reference"
-          printf 'MORI_C_REFERENCE_BIN=%s\n' "$reference" >> "$GITHUB_ENV"
+          reference="$RUNNER_TEMP/mori-test-c-reference"
+          python3 mori/scripts/c_reference_cache.py ensure "linux-$ARCH" "$reference"
+          printf 'MORI_C_REFERENCE_BIN=%s/codebase-memory-mcp\n' "$reference" >> "$GITHUB_ENV"
       - name: Check linked
         if: needs.changes.outputs.mori_linked == 'true'
         run: just --justfile mori/jiyuu-mori/justfile check-linked
@@ -743,6 +775,21 @@ jobs:
       - name: CLI parity
         if: needs.changes.outputs.mori_linked == 'true'
         run: just --justfile mori/jiyuu-mori/justfile parity
+      # The linked job covers every path that previously triggered the Mori
+      # PR smoke. Cargo-only changes still report the check without gating.
+      - name: Smoke-test the linked candidate
+        id: linked-smoke
+        if: needs.changes.outputs.mori_linked == 'true'
+        continue-on-error: ${{ github.event_name != 'pull_request' || needs.changes.outputs.mori != 'true' }}
+        run: mori/scripts/smoke-built-binary.sh "$PWD/target/debug/mori"
+      - name: Report linked smoke result
+        if: always() && needs.changes.outputs.mori_linked == 'true'
+        env:
+          ARCH: ${{ matrix.arch }}
+          SMOKE_RESULT: ${{ steps.linked-smoke.outcome }}
+        run: |
+          printf 'Linked smoke for %s (fixture index, Rust FTS symbol, no test hooks): **%s**\n' \
+            "$ARCH" "$SMOKE_RESULT" >> "$GITHUB_STEP_SUMMARY"
       # The release reference includes the accepted GraphQL fixture behavior.
       - name: Public graph and tool replay
         if: needs.changes.outputs.mori_linked == 'true'

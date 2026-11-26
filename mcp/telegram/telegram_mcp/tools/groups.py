@@ -273,6 +273,7 @@ async def invite_to_group(
         except errors.UserNotMutualContactError:
             return "Error: Cannot invite users who are not mutual contacts. Please ensure the users are in your contacts and have added you back."
         except errors.UserPrivacyRestrictedError:
+            call_history.record_failure("denied", "telegram_privacy_restricted")
             return (
                 "Error: One or more users have privacy settings that prevent you from adding them."
             )

@@ -188,6 +188,42 @@ TEST(store_graph_digest_candidate_index_errors_are_not_legacy_absence) {
     PASS();
 }
 
+TEST(store_graph_content_and_topology_digest_v1_golden) {
+    /* Independent framing of the shared fixture, including malformed UTF-8,
+     * embedded NULs and the legacy coverage metadata schema. */
+    static const unsigned char content[32] = {
+        0x49, 0x32, 0xc8, 0x77, 0x5f, 0x81, 0x5d, 0x19, 0x99, 0x25, 0x0e,
+        0x1c, 0x39, 0x46, 0x9d, 0xa6, 0xce, 0xd8, 0xf9, 0xa4, 0xf0, 0xec,
+        0xe3, 0xb0, 0xd7, 0x3a, 0x2a, 0x8b, 0xcd, 0x00, 0xe7, 0x89,
+    };
+    static const unsigned char topology[32] = {
+        0xb7, 0x5a, 0x18, 0xb0, 0x02, 0x82, 0xea, 0x60, 0xd1, 0x24, 0xb8,
+        0x1c, 0x02, 0xd8, 0xab, 0xe8, 0x6b, 0x78, 0x2d, 0xac, 0xb5, 0x70,
+        0xd5, 0x83, 0x76, 0x69, 0x42, 0x28, 0xac, 0x14, 0xed, 0x89,
+    };
+    cbm_store_t *store = gd_fixture(true, false);
+    sqlite3 *db = store ? cbm_store_get_db(store) : NULL;
+    unsigned char got_content[32] = {0}, got_topology[32] = {0};
+    bool setup = db && gd_sql(db, "UPDATE nodes SET start_line=0.00001234567891011121 "
+                                  "WHERE id=-7") == SQLITE_OK;
+    bool own = setup && cbm_store_graph_content_digest(store, "p", got_content) == CBM_STORE_OK &&
+               sqlite3_get_autocommit(db);
+    bool opened = own && gd_sql(db, "BEGIN") == SQLITE_OK;
+    bool borrowed = opened &&
+                    cbm_store_graph_topology_digest(store, "p", got_topology) == CBM_STORE_OK &&
+                    !sqlite3_get_autocommit(db);
+    bool closed = opened && gd_sql(db, "ROLLBACK") == SQLITE_OK;
+    cbm_store_close(store);
+
+    ASSERT_TRUE(setup);
+    ASSERT_TRUE(own);
+    ASSERT_TRUE(borrowed);
+    ASSERT_TRUE(closed);
+    ASSERT_TRUE(memcmp(content, got_content, sizeof(content)) == 0);
+    ASSERT_TRUE(memcmp(topology, got_topology, sizeof(topology)) == 0);
+    PASS();
+}
+
 TEST(store_graph_digest_independent_canonical_golden) {
     cbm_store_t *s=gd_fixture(false,false); cbm_store_graph_digest_t out={0};
     bool setup=s && gd_int(cbm_store_get_db(s),"SELECT count(*) FROM nodes",2) &&
@@ -725,6 +761,7 @@ TEST(store_graph_digest_indexed_checkout_identity_is_not_bound) {
 SUITE(store_graph_digest) {
     RUN_TEST(store_graph_digest_binds_unresolved_candidate_index);
     RUN_TEST(store_graph_digest_candidate_index_errors_are_not_legacy_absence);
+    RUN_TEST(store_graph_content_and_topology_digest_v1_golden);
     RUN_TEST(store_graph_digest_independent_canonical_golden);
     RUN_TEST(store_graph_digest_logical_order_and_excluded_storage_are_stable);
     RUN_TEST(store_graph_digest_every_known_value_and_cross_project_edge_is_bound);

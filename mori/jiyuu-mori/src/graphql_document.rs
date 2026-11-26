@@ -1,6 +1,8 @@
 //! Byte-span facts for GraphQL operations, including embedded templates.
 
 use std::collections::HashSet;
+#[cfg(feature = "graphql-callbacks")]
+use std::ffi::{CStr, c_char, c_void};
 use std::ops::Range;
 
 pub(super) type Span = Range<usize>;
@@ -484,6 +486,7 @@ pub(super) fn signature(
         if capacity - output.len() < kind.len() + name.len() + 4 {
             break;
         }
+        output.try_reserve(kind.len() + name.len() + 3).ok()?;
         if !output.is_empty() {
             output.push(b'\n');
         }
@@ -494,8 +497,12 @@ pub(super) fn signature(
         let first_path = output.len();
         let mut parent = None;
         let mut seen = HashSet::new();
+        let mut allocation_failed = false;
         parser
             .selections(|Selection { depth, kind }| {
+                if allocation_failed {
+                    return;
+                }
                 let field = match kind {
                     SelectionKind::Field(span)
                         if !source[span.clone()].starts_with(b"__") =>
@@ -525,10 +532,19 @@ pub(super) fn signature(
                 if prefix.len() + field.len() + 2 > PATH_LIMIT
                     || path_len + usize::from(needs_comma) + 1
                         > capacity - output.len()
-                    || !seen.insert((prefix, field))
+                    || seen.contains(&(prefix, field))
                 {
                     return;
                 }
+                if seen.try_reserve(1).is_err()
+                    || output
+                        .try_reserve(path_len + usize::from(needs_comma))
+                        .is_err()
+                {
+                    allocation_failed = true;
+                    return;
+                }
+                seen.insert((prefix, field));
                 if needs_comma {
                     output.push(b',');
                 }
@@ -539,8 +555,42 @@ pub(super) fn signature(
                 output.extend_from_slice(field);
             })
             .ok()?;
+        if allocation_failed {
+            return None;
+        }
     }
     (!output.is_empty()).then_some(output)
+}
+
+#[cfg(feature = "graphql-callbacks")]
+type SignatureSink = unsafe extern "C" fn(*mut c_void, *const u8, usize) -> bool;
+
+#[cfg(feature = "graphql-callbacks")]
+/// Encode a NUL-terminated GraphQL document and copy it via a synchronous C sink.
+#[unsafe(no_mangle)]
+unsafe extern "C" fn mori_graphql_encode_document(
+    source: *const c_char,
+    require_keyword: bool,
+    capacity: usize,
+    shorthand: *mut bool,
+    sink: SignatureSink,
+    context: *mut c_void,
+) -> bool {
+    #[cfg(all(feature = "native-graphql-fixtures", not(test)))]
+    crate::graphql_ffi::mark_document_fixture();
+
+    // SAFETY: The C entry points check the input before lending it to Rust.
+    let source = unsafe { CStr::from_ptr(source) }.to_bytes();
+    let mut short = false;
+    let signature = signature(source, require_keyword, capacity, &mut short);
+    // SAFETY: The optional flag is writable and the sink borrows the bytes
+    // and its context synchronously, without retaining either pointer.
+    unsafe {
+        if !shorthand.is_null() {
+            shorthand.write(short);
+        }
+        signature.is_some_and(|bytes| sink(context, bytes.as_ptr(), bytes.len()))
+    }
 }
 
 #[cfg(test)]

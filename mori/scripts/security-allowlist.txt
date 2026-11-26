@@ -37,7 +37,7 @@ WRITE:src/foundation/mem.c:1:opt-in allocator diagnostics write to the explicit 
 WRITE:src/mcp/test_impact_artifact.c:1:receipt staging file in the caller-selected artifact bundle before atomic replacement
 WRITE:src/mcp/test_impact_engine.c:1:merge-base configuration staged inside the engine's private working directory
 WRITE:src/mcp/test_impact_engine_artifact.c:1:reviewed coverage bytes copied into the newly-created output bundle
-WRITE:src/mcp/test_impact_git.c:1:bounded Git batch stdin staged in the private capture directory
+WRITE:src/mcp/test_impact_git_io.c:1:bounded Git batch stdin staged in the private capture directory
 
 # ── CLI: update command (user-initiated, interactive) ──────────────────────
 src/cli/cli.c:cbm_popen:sha256 checksum verification (update cmd)

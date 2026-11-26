@@ -6,8 +6,8 @@ use std::path::Path;
 #[path = "config_text_edit/ffi.rs"]
 mod ffi;
 #[path = "config_text_edit/file.rs"]
-mod file;
-#[cfg(any(test, feature = "native-engine-fixtures"))]
+pub(crate) mod file;
+#[cfg(any(test, feature = "native-engine-test-seams"))]
 #[path = "config_text_edit/test_hooks.rs"]
 mod test_hooks;
 #[cfg(test)]

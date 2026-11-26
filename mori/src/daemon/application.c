@@ -2291,23 +2291,35 @@ static yyjson_doc *application_repair_read_meta(cbm_store_t *store, const char *
     return doc;
 }
 
-static const char *application_wildcard_recovery_block(yyjson_doc *observations, bool *missing) {
-    yyjson_obj_iter iter = yyjson_obj_iter_with(yyjson_doc_get_root(observations));
-    yyjson_val *key;
-    while ((key = yyjson_obj_iter_next(&iter)) != NULL) {
-        const char *observed = yyjson_get_str(yyjson_obj_iter_get_val(key));
-        if (!observed) {
-            return "wildcard_unknown_peer";
-        }
-        char current[CBM_GRAPH_COMPARE_GENERATION_SIZE];
-        if (!cbm_cross_repo_read_generation(yyjson_get_str(key), current, sizeof(current))) {
-            *missing = true;
-        } else if (strcmp(observed, current) != 0) {
-            return "wildcard_generation_changed";
-        }
-    }
-    return NULL;
+static const char *application_recovery_next_peer(yyjson_obj_iter *iter, const char **observed) {
+    yyjson_val *key = yyjson_obj_iter_next(iter);
+    *observed = yyjson_get_str(yyjson_obj_iter_get_val(key));
+    return yyjson_get_str(key);
 }
+
+static void application_recovery_skip(const char *project, const char *reason) {
+    cbm_log_info("cross_repo.recovery_skipped", "project", project, "reason", reason);
+}
+
+/* Keep in sync with ProjectOps in job_recovery/provider_repair.rs. */
+typedef struct {
+    yyjson_val *(*target_at)(const yyjson_val *, size_t);
+    yyjson_val *(*lookup)(const yyjson_val *, const char *);
+    const char *(*string)(const yyjson_val *);
+    size_t (*length)(const yyjson_val *);
+    const char *(*next_peer)(yyjson_obj_iter *, const char **);
+    bool (*valid_name)(const char *);
+    bool (*read_generation)(const char *, char *, size_t);
+    bool (*match_saved)(cbm_daemon_application_t *, const char *, const char *, int);
+    bool (*reconcile)(cbm_daemon_application_t *, const char *);
+    void (*skip)(const char *, const char *);
+    size_t max_targets;
+} application_repair_decision_ops_t;
+
+bool mori_daemon_repair_recover(cbm_daemon_application_t *application, const char *project,
+                                const yyjson_val *targets, size_t count, const yyjson_val *peers,
+                                yyjson_obj_iter *iter, bool reverse_pending,
+                                const application_repair_decision_ops_t *ops);
 
 /* Called under the wildcard lease. Snapshot the saved selection and
  * observations, then close the reader before any repair writes. */
@@ -2355,44 +2367,24 @@ static bool application_recover_repair_project(cbm_daemon_application_t *applica
     ok = cbm_store_read_scope_close(scope) == CBM_STORE_OK && ok;
     cbm_store_close(store);
 
-    size_t count = yyjson_arr_size(targets);
-    bool stale = false;
-    bool missing = false;
-    bool wildcard = count == 1 && yyjson_equals_str(yyjson_arr_get(targets, 0), "*");
-    ok = ok && count <= APPLICATION_REPAIR_MAX_TARGETS;
-    for (size_t i = 0; ok && !wildcard && i < count; i++) {
-        yyjson_val *target = yyjson_arr_get(targets, i);
-        const char *name = yyjson_get_str(target);
-        ok = name && strlen(name) == yyjson_get_len(target) && cbm_validate_project_name(name);
-        if (!ok) {
-            break;
-        }
-        if (strcmp(name, project) == 0) {
-            continue;
-        }
-        char current[CBM_GRAPH_COMPARE_GENERATION_SIZE];
-        const char *observed =
-            yyjson_get_str(yyjson_obj_get(yyjson_doc_get_root(observations), name));
-        if (!cbm_cross_repo_read_generation(name, current, sizeof(current))) {
-            missing = true;
-        } else if (!observed || strcmp(observed, current) != 0) {
-            stale = true;
-        }
-    }
-    if (ok && missing) {
-        ok = false;
-    } else if (ok && stale) {
-        ok = application_match_saved_targets(application, "recovery", project, (int)count);
-    } else if (ok && reverse_pending) {
-        const char *reason =
-            wildcard ? application_wildcard_recovery_block(observations, &missing) : NULL;
-        if (reason) {
-            /* Reverse-only reconciliation requires matching generations.
-             * An explicit wildcard relink can refresh the selection. */
-            cbm_log_info("cross_repo.recovery_skipped", "project", project, "reason", reason);
-        } else {
-            ok = !missing && application_reconcile_reverse(application, project);
-        }
+    if (ok) {
+        static const application_repair_decision_ops_t ops = {
+            .target_at = yyjson_arr_get,
+            .lookup = yyjson_obj_get,
+            .string = yyjson_get_str,
+            .length = yyjson_get_len,
+            .next_peer = application_recovery_next_peer,
+            .valid_name = cbm_validate_project_name,
+            .read_generation = cbm_cross_repo_read_generation,
+            .match_saved = application_match_saved_targets,
+            .reconcile = application_reconcile_reverse,
+            .skip = application_recovery_skip,
+            .max_targets = APPLICATION_REPAIR_MAX_TARGETS,
+        };
+        yyjson_val *peers = yyjson_doc_get_root(observations);
+        yyjson_obj_iter iter = yyjson_obj_iter_with(peers);
+        ok = mori_daemon_repair_recover(application, project, targets, yyjson_arr_size(targets),
+                                        peers, &iter, reverse_pending, &ops);
     }
     yyjson_doc_free(observations);
     yyjson_doc_free(selection);

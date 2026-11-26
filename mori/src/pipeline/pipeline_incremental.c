@@ -845,10 +845,12 @@ static int frozen_fresh_manifest(cbm_pipeline_t *p, cbm_file_hash_t **out, int *
     /* With a classified file list the reconciliation re-hashes exactly the
      * listed files: a file added to the source root since is not compared,
      * because it is not indexed either. */
-    int rc = cbm_pipeline_frozen_has_file_list(p)
-                 ? cbm_pipeline_frozen_listed_files(p, &files, &count)
-                 : cbm_discover_ex2(cbm_pipeline_repo_path(p), &opts, &files, &count, &excluded,
-                                    &excluded_count, &ignored, &ignored_count, &ignored_total);
+    const bool listed = cbm_pipeline_frozen_has_file_list(p);
+    cbm_log_debug("pipeline.discovery_backend", "phase", "fresh_manifest", "backend",
+                  listed ? "frozen_list" : "rust");
+    int rc = listed ? cbm_pipeline_frozen_listed_files(p, &files, &count)
+                    : cbm_discover_ex2(cbm_pipeline_repo_path(p), &opts, &files, &count, &excluded,
+                                       &excluded_count, &ignored, &ignored_count, &ignored_total);
     if (rc == 0)
         rc = cbm_pipeline_build_frozen_manifest(p, files, count, excluded, excluded_count, out,
                                                 out_count);
@@ -891,6 +893,7 @@ int cbm_pipeline_build_fresh_semantic_manifest(cbm_pipeline_t *p, const char *pr
                  : CBM_PIPELINE_ABORT_PRESERVE_DB;
     if (rc == 0) {
         cbm_set_user_lang_config(fresh_userconfig);
+        cbm_log_debug("pipeline.discovery_backend", "phase", "fresh_manifest", "backend", "rust");
         rc = cbm_discover_ex2(repo_path, &opts, &fresh_files, &fresh_file_count, &fresh_excluded,
                               &fresh_excluded_count, &fresh_ignored, &fresh_ignored_count,
                               &fresh_ignored_total);
@@ -3258,9 +3261,6 @@ static bool closure_metadata_current(bool metadata_current, const cbm_file_hash_
     return current && old_count == new_count;
 }
 
-/* Decide whether this manifest delta is closure-repairable, and if so build
- * the plan. Returns 1 with *plan filled, or 0 (decline → FULL) with the
- * reason logged. Every early exit declines; nothing here mutates state. */
 /* closure_graphql_decline over the completed closure. On a decline the
  * plan's file list is released. */
 static const char *closure_graphql_decline_plan(cbm_store_t *store, const char *project,
@@ -3284,6 +3284,44 @@ static const char *closure_graphql_decline_plan(cbm_store_t *store, const char *
     return decline;
 }
 
+/* Matches ManifestDelta in closure_plan.rs. Output paths borrow the input rows. */
+typedef struct {
+    const cbm_file_hash_t *stored, *fresh;
+    const char *semantic_input_prefix;
+    char **paths; /* capacity stored_count + fresh_count */
+    int stored_count, fresh_count;
+    int changed_count, deleted_count;
+} closure_manifest_delta_t;
+
+typedef bool (*closure_path_fn)(void *context, const char *path);
+extern const char *mori_closure_classify_manifest(closure_manifest_delta_t *delta, void *context,
+                                                 closure_path_fn discovered,
+                                                 closure_path_fn try_seed_alias);
+
+typedef struct {
+    CBMHashTable *files_by_path;
+    CBMHashTable *closure_set;
+    const cbm_file_info_t *files;
+    int file_count;
+    const cbm_path_alias_collection_t *aliases;
+} closure_manifest_context_t;
+
+static bool closure_manifest_discovered(void *data, const char *path) {
+    const closure_manifest_context_t *context = data;
+    return cbm_ht_get(context->files_by_path, path) != NULL;
+}
+
+static bool closure_manifest_seed_alias(void *data, const char *path) {
+    const closure_manifest_context_t *context = data;
+    if (!closure_is_alias_config(context->aliases, path)) {
+        return false;
+    }
+    closure_seed_governed(context->closure_set, context->files, context->file_count, path);
+    return true;
+}
+
+/* Build a repair plan without mutating the stored generation. Returns 1
+ * on success or 0 with a logged decline and any fatal status in *plan. */
 static int closure_try_plan(cbm_pipeline_t *p, cbm_store_t *store, const char *project,
                             cbm_file_info_t *files, int file_count, const cbm_file_hash_t *stored,
                             int stored_count, const cbm_file_hash_t *fresh, int fresh_count,
@@ -3293,10 +3331,8 @@ static int closure_try_plan(cbm_pipeline_t *p, cbm_store_t *store, const char *p
     cbm_clock_gettime(CLOCK_MONOTONIC, &t);
     const char *decline = NULL;
 
-    /* Index the fresh manifest and discovery list by rel_path. */
-    CBMHashTable *fresh_by_path = cbm_ht_create((size_t)fresh_count * PAIR_LEN + CBM_SZ_64);
+    /* Index the discovery list by rel_path. */
     CBMHashTable *files_by_path = cbm_ht_create((size_t)file_count * PAIR_LEN + CBM_SZ_64);
-    CBMHashTable *stored_by_path = cbm_ht_create((size_t)stored_count * PAIR_LEN + CBM_SZ_64);
     CBMHashTable *closure_set = cbm_ht_create(CBM_SZ_64);
     char **changed_paths = NULL;
     char **dependents = NULL;
@@ -3317,84 +3353,43 @@ static int closure_try_plan(cbm_pipeline_t *p, cbm_store_t *store, const char *p
     /* names a changed or deleted file no longer declares (doc-link rows) */
     CBMHashTable *removed_names = cbm_ht_create(CBM_SZ_64);
     CBMHashTable *row_deps = cbm_ht_create(CBM_SZ_64);
-    if (!fresh_by_path || !files_by_path || !stored_by_path || !closure_set || !removed_names ||
-        !row_deps) {
+    if (!files_by_path || !closure_set || !removed_names || !row_deps) {
         decline = "alloc";
         goto done;
     }
     for (int i = 0; i < file_count; i++) {
         cbm_ht_set(files_by_path, files[i].rel_path, &files[i]);
     }
-    for (int i = 0; i < fresh_count; i++) {
-        cbm_ht_set(fresh_by_path, fresh[i].rel_path, (void *)&fresh[i]);
-    }
-    for (int i = 0; i < stored_count; i++) {
-        cbm_ht_set(stored_by_path, stored[i].rel_path, (void *)&stored[i]);
-    }
-
-    /* Delta classification straight from the semantic manifests (content
-     * hashes, not mtimes). Virtual entries are config/lockfile digests —
-     * their effect on resolution is not file-local, so any delta there
-     * declines. New files decline: yesterday's graph cannot know who would
-     * reference a file that did not exist. */
-    changed_paths = (char **)calloc((size_t)fresh_count + (size_t)stored_count, sizeof(char *));
+    changed_paths = calloc((size_t)fresh_count + (size_t)stored_count, sizeof(*changed_paths));
     if (!changed_paths) {
         decline = "alloc";
         goto done;
     }
     plan_aliases = cbm_load_path_aliases_excluded(cbm_pipeline_repo_path(p), NULL, 0);
-    bool governed_seeded = false;
-    for (int i = 0; i < fresh_count; i++) {
-        const cbm_file_hash_t *old_row = cbm_ht_get(stored_by_path, fresh[i].rel_path);
-        bool synthetic = semantic_manifest_is_virtual_path(fresh[i].rel_path);
-        bool discovered = cbm_ht_get(files_by_path, fresh[i].rel_path) != NULL;
-        bool delta = !old_row || strcmp(old_row->sha256, fresh[i].sha256) != 0;
-        if (!delta) {
-            continue;
-        }
-        if (synthetic) {
-            decline = "semantic_input_changed";
-            goto done;
-        }
-        if (discovered) {
-            if (!old_row) {
-                decline = "new_file";
-                goto done;
-            }
-            changed_paths[n_changed++] = (char *)fresh[i].rel_path;
-            continue;
-        }
-        if (closure_is_alias_config(plan_aliases, fresh[i].rel_path)) {
-            /* Config content (or a new config) re-routes resolution for the
-             * files it governs; their surfaces are untouched, so they join
-             * the closure directly and propagate nowhere. */
-            closure_seed_governed(closure_set, files, file_count, fresh[i].rel_path);
-            governed_seeded = true;
-            continue;
-        }
-        decline = "control_file_changed";
+    closure_manifest_context_t manifest_context = {
+        .files_by_path = files_by_path,
+        .closure_set = closure_set,
+        .files = files,
+        .file_count = file_count,
+        .aliases = plan_aliases,
+    };
+    closure_manifest_delta_t delta = {
+        .stored = stored,
+        .fresh = fresh,
+        .semantic_input_prefix = CBM_SEMANTIC_INPUT_PREFIX,
+        .paths = changed_paths,
+        .stored_count = stored_count,
+        .fresh_count = fresh_count,
+    };
+    decline = mori_closure_classify_manifest(&delta, &manifest_context, closure_manifest_discovered,
+                                            closure_manifest_seed_alias);
+    cbm_log_info("incremental.closure_manifest", "implementation", "rust", "outcome",
+                 decline ? decline : "classified");
+    if (decline) {
         goto done;
     }
-    for (int i = 0; i < stored_count; i++) {
-        if (!cbm_ht_get(fresh_by_path, stored[i].rel_path)) {
-            if (!cbm_ht_get(files_by_path, stored[i].rel_path) &&
-                closure_is_alias_config(plan_aliases, stored[i].rel_path)) {
-                /* Removed alias config: its governed files resolve without
-                 * it now; the config's own manifest row simply disappears. */
-                closure_seed_governed(closure_set, files, file_count, stored[i].rel_path);
-                governed_seeded = true;
-                continue;
-            }
-            /* Gone from the manifest: deleted or newly ignored. Its nodes
-             * will be purged; files with edges into it must re-resolve. */
-            changed_paths[n_changed + n_deleted] = (char *)stored[i].rel_path;
-            n_deleted++;
-        }
-    }
-    if (n_changed == 0 && n_deleted == 0 && !governed_seeded) {
-        decline = "no_file_delta";
-        goto done;
-    }
+    n_changed = delta.changed_count;
+    n_deleted = delta.deleted_count;
     /* A doc-link scope input scopes files other than itself and has no scope
      * blob the surface comparison below could judge. */
     for (int i = 0; i < n_changed + n_deleted; i++) {
@@ -3684,9 +3679,7 @@ done:
     cbm_store_free_dependent_files(dependents, dependent_count);
     cbm_store_free_dependent_files(line_docs, line_doc_count);
     free(changed_paths);
-    cbm_ht_free(fresh_by_path);
     cbm_ht_free(files_by_path);
-    cbm_ht_free(stored_by_path);
     cbm_ht_free(closure_set);
     cbm_ht_free(row_deps); /* keys borrowed from plan->doc_rows */
     surface_name_set_free(removed_names);

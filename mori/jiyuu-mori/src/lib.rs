@@ -2,16 +2,81 @@
 
 pub mod ipc;
 
+#[cfg(feature = "native-engine-abi")]
+mod ansible;
+#[cfg(feature = "native-engine-abi")]
+mod architecture_projection;
+#[cfg(feature = "native-engine-abi")]
+mod closure_plan;
 #[cfg(any(feature = "native-engine-abi", test))]
 mod complexity;
 #[cfg(feature = "native-engine-abi")]
+mod csharp_doc_links;
+#[cfg(feature = "native-engine-abi")]
 mod doc_file_links;
+#[cfg(feature = "native-engine-abi")]
+mod docker_image;
 #[cfg(any(feature = "native-engine-abi", test))]
 mod explicit_override;
 #[cfg(feature = "native-engine-abi")]
+mod ffi_output;
+#[cfg(feature = "native-engine-abi")]
+mod jvm_doc_links;
+#[cfg(feature = "native-engine-abi")]
+mod kubernetes;
+#[cfg(feature = "native-engine-abi")]
+mod msbuild_condition;
+#[cfg(feature = "native-engine-abi")]
+mod native_graph_buffer;
+#[cfg(feature = "native-engine-abi")]
+mod native_hash_table;
+#[cfg(feature = "native-engine-abi")]
+mod native_parser;
+#[cfg(any(feature = "native-engine-abi", test))]
+mod operator_helm;
+#[cfg(feature = "native-engine-abi")]
 mod pdf_doc_links;
+#[cfg(feature = "native-engine-abi")]
+mod rust_doc_cargo;
+#[cfg(feature = "native-engine-abi")]
+mod rust_doc_path;
+#[cfg(any(feature = "native-engine-abi", test))]
+mod semantic_candidates;
+#[cfg(feature = "native-engine-abi")]
+mod shell_pass;
 #[cfg(any(feature = "native-engine-abi", test))]
 mod similarity;
+#[cfg(any(feature = "native-engine-abi", test))]
+mod snippet_window;
+#[cfg(any(feature = "native-engine-abi", test))]
+mod swift_package_map;
+#[cfg(feature = "native-engine-abi")]
+mod terraform;
+#[cfg(feature = "native-engine-abi")]
+mod test_impact_git;
+
+#[cfg(any(feature = "native-engine-abi", test))]
+mod config_cli;
+
+#[cfg(any(feature = "native-engine-abi", test))]
+#[path = "mcp_dispatch/methods.rs"]
+mod mcp_methods;
+
+#[cfg(any(feature = "native-engine-abi", test))]
+mod project_listing;
+
+#[cfg(feature = "native-engine-abi")]
+mod project_response;
+
+#[cfg(feature = "c-backend")]
+pub use project_response::register_index_status_renderer;
+
+#[cfg(feature = "native-engine-abi")]
+pub mod startup;
+
+#[cfg(feature = "native-engine-abi")]
+#[path = "ui/http_transport.rs"]
+mod ui_http_transport;
 
 #[cfg(any(feature = "graphql-callbacks", test))]
 mod gqlgen;
@@ -54,12 +119,9 @@ fn rusqlite_uses_the_c_backend_sqlite() {
 #[cfg(all(feature = "c-backend", test, unix))]
 mod discovery_spike;
 
-#[cfg(all(feature = "c-backend", unix))]
+#[cfg(feature = "native-engine-abi")]
 #[path = "discovery_spike/native.rs"]
 mod discover_walk;
-
-#[cfg(all(feature = "c-backend", not(test), unix))]
-pub use discover_walk::register as mori_register_discover_walk;
 
 #[cfg(all(feature = "c-backend", unix))]
 mod staged_graph;
@@ -104,18 +166,37 @@ mod ts_static_imports;
 pub use ts_static_imports::register as mori_register_ts_static_imports;
 
 #[cfg(feature = "native-engine-abi")]
+mod activation_transaction;
+#[cfg(feature = "native-engine-abi")]
+mod config_json_like;
+#[cfg(feature = "native-engine-abi")]
 mod config_text_edit;
 #[cfg(feature = "native-engine-abi")]
+mod config_toml_edit;
+#[cfg(feature = "native-engine-abi")]
+mod config_yaml_edit;
+#[cfg(feature = "native-engine-abi")]
+mod file_outline;
+#[cfg(feature = "native-engine-abi")]
 mod fts_writer;
+#[cfg(feature = "native-engine-abi")]
+mod store_digest;
 
-#[cfg(feature = "c-backend")]
+#[cfg(any(feature = "native-engine-abi", test))]
+mod full_build_driver;
+#[cfg(feature = "native-engine-abi")]
 mod source_publish;
-
-#[cfg(feature = "c-backend")]
-pub use source_publish::register as mori_register_source_publish;
+#[cfg(any(feature = "native-engine-abi", test))]
+mod stage_publish;
 
 #[cfg(feature = "c-backend")]
 mod python_imports;
 
 #[cfg(feature = "c-backend")]
 pub use python_imports::register as mori_register_python_imports;
+
+#[cfg(all(
+    feature = "native-engine-abi",
+    any(not(test), feature = "c-backend")
+))]
+mod hook_augment;

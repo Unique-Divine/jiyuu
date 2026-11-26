@@ -35,16 +35,11 @@ struct IndexSession {
     root: PathBuf,
     routing_override: Option<&'static str>,
     rust_manifest: bool,
-    driver_override: Option<&'static str>,
     seen_logs: HashSet<PathBuf>,
 }
 
 impl IndexSession {
-    fn new(
-        root: PathBuf,
-        routing_override: Option<&'static str>,
-        driver_override: Option<&'static str>,
-    ) -> Self {
+    fn new(root: PathBuf, routing_override: Option<&'static str>) -> Self {
         let mut dirs = fs::DirBuilder::new();
         dirs.recursive(true).mode(0o700);
         dirs.create(root.join("cache")).unwrap();
@@ -53,7 +48,6 @@ impl IndexSession {
             root,
             routing_override,
             rust_manifest: false,
-            driver_override,
             seen_logs: HashSet::new(),
         }
     }
@@ -74,11 +68,6 @@ impl IndexSession {
         }
         if self.rust_manifest {
             command.env("MORI_IMPL_INDEX_MANIFEST", "rust");
-        }
-        if let Some(drivers) = self.driver_override {
-            command
-                .env("MORI_IMPL_FULL_BUILD_DRIVER", drivers)
-                .env("MORI_IMPL_SOURCE_PUBLISH", drivers);
         }
         command
     }
@@ -144,19 +133,16 @@ impl IndexSession {
         assert_eq!(output["status"], "indexed", "{output}");
         let logs = self.take_worker_logs();
         self.check_route(&logs, step.decision);
-        let rust_drivers = self.driver_override.is_none();
-        let rust_full = rust_drivers
-            && matches!(step.decision, None | Some(("staged", "full")));
+        let rust_full = matches!(step.decision, None | Some(("staged", "full")));
         assert_eq!(
             logs.contains("msg=pipeline.full_build_driver implementation=rust"),
             rust_full,
             "{logs}"
         );
-        assert_eq!(
+        assert!(
             logs.contains(
                 "msg=pipeline.source_publish implementation=rust staged_rc=0"
             ),
-            rust_drivers,
             "{logs}"
         );
         assert!(logs.contains(step.log), "{logs}");
@@ -165,6 +151,22 @@ impl IndexSession {
             Some(("staged", "closure")) => Some("closure"),
             _ => None,
         };
+        let mut staged = logs.lines().filter(|line| {
+            line.contains("msg=pipeline.stage_publish implementation=rust")
+        });
+        if let Some(kind) = fts_mode.map(|mode| {
+            if mode == "full" {
+                "kind=dump"
+            } else {
+                "kind=patched"
+            }
+        }) {
+            assert!(
+                staged.next().is_some_and(|line| line.contains(kind)),
+                "{logs}"
+            );
+        }
+        assert!(staged.next().is_none(), "{logs}");
         let fts_witness = "msg=store.fts_rebuild implementation=rust";
         let fts_witnesses: Vec<_> = logs
             .lines()
@@ -253,7 +255,7 @@ impl IndexSession {
         String::from_utf8(output.stdout).unwrap()
     }
 
-    fn fts(&self, name: &str) -> FtsContents {
+    fn fts(&self, name: &str, terms: [&str; 2]) -> FtsContents {
         let connection = Connection::open_with_flags(
             self.db_path(name),
             OpenFlags::SQLITE_OPEN_READ_ONLY,
@@ -261,6 +263,13 @@ impl IndexSession {
         .unwrap();
         connection
             .execute_batch("CREATE VIRTUAL TABLE temp.vocabulary USING fts5vocab(main, nodes_fts, instance)")
+            .unwrap();
+        let raw_terms = connection
+            .prepare("SELECT term, count(DISTINCT doc), count(*) FROM vocabulary GROUP BY term ORDER BY term")
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
             .unwrap();
         let tokens = connection
             .prepare(
@@ -279,14 +288,18 @@ impl IndexSession {
                  WHERE nodes_fts MATCH ?1 ORDER BY rank, n.qualified_name",
             )
             .unwrap();
-        let rankings = ["name:value", "body:retention"].map(|term| {
+        let rankings = terms.map(|term| {
             search
                 .query_map([term], |row| Ok((row.get(0)?, row.get(1)?)))
                 .unwrap()
                 .collect::<Result<Vec<_>, _>>()
                 .unwrap()
         });
-        FtsContents { tokens, rankings }
+        FtsContents {
+            raw_terms,
+            tokens,
+            rankings,
+        }
     }
 
     fn check_adr_failure(&mut self, repo: &Path, name: &str) {
@@ -322,11 +335,11 @@ impl IndexSession {
         self.check_route(&logs, Some(("staged", "full")));
         assert!(logs.contains("reason=adr_migrate_failed"), "{logs}");
         assert!(!logs.contains("msg=pipeline.full_build_driver"), "{logs}");
-        assert_eq!(
+        assert!(!logs.contains("msg=pipeline.stage_publish"), "{logs}");
+        assert!(
             logs.contains(
                 "msg=pipeline.source_publish implementation=rust staged_rc=-2"
             ),
-            self.driver_override.is_none(),
             "{logs}"
         );
         assert_eq!(self.state(name), before);
@@ -349,6 +362,7 @@ impl Drop for IndexSession {
 
 #[derive(Debug, PartialEq)]
 struct FtsContents {
+    raw_terms: Vec<(String, i64, i64)>,
     tokens: Vec<String>,
     rankings: [Vec<(String, f64)>; 2],
 }
@@ -421,13 +435,8 @@ fn default_rust_routing_preserves_native_update_paths_and_generation() {
         },
     ];
 
-    // The release archive omits the legacy full-build and publication drivers.
-    // It can still compare C and Rust routing against the same Rust writers.
-    let c_driver = (option_env!("MORI_WITHOUT_C_INDEX_DRIVERS") != Some("1"))
-        .then_some("c");
-    let mut native =
-        IndexSession::new(fixture.0.join("control"), Some("c"), c_driver);
-    let mut rust = IndexSession::new(fixture.0.join("candidate"), None, None);
+    let mut native = IndexSession::new(fixture.0.join("control"), Some("c"));
+    let mut rust = IndexSession::new(fixture.0.join("candidate"), None);
     let mut previous_native = String::new();
     let mut previous_rust = String::new();
     let mut project: Option<String> = None;
@@ -444,16 +453,14 @@ fn default_rust_routing_preserves_native_update_paths_and_generation() {
             native.index(&repo, &step);
         let (rust_name, rust_generation, rust_routes) = rust.index(&repo, &step);
         assert_eq!(rust_name, name);
-        let native_fts = native.fts(&name);
+        let terms = ["name:value", "body:retention"];
+        let native_fts = native.fts(&name, terms);
         assert!(!native_fts.tokens.is_empty());
         assert!(native_fts.rankings.iter().all(|rows| !rows.is_empty()));
-        assert_eq!(rust.fts(&name), native_fts);
+        assert_eq!(rust.fts(&name, terms), native_fts);
         if step.decision == Some(("staged", "closure")) {
-            let mut clean = IndexSession::new(
-                fixture.0.join("clean"),
-                Some("unrecognized"),
-                c_driver.map(|_| "unrecognized"),
-            );
+            let mut clean =
+                IndexSession::new(fixture.0.join("clean"), Some("unrecognized"));
             let (clean_name, clean_generation, _) = clean.index(&repo, &fresh);
             assert_eq!(clean_name, name);
             let (_, clean_after_noop, _) = clean.index(&repo, &steps[1]);
@@ -477,13 +484,8 @@ fn default_rust_routing_preserves_native_update_paths_and_generation() {
         previous_rust = rust_generation;
     }
 
-    if c_driver.is_none() {
-        return;
-    }
-
     let stopped = rust.command().args(["daemon", "stop"]).output().unwrap();
     assert!(stopped.status.success(), "{stopped:?}");
-    rust.driver_override = c_driver;
     rust.rust_manifest = true;
     fs::write(
         repo.join("schema.graphqls"),
@@ -497,4 +499,138 @@ fn default_rust_routing_preserves_native_update_paths_and_generation() {
     assert_eq!(fallback_routes.len(), 3);
     assert_eq!(fallback_routes, native_routes);
     assert_eq!(rust.graph(&name), native.graph(&name));
+}
+
+#[test]
+fn repeated_closure_publications_refresh_fts_from_live_nodes() {
+    let fixture = Fixture::new();
+    let repo = fixture.0.join("source");
+    fs::create_dir_all(repo.join("lib")).unwrap();
+    fs::create_dir_all(repo.join("docs")).unwrap();
+    fs::write(
+        repo.join("lib/math.ts"),
+        r#"export function add(a: number, b: number): number { return a + b }
+export function sum(xs: number[]): number { return xs.reduce(add, 0) }
+"#,
+    )
+    .unwrap();
+    fs::write(
+        repo.join("lib/stats.test.ts"),
+        "import { mean } from './stats';
+test('mean', () => { expect(mean([1, 2, 3])).toBe(2) })
+",
+    )
+    .unwrap();
+    fs::write(
+        repo.join("docs/guide.md"),
+        "# Guide
+
+## Stats
+
+Use `mean` from `lib/stats.ts`.
+
+## Math
+
+`sum` folds with `add`.
+",
+    )
+    .unwrap();
+    let original = r#"import { sum } from "./math"
+export function mean(xs: number[]): number {
+  return xs.length ? sum(xs) / xs.length : 0
+}
+export class Summary {
+  constructor(private xs: number[]) {}
+  mean(): number { return mean(this.xs) }
+}
+function total(xs: number[]): number { return sum(xs) }
+"#;
+    let edited =
+        original.replace("sum(xs) / xs.length", "total(xs) / xs.length");
+    let path = repo.join("lib/stats.ts");
+    fs::write(&path, original).unwrap();
+
+    let run = |session: &mut IndexSession| {
+        let output = session.run_index(&repo);
+        assert!(output.status.success(), "{output:?}");
+        let reply: serde_json::Value =
+            serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(reply["status"], "indexed", "{reply}");
+        (
+            reply["project"].as_str().unwrap().to_owned(),
+            session.take_worker_logs(),
+        )
+    };
+    let mut warm = IndexSession::new(fixture.0.join("warm"), None);
+    let (project, _) = run(&mut warm);
+    let terms = ["docs", "guide"];
+
+    for (i, source) in [edited.as_str(), original].into_iter().enumerate() {
+        fs::write(&path, source).unwrap();
+        let (_, logs) = run(&mut warm);
+        assert!(
+            logs.contains("msg=incremental.route route=closure_repair"),
+            "{logs}"
+        );
+        assert_eq!(
+            logs.matches(
+                "msg=store.fts_rebuild implementation=rust mode=closure"
+            )
+            .count(),
+            1,
+            "{logs}"
+        );
+
+        let mut clean =
+            IndexSession::new(fixture.0.join(format!("clean-{i}")), None);
+        let (clean_project, _) = run(&mut clean);
+        assert_eq!(project, clean_project);
+        let expected = clean.fts(&project, terms);
+        assert!(expected.rankings.iter().all(|rows| !rows.is_empty()));
+        assert_eq!(warm.fts(&project, terms), expected);
+
+        let (_, logs) = run(&mut warm);
+        assert!(
+            logs.contains("msg=incremental.noop reason=semantic_manifest_equal"),
+            "{logs}"
+        );
+        assert!(!logs.contains("msg=store.fts_rebuild"), "{logs}");
+        assert_eq!(warm.fts(&project, terms), expected);
+    }
+
+    let db_path = warm.db_path(&project);
+    let db = Connection::open(&db_path).unwrap();
+    db.execute_batch("DROP TABLE nodes_fts_config").unwrap();
+    drop(db);
+    let previous_generation = warm.state(&project);
+    let previous_db = fs::read(&db_path).unwrap();
+    fs::write(&path, &edited).unwrap();
+    let failed = warm.run_index(&repo);
+    let response = [failed.stdout.as_slice(), failed.stderr.as_slice()]
+        .into_iter()
+        .flat_map(|stream| stream.split(|&byte| byte == b'\n'))
+        .filter_map(|line| {
+            serde_json::from_slice::<serde_json::Value>(line).ok()
+        })
+        .find(|reply| reply["status"].is_string())
+        .unwrap_or_else(|| panic!("missing failure response: {failed:?}"));
+    assert_eq!(response["status"], "persist_failed", "{failed:?}");
+    let logs = warm.take_worker_logs();
+    assert!(
+        logs.contains("msg=incremental.route route=closure_repair"),
+        "{logs}"
+    );
+    assert!(
+        logs.lines().any(|line| {
+            line.contains("msg=publish.fts_failed")
+                && line.contains("phase=refresh")
+                && line.contains("vtable_constructor_failed:_nodes_fts")
+        }),
+        "{logs}"
+    );
+    assert_eq!(warm.state(&project), previous_generation);
+    assert!(
+        fs::read(&db_path).unwrap() == previous_db,
+        "serving DB bytes changed"
+    );
 }

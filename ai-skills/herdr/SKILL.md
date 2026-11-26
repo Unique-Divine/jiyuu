@@ -15,6 +15,8 @@ order and paths.
 
 For requests to flatten tabs or put one agent per tab, use the tested local
 command described in [local-machine.md](local-machine.md#flatten-agent-tabs).
+For requests to get tabs ready for a phone, read
+[mobile-layout.md](mobile-layout.md) before choosing a chat limit or moving panes.
 
 Start configuration questions with the commented managed file
 `$DOTFILES/herdr-cfg/config.toml`. It backs

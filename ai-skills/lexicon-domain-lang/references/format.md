@@ -46,7 +46,7 @@ _See_ [Delivery states](docs/delivery.md)
   - `_Also called_` lists genuine aliases. Optional.
   - `_Avoid_` lists familiar wording the project discourages. Optional.
   - `_See_` links to specs, ADRs, docs, or source symbols. For source
-    references that resolve in the code graph, see [Graph Links](graph.md).
+    references that resolve in the code graph, see [Graph Links](../workflows/graph.md).
   - `_Overrides_:` a link to the parent lexicon, when this context gives a
     parent's term a different meaning. Optional and rare.
 - **Never Say.** Words ruled out that have no single replacement, each with

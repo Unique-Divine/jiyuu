@@ -1,15 +1,12 @@
 //! Read a published Mori database through a single SQLite snapshot.
 
 use std::collections::BTreeMap;
-use std::ops::ControlFlow;
 use std::path::Path;
 
 use rusqlite::types::{
     FromSql, FromSqlError, FromSqlResult, ToSqlOutput, ValueRef,
 };
-use rusqlite::{
-    Connection, OpenFlags, OptionalExtension, Row, params_from_iter,
-};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, Row};
 
 pub(crate) type Cells = BTreeMap<String, Cell>;
 
@@ -96,22 +93,6 @@ pub(crate) struct ProjectIdentity {
 pub(crate) struct ProjectMetadata {
     pub(crate) root_path: Option<Vec<u8>>,
     pub(crate) indexed_at: Option<Vec<u8>>,
-}
-
-pub(crate) struct FileOutlineQuery<'a> {
-    pub(crate) project: &'a [u8],
-    pub(crate) path: &'a [u8],
-    pub(crate) labels: &'a [&'a [u8]],
-    pub(crate) limit: i32,
-    pub(crate) offset: i32,
-}
-
-pub(crate) struct FileOutlineRow<'a> {
-    pub(crate) name: &'a [u8],
-    pub(crate) label: &'a [u8],
-    pub(crate) qualified_name: &'a [u8],
-    pub(crate) start_line: i32,
-    pub(crate) end_line: i32,
 }
 
 #[derive(Clone, Copy)]
@@ -235,67 +216,6 @@ impl Store {
             count("SELECT COUNT(*) FROM nodes WHERE project = ?1"),
             count("SELECT COUNT(*) FROM edges WHERE project = ?1"),
         )
-    }
-
-    pub(crate) fn file_outline(
-        &self,
-        query: FileOutlineQuery<'_>,
-        mut emit: impl FnMut(FileOutlineRow<'_>) -> ControlFlow<i32>,
-    ) -> rusqlite::Result<ControlFlow<i32, i32>> {
-        let mut filter = String::from(
-            " FROM nodes WHERE project = ? AND file_path = ?
-              AND label NOT IN ('Module','Package','File','Folder','Project')",
-        );
-        if !query.labels.is_empty() {
-            let labels = vec!["?"; query.labels.len()].join(",");
-            filter.push_str(&format!(" AND label IN ({labels})"));
-        }
-        // The C handler passes normalized paths, which can contain bytes
-        // outside UTF-8. Bind them as SQLite TEXT without transcoding.
-        let mut binds: Vec<_> = [query.project, query.path]
-            .into_iter()
-            .chain(query.labels.iter().copied())
-            .map(|bytes| ToSqlOutput::Borrowed(ValueRef::Text(bytes)))
-            .collect();
-        let total: i64 = self.0.query_row(
-            &format!("SELECT COUNT(*){filter}"),
-            params_from_iter(&binds),
-            |row| row.get(0),
-        )?;
-        let sql = format!(
-            "SELECT CAST(name AS TEXT), CAST(label AS TEXT), CAST(qualified_name AS TEXT),
-                    COALESCE(CAST(start_line AS INTEGER), 0), COALESCE(CAST(end_line AS INTEGER), 0)
-             {filter}
-             ORDER BY start_line, end_line, label COLLATE BINARY,
-                      name COLLATE BINARY, qualified_name COLLATE BINARY, id
-             LIMIT ? OFFSET ?"
-        );
-        binds.push(ToSqlOutput::Borrowed(ValueRef::Integer(query.limit.into())));
-        binds.push(ToSqlOutput::Borrowed(ValueRef::Integer(
-            query.offset.into(),
-        )));
-        let mut statement = self.0.prepare(&sql)?;
-        let mut rows = statement.query(params_from_iter(&binds))?;
-        while let Some(row) = rows.next()? {
-            let field = |index| -> rusqlite::Result<&[u8]> {
-                let value = row.get_ref(index)?;
-                Ok(match value {
-                    ValueRef::Text(bytes) => bytes,
-                    _ => &[],
-                })
-            };
-            let result = emit(FileOutlineRow {
-                name: field(0)?,
-                label: field(1)?,
-                qualified_name: field(2)?,
-                start_line: row.get::<_, i64>(3)? as i32,
-                end_line: row.get::<_, i64>(4)? as i32,
-            });
-            if let ControlFlow::Break(status) = result {
-                return Ok(ControlFlow::Break(status));
-            }
-        }
-        Ok(ControlFlow::Continue(total as i32))
     }
 
     pub(crate) fn schema_counts(

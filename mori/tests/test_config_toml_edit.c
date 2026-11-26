@@ -1729,7 +1729,73 @@ TEST(config_toml_remove_self_heals_orphan_opening_marker_issue1558) {
     PASS();
 }
 
+#ifdef _WIN32
+static int cte_windows_legacy_remove(const char *path, const char *before, int result,
+                                     const char *expected) {
+    if (before) {
+        FILE *file = cbm_fopen(path, "wb");
+        ASSERT_NOT_NULL(file);
+        size_t written = fwrite(before, 1U, strlen(before), file);
+        ASSERT_EQ(fclose(file), 0);
+        ASSERT_EQ(written, strlen(before));
+    }
+    ASSERT_EQ(cbm_toml_remove_legacy_table(path, "mcp_servers.cbm", CTE_BEGIN, CTE_END), result);
+    if (expected) {
+        FILE *file = cbm_fopen(path, "rb");
+        ASSERT_NOT_NULL(file);
+        char actual[256];
+        size_t count = fread(actual, 1U, sizeof(actual), file);
+        int read_error = ferror(file);
+        int close_error = fclose(file);
+        size_t expected_length = strlen(expected);
+        ASSERT_EQ(read_error, 0);
+        ASSERT_EQ(close_error, 0);
+        ASSERT_EQ(count, expected_length);
+        ASSERT_MEM_EQ(actual, expected, expected_length);
+    } else {
+        ASSERT_FALSE(cbm_file_exists(path));
+    }
+    return 0;
+}
+
+TEST(config_toml_windows_legacy_path_byte_limits) {
+    const char unrelated[] = "key = 1\n";
+    const char owned[] = "[mcp_servers.cbm]\ncommand = 'codebase-memory-mcp.exe'\n";
+    const char foreign[] = "[mcp_servers.cbm]\ncommand = 'foreign'\n";
+    const char managed[] = "# BEGIN codebase-memory-mcp\n"
+                           "[mcp_servers.cbm]\ncommand = 'foreign'\n"
+                           "# END codebase-memory-mcp\n";
+    const struct {
+        size_t length;
+        const char *before;
+        int result;
+        const char *after;
+    } cases[] = {
+        {4095U, NULL, 0, NULL},
+        {4096U, NULL, -1, NULL},
+        {4095U, unrelated, 0, unrelated},
+        {4096U, unrelated, -1, unrelated},
+        {4096U, managed, 0, managed},
+        {4096U, foreign, 1, foreign},
+        {4088U, owned, 0, ""},
+        {4089U, owned, -1, owned},
+    };
+    for (size_t i = 0U; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        th_windows_long_path_t fixture = {0};
+        ASSERT_EQ(th_windows_long_path_init(&fixture, cases[i].length), 0);
+        int result = cte_windows_legacy_remove(fixture.path, cases[i].before, cases[i].result,
+                                               cases[i].after);
+        ASSERT_EQ(th_windows_long_path_cleanup(&fixture), 0);
+        ASSERT_EQ(result, 0);
+    }
+    PASS();
+}
+#endif
+
 SUITE(config_toml_edit) {
+#ifdef _WIN32
+    RUN_TEST(config_toml_windows_legacy_path_byte_limits);
+#endif
     RUN_TEST(config_toml_remove_self_heals_orphan_closing_marker_issue1558);
     RUN_TEST(config_toml_remove_self_heals_orphan_opening_marker_issue1558);
     RUN_TEST(config_toml_rejects_stale_content_and_identity);

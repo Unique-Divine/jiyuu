@@ -13,9 +13,10 @@ FIXTURE=''
 new_fixture() {
     CASES=$((CASES + 1))
     FIXTURE="$TEST_TMPDIR/case-$CASES"
-    mkdir -p "$FIXTURE/scripts" "$FIXTURE/graph-ui/src" "$FIXTURE/src/ui"
+    mkdir -p "$FIXTURE/scripts" "$FIXTURE/graph-ui/src" "$FIXTURE/src/ui" "$FIXTURE/jiyuu-mori/src/ui"
     cp "$ROOT/scripts/security-ui.sh" "$FIXTURE/scripts/security-ui.sh"
-    printf 'static const char *bind_address = "127.0.0.1";\n' > "$FIXTURE/src/ui/httpd.c"
+    printf 'socket.bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, port).into())?;\n' \
+        > "$FIXTURE/jiyuu-mori/src/ui/http_transport.rs"
     printf '// Local request handlers.\n' > "$FIXTURE/src/ui/http_server.c"
 }
 
@@ -102,6 +103,19 @@ last_file=$(find "$FIXTURE/graph-ui/src" -type f -name '*.ts' -exec grep -lE 'ht
 last_relative="${last_file#"$FIXTURE/graph-ui/src/"}"
 source_url "$last_relative" 'https://example.invalid/after-twenty'
 expect_blocked 'a forbidden runtime URL after the twentieth file is inspected' "$last_relative"
+
+new_fixture
+printf 'socket.bind(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, port).into())?;\n' \
+    >> "$FIXTURE/jiyuu-mori/src/ui/http_transport.rs"
+if bash "$FIXTURE/scripts/security-ui.sh" > "$FIXTURE/result.log" 2>&1; then
+    printf 'FAIL: an additional wildcard bind must fail\n'
+    FAILED=$((FAILED + 1))
+elif grep -Fq 'BLOCKED: Expected one IPv4 loopback bind' "$FIXTURE/result.log"; then
+    printf 'PASS: an additional wildcard bind is rejected\n'
+else
+    cat "$FIXTURE/result.log"
+    FAILED=$((FAILED + 1))
+fi
 
 printf '%s cases, %s failed\n' "$CASES" "$FAILED"
 [[ "$FAILED" -eq 0 ]]

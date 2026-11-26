@@ -1,0 +1,16 @@
+[package]
+name = "mori-native-sys"
+version = "0.14.0-dev"
+edition = "2024"
+rust-version = "1.89"
+description = "Internal build support for Mori's native archive"
+license = "MIT"
+publish = false
+links = "mori_c"
+
+[features]
+# Keep workspace-wide checks possible without a C toolchain or grammars.
+link-native = ["dep:serde_json"]
+
+[build-dependencies]
+serde_json = { version = "1.0.151", optional = true }

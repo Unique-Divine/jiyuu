@@ -361,67 +361,10 @@ static const char *dk_expand(dk_t *d, const dk_var_t *vars, const char *text, dk
     return out;
 }
 
-/* Only characters an image reference can hold (name, :tag, @digest) -- a
- * template's placeholder (`<.Values.image>`, `<tpl>`) or an expression is
- * no image. */
-static bool dk_ref_chars(const char *ref) {
-    for (const char *p = ref; *p; p++) {
-        if (!isalnum((unsigned char)*p) && !strchr("._-/:@+", *p)) {
-            return false;
-        }
-    }
-    return ref[0] != '\0';
-}
-
-/* The registry of a reference that names no host. */
+/* Implemented by the required native-engine ABI archive. */
+extern bool mori_docker_image_identity(const char *ref, char *repo, size_t repo_sz,
+                                       char *registry, size_t registry_sz);
 static const char DK_REGISTRY_UNKNOWN[] = "unknown";
-
-/* The repository identity of image reference `ref` into out, the registry
- * its host names into reg. A reference without a host is the repository as
- * written, its registry unknown: docker.io is only Docker's default -- a
- * short-name search list (Podman, CRI-O) or a local-only build tag resolves
- * elsewhere or nowhere. */
-static bool dk_normalize(const char *ref, char *out, size_t sz, char *reg, size_t reg_sz) {
-    if (!dk_ref_chars(ref)) {
-        return false;
-    }
-    char r[CBM_SZ_512];
-    snprintf(r, sizeof(r), "%s", ref);
-    char *at = strchr(r, '@');
-    if (at) {
-        *at = '\0';
-    }
-    char *slash = strrchr(r, '/');
-    char *colon = strchr(slash ? slash : r, ':');
-    if (colon) {
-        *colon = '\0';
-    }
-    if (!r[0] || strchr(r, ' ') || strchr(r, '$')) {
-        return false;
-    }
-    char *first_end = strchr(r, '/');
-    size_t fl = first_end ? (size_t)(first_end - r) : 0;
-    bool host = first_end && (memchr(r, '.', fl) || memchr(r, ':', fl) ||
-                              (fl == strlen("localhost") && strncmp(r, "localhost", fl) == 0));
-    if (!host) {
-        snprintf(out, sz, "%s", r);
-        snprintf(reg, reg_sz, "%s", DK_REGISTRY_UNKNOWN);
-        return true;
-    }
-    const char *rest = first_end + SKIP_ONE;
-    bool hub =
-        (fl == strlen("docker.io") && strncmp(r, "docker.io", fl) == 0) ||
-        (fl == strlen("index.docker.io") && strncmp(r, "index.docker.io", fl) == 0) ||
-        (fl == strlen("registry-1.docker.io") && strncmp(r, "registry-1.docker.io", fl) == 0);
-    if (hub) {
-        snprintf(out, sz, "docker.io/%s%s", strchr(rest, '/') ? "" : "library/", rest);
-        snprintf(reg, reg_sz, "docker.io");
-    } else {
-        snprintf(out, sz, "%.*s/%s", (int)fl, r, rest);
-        snprintf(reg, reg_sz, "%.*s", (int)fl, r);
-    }
-    return true;
-}
 
 /* An earlier stage of this file: its name, or a stage index. */
 static bool dk_is_stage(const dk_t *d, const char *ref) {
@@ -462,144 +405,11 @@ static int dk_stage_of(const dk_t *d, const char *ref) {
     return found;
 }
 
-/* A path component: [a-z0-9]+ joined by `.`, `_`, `__` or `-`+. */
-static bool dk_ref_component(const char *s, size_t n) {
-    if (n == 0 || !isalnum((unsigned char)s[0]) || !isalnum((unsigned char)s[n - SKIP_ONE])) {
-        return false;
-    }
-    for (size_t i = 0; i < n; i++) {
-        unsigned char c = (unsigned char)s[i];
-        if (isupper(c)) {
-            return false;
-        }
-        if (isalnum(c)) {
-            continue;
-        }
-        size_t run = SKIP_ONE;
-        while (i + run < n && s[i + run] == c) {
-            run++;
-        }
-        if (!((c == '.' && run == SKIP_ONE) || (c == '_' && run <= PAIR_LEN) || c == '-')) {
-            return false;
-        }
-        i += run - SKIP_ONE;
-    }
-    return true;
-}
-
-/* A registry host: DNS labels (`.`-joined), or an IPv6 literal, with an
- * optional :port. */
-static bool dk_ref_domain(const char *s, size_t n) {
-    const char *colon = memchr(s, ':', n);
-    if (n && s[0] == '[') {
-        const char *close = memchr(s, ']', n);
-        colon = close && (size_t)(close - s) + SKIP_ONE < n ? close + SKIP_ONE : NULL;
-        if (!close) {
-            return false;
-        }
-    }
-    size_t hl = colon ? (size_t)(colon - s) : n;
-    if (hl == 0) {
-        return false;
-    }
-    if (s[0] != '[') {
-        for (size_t i = 0; i < hl; i++) {
-            unsigned char c = (unsigned char)s[i];
-            if (!isalnum(c) && c != '.' && c != '-') {
-                return false;
-            }
-        }
-    }
-    for (size_t i = hl + SKIP_ONE; colon && i < n; i++) {
-        if (!isdigit((unsigned char)s[i])) {
-            return false;
-        }
-    }
-    return !colon || hl + SKIP_ONE < n;
-}
-
-bool cbm_image_ref_valid(const char *ref) {
-    if (!ref || !ref[0]) {
-        return false;
-    }
-    size_t n = strlen(ref);
-    const char *at = strchr(ref, '@');
-    if (at) {
-        const char *colon = strchr(at, ':');
-        if (!colon || colon == at + SKIP_ONE || strlen(colon + SKIP_ONE) < CBM_SZ_32) {
-            return false;
-        }
-        for (const char *p = at + SKIP_ONE; p < colon; p++) {
-            if (!isalnum((unsigned char)*p) && !strchr("+.-_", *p)) {
-                return false;
-            }
-        }
-        for (const char *p = colon + SKIP_ONE; *p; p++) {
-            if (!isxdigit((unsigned char)*p)) {
-                return false;
-            }
-        }
-        n = (size_t)(at - ref);
-    }
-    /* the tag: after the last ':' that follows the last '/' */
-    size_t name_end = n;
-    for (size_t i = n; i > 0; i--) {
-        if (ref[i - SKIP_ONE] == '/') {
-            break;
-        }
-        if (ref[i - SKIP_ONE] == ':') {
-            name_end = i - SKIP_ONE;
-            break;
-        }
-    }
-    if (name_end < n) {
-        size_t tl = n - name_end - SKIP_ONE;
-        const char *tag = ref + name_end + SKIP_ONE;
-        if (tl == 0 || tl > CBM_SZ_128 || !(isalnum((unsigned char)tag[0]) || tag[0] == '_')) {
-            return false;
-        }
-        for (size_t i = 0; i < tl; i++) {
-            if (!isalnum((unsigned char)tag[i]) && !strchr("_.-", tag[i])) {
-                return false;
-            }
-        }
-    }
-    const char *p = ref;
-    const char *end = ref + name_end;
-    const char *slash = memchr(p, '/', (size_t)(end - p));
-    if (slash) {
-        size_t fl = (size_t)(slash - p);
-        bool host = memchr(p, '.', fl) || memchr(p, ':', fl) ||
-                    (fl == strlen("localhost") && memcmp(p, "localhost", fl) == 0);
-        if (host) {
-            if (!dk_ref_domain(p, fl)) {
-                return false;
-            }
-            p = slash + SKIP_ONE;
-        }
-    }
-    if (p >= end) {
-        return false;
-    }
-    while (p < end) {
-        const char *s = memchr(p, '/', (size_t)(end - p));
-        size_t cl = s ? (size_t)(s - p) : (size_t)(end - p);
-        if (!dk_ref_component(p, cl)) {
-            return false;
-        }
-        p += cl + (s ? SKIP_ONE : 0);
-        if (s && p >= end) {
-            return false;
-        }
-    }
-    return true;
-}
-
 int64_t cbm_pipeline_image_node(cbm_pipeline_ctx_t *ctx, const char *ref) {
     char repo[CBM_SZ_512];
     char reg[CBM_SZ_512];
     if (!ref || dk_ieq(ref, "scratch") ||
-        !dk_normalize(ref, repo, sizeof(repo), reg, sizeof(reg))) {
+        !mori_docker_image_identity(ref, repo, sizeof(repo), reg, sizeof(reg))) {
         return 0;
     }
     char qn[CBM_SZ_1K];
@@ -2620,7 +2430,7 @@ static int64_t dk_hub_image(cbm_pipeline_ctx_t *ctx, const char *repo, const cha
     snprintf(qn, sizeof(qn), "__image__%s", name);
     char same[CBM_SZ_1K];
     char reg[CBM_SZ_512];
-    if (!dk_normalize(repo, same, sizeof(same), reg, sizeof(reg))) {
+    if (!mori_docker_image_identity(repo, same, sizeof(same), reg, sizeof(reg))) {
         snprintf(reg, sizeof(reg), "%s", DK_REGISTRY_UNKNOWN);
     }
     char esc_r[CBM_SZ_1K];

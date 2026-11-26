@@ -631,6 +631,23 @@ int cbm_cmd_update(int argc, char **argv);
 /* config: get/set/list/reset runtime config values. */
 int cbm_cmd_config(int argc, char **argv);
 
+typedef struct {
+    const char *key;
+    const char *default_value;
+    const char *help;
+} cbm_config_cli_key_t;
+
+const cbm_config_cli_key_t *cbm_config_cli_keys(size_t *count);
+cbm_config_t *cbm_config_cli_open(void);
+const char *cbm_config_cli_read(cbm_config_t *cfg, const cbm_config_cli_key_t *key,
+                                char *ui_value, size_t ui_value_size);
+/* NULL value resets the key. Returns -1 on failure (diagnostic already
+ * emitted), 0 on success, or 1 on success when a daemon restart is needed. */
+int cbm_config_cli_write(cbm_config_t *cfg, const cbm_config_cli_key_t *key, const char *value);
+/* Use the caller's C streams, including Windows descriptor redirection. */
+size_t cbm_config_cli_output(bool error_stream, const unsigned char *bytes, size_t len);
+int cbm_config_cli_flush(bool error_stream);
+
 /* hook-augment: stdin-driven Claude Code PreToolUse augmenter.
  * Reads the hook JSON from stdin and emits hookSpecificOutput.additionalContext
  * with search_graph hits for Grep/Glob/Bash search calls. NEVER blocks: every failure

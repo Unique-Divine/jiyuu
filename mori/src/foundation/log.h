@@ -74,6 +74,9 @@ CBMLogFormat cbm_log_get_format(void);
  */
 void cbm_log(CBMLogLevel level, const char *msg, ...);
 
+/* Fixed-signature entry point for the Rust activation implementation. */
+void cbm_log_activation_ancestor_group_writable(const char *path, const char *mode);
+
 /* Convenience macros. */
 #define cbm_log_debug(msg, ...) cbm_log(CBM_LOG_DEBUG, msg, ##__VA_ARGS__, NULL)
 #define cbm_log_info(msg, ...) cbm_log(CBM_LOG_INFO, msg, ##__VA_ARGS__, NULL)

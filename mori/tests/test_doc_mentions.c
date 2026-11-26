@@ -3327,6 +3327,14 @@ TEST(doc_mentions_msbuild_conditions) {
         {"'$(Yes)' == 'on'", 'T'},  /* booleans compare as booleans */
         {"'$(One)' == '1.0'", 'T'}, /* numbers as numbers */
         {"'$(One)' == '2'", 'F'},
+        {"'-.0' == '+0'", 'T'},
+        {"'+001.0200' == '1.02'", 'T'},
+        {"'1000000000000000' == '1000000000000001'", 'U'},
+        {"'1e0' == '1'", 'U'},
+        {"'0x10' == '16'", 'U'},
+        {"'$(MSBuildThisFileFullPath)' == '$(MSBuildProjectFullPath)'", 'T'},
+        {"'$(MSBuildThisFileFullPath)' == ''", 'F'},
+        {"'$(MSBuildThisFileFullPath)' == 'P.csproj'", 'U'},
         /* `and` binds tighter than `or`, parentheses group */
         {"'e' == 'e' or 'a' == 'b' and 'c' == 'd'", 'T'},
         {"('e' == 'e' or 'a' == 'b') and 'c' == 'd'", 'F'},
@@ -3344,14 +3352,18 @@ TEST(doc_mentions_msbuild_conditions) {
         {"'@(Compile)' == ''", 'U'},
         {"Exists('x.props')", 'U'},
         {"'a' == 'b' and Exists('x.props')", 'F'},
+        {"TRUE Or Exists(Nested(')'))", 'T'},
         {"'$(One)' > '0'", 'U'},
         /* white space a property's element was written with */
         {"'$(Spaced)' == 'x'", 'U'},
         {"'$(Spaced)' == 'y'", 'F'},
+        {"' yes '", 'U'},
         /* no condition this reader can parse */
         {"'a' == ", 'U'},
         {"('a' == 'a'", 'U'},
         {"'a' == 'a' 'b'", 'U'},
+        {"true or (false and )", 'U'},
+        {"true or_else false", 'U'},
     };
     for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
         cbm_msb_result_t r;
@@ -3369,6 +3381,22 @@ TEST(doc_mentions_msbuild_conditions) {
                    consistent ? "" : " (open and the count disagree)");
             FAIL("condition");
         }
+    }
+    for (int depth = 32; depth <= 33; depth++) {
+        char cond[33 + 4 + 33 + 1];
+        memset(cond, '(', (size_t)depth);
+        memcpy(cond + depth, "true", 4);
+        memset(cond + depth + 4, ')', (size_t)depth);
+        cond[2 * depth + 4] = '\0';
+        cbm_msb_result_t r;
+        ASSERT_TRUE(dm_cond_using(cond, &r));
+        bool applied = dm_has_using(&r, 'n', "Under.Condition");
+        bool open = r.open;
+        int unevaluable = r.unevaluable;
+        cbm_msb_result_free(&r);
+        ASSERT_EQ(applied, depth == 32);
+        ASSERT_EQ(open, depth == 33);
+        ASSERT_EQ(unevaluable, depth == 33 ? 1 : 0);
     }
     PASS();
 }
@@ -5779,10 +5807,24 @@ TEST(doc_mentions_scope_delta_rules) {
             FAIL("scope delta");
         }
     }
+    const char *extra_using = "using Acme.More;\n";
+    char based_before[512];
+    char based_after[512];
+    snprintf(based_before, sizeof(based_before), "%s%s", extra_using, base);
+    snprintf(based_after, sizeof(based_after), "%s%s%s", DM_DELTA_HEAD, extra_using,
+             DM_DELTA_OPEN DM_DELTA_RUN_INT DM_DELTA_RUN_STR DM_DELTA_SIZE DM_DELTA_CLOSE);
+    ASSERT_EQ(dm_delta(based_before, based_after, names, sizeof(names)), CBM_DOCLINK_DELTA_GLOBAL);
     /* A file that declares no type with a base list: its own usings scope
      * nothing but the file itself, which is re-extracted anyway. */
 #define DM_DELTA_PLAIN "namespace N\n{\n    public class W\n    {\n"
     const char *plain = DM_DELTA_HEAD DM_DELTA_PLAIN DM_DELTA_RUN_INT DM_DELTA_SIZE DM_DELTA_CLOSE;
+    char plain_before[512];
+    char plain_after[512];
+    snprintf(plain_before, sizeof(plain_before), "%s%s", extra_using, plain);
+    snprintf(plain_after, sizeof(plain_after), "%s%s%s", DM_DELTA_HEAD, extra_using,
+             DM_DELTA_PLAIN DM_DELTA_RUN_INT DM_DELTA_SIZE DM_DELTA_CLOSE);
+    ASSERT_EQ(dm_delta(plain_before, plain_after, names, sizeof(names)), CBM_DOCLINK_DELTA_LOCAL);
+    ASSERT_STR_EQ(names, "");
     struct {
         const char *what;
         const char *after;

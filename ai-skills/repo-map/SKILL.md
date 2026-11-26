@@ -3,7 +3,7 @@ name: repo-map
 description: >-
   Maps and routes between key repositories on my machine (boku, nibiru,
   nibi-geth, nibi-go-hm, nibi-ts-sdk, sai-web, sai-perps, open-sai, nibi-iac,
-  nibi-web, ud-web, and the in-tree Wasm runtime and Rust contracts). Use when
+  nibi-web, ud-web, OpenAI Codex CLI, and the in-tree Wasm runtime and Rust contracts). Use when
   the user asks which repo to look at, where a feature lives, how repos
   connect, how services are deployed (Terraform/IaC), when a task spans chain,
   EVM, indexer, SDK, frontend, and docs, or when the user asks about the
@@ -94,6 +94,9 @@ frontend and API integrations. This uses the "sai-keeper" GraphQL interface.
   - Boku, its `dotfiles` submodule, and Jiyuu keep one branch per machine: `ud/main` on the laptop and `ud/homebox` on homebox. Commit work in progress there, merge `origin/main` into it after a PR merges, and never check out `main` in the main checkouts. To move work to the other machine, merge one machine branch into the other.
 - `~/boku/jiyuu/mori`: **Mori.** Code graph source and release tooling. Use agent skill `mori-graph`.
   The older C fork checkout at `~/codebase-memory-mcp` is available for rollback and reference.
+- `~/codex`: **OpenAI Codex CLI upstream source**, `openai/codex`. Use
+  `codex-rs/` to inspect CLI behavior, including hooks and MCP. Clone with
+  `git clone git@github.com:openai/codex.git ~/codex`.
 - `~/ud-web`: **Personal site (Firebase Hosting).** Astro 7 + Tailwind. Blog
   content in `src/content/post/` (schema in `src/content.config.ts`). Site config
   `src/config.yaml`, nav `src/navigation.js`. Run `just dev`, build `just b`,

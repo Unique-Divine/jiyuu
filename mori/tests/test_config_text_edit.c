@@ -785,7 +785,43 @@ TEST(config_text_rejects_invalid_path_bytes) {
 }
 #endif
 
+#ifdef _WIN32
+static int cte_windows_path_boundary(const char *path, int accepted) {
+    const char owned[] = "owned\n";
+    const char original[] = "keep\n" CTE_BEGIN "\nold\n" CTE_END "\n";
+    const char updated[] = "keep\n" CTE_BEGIN "\nnew\n" CTE_END "\n";
+    ASSERT_EQ(cte_write_bytes(path, original, sizeof(original) - 1U), 0);
+    ASSERT_EQ(cbm_text_managed_block_status(path, CTE_BEGIN, CTE_END), accepted ? 0 : -1);
+    ASSERT_EQ(cbm_text_upsert_managed_block(path, CTE_BEGIN, CTE_END, "new\n"), accepted ? 0 : -1);
+    const char *after = accepted ? updated : original;
+    ASSERT(cte_assert_bytes(path, after, strlen(after)));
+
+    ASSERT_EQ(cte_write_bytes(path, owned, sizeof(owned) - 1U), 0);
+    ASSERT_EQ(cbm_text_remove_owned_document(path, owned), accepted ? 0 : -1);
+    if (accepted) {
+        ASSERT_FALSE(cbm_file_exists(path));
+    } else {
+        ASSERT(cte_assert_bytes(path, owned, sizeof(owned) - 1U));
+    }
+    return 0;
+}
+
+TEST(config_text_windows_path_byte_limit) {
+    for (size_t length = 4095U; length <= 4096U; length++) {
+        th_windows_long_path_t fixture = {0};
+        ASSERT_EQ(th_windows_long_path_init(&fixture, length), 0);
+        int result = cte_windows_path_boundary(fixture.path, length == 4095U);
+        ASSERT_EQ(th_windows_long_path_cleanup(&fixture), 0);
+        ASSERT_EQ(result, 0);
+    }
+    PASS();
+}
+#endif
+
 SUITE(config_text_edit) {
+#ifdef _WIN32
+    RUN_TEST(config_text_windows_path_byte_limit);
+#endif
     RUN_TEST(config_text_managed_insert_preserves_bom_comments_and_is_idempotent);
     RUN_TEST(config_text_managed_replace_preserves_crlf_surroundings);
     RUN_TEST(config_text_managed_no_final_newline_round_trip);

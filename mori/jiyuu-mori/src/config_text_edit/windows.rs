@@ -108,13 +108,18 @@ impl Identity {
     }
 }
 
+pub(super) fn check_path_len(path: &Path, suffix_len: usize) -> io::Result<()> {
+    const PATH_CAPACITY: usize = 4096;
+    if path.as_os_str().as_encoded_bytes().len() >= PATH_CAPACITY - suffix_len {
+        return Err(invalid("configuration path is too long"));
+    }
+    Ok(())
+}
+
 pub(super) struct Target(PathBuf);
 
 impl Target {
     pub(super) fn open(path: &Path) -> io::Result<Self> {
-        if path.as_os_str().as_encoded_bytes().len() >= 4096 {
-            return Err(invalid("configuration path is too long"));
-        }
         Ok(Self(path.to_owned()))
     }
 

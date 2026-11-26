@@ -27,7 +27,6 @@ enum {
     MCP_BFS_LIMIT = 100,            /* default per-direction trace budget (limit param raises) */
     MCP_BFS_LIMIT_MAX = 5000,       /* hard ceiling for the limit param (context-bomb guard) */
     MCP_DEFAULT_IMPACT_LIMIT = 200, /* detect_changes per-symbol rows; rollup stays complete */
-    MCP_SNIPPET_MAX_LINES = 500,    /* get_code_snippet line cap (whole-file Module guard) */
     MCP_N_DEFAULTS_2 = 2,
     MCP_URI_PREFIX = 7,      /* strlen("file://") */
     MCP_CONTENT_PREFIX = 15, /* strlen("Content-Length:") */
@@ -76,6 +75,7 @@ enum {
 #include "watcher/watcher.h"
 #include "foundation/mem.h"
 #include "foundation/mem_core.h"
+#include "foundation/sanitized.h"
 #include "foundation/hash_table.h"
 #include "foundation/dyn_array.h"
 #include "foundation/json_writer.h"
@@ -132,9 +132,6 @@ enum {
 #include <stdatomic.h>
 
 /* ── Constants ────────────────────────────────────────────────── */
-
-/* Default snippet fallback line count */
-#define SNIPPET_DEFAULT_LINES 50
 
 /* Idle store eviction: close cached project store after this many seconds
  * of inactivity to free SQLite memory during idle periods. */
@@ -3154,48 +3151,6 @@ static int nullable_strcmp(const char *a, const char *b) {
     return strcmp(a ? a : "", b ? b : "");
 }
 
-static int project_record_compare(const void *left, const void *right) {
-    const mcp_project_record_t *a = left;
-    const mcp_project_record_t *b = right;
-    int by_name = nullable_strcmp(a->name, b->name);
-    if (by_name != 0) {
-        return by_name;
-    }
-    int by_root = nullable_strcmp(a->root_path, b->root_path);
-    if (by_root != 0) {
-        return by_root;
-    }
-    return nullable_strcmp(a->db_file, b->db_file);
-}
-
-static cbm_mcp_project_page_builder_fn project_page_builder;
-
-void cbm_mcp_set_project_page_builder(cbm_mcp_project_page_builder_fn builder) {
-    project_page_builder = builder;
-}
-
-static void build_project_page(mcp_project_record_t *records, int count,
-                               cbm_mcp_project_page_t *page) {
-    if (project_page_builder) {
-        project_page_builder(records, count, page);
-        return;
-    }
-    if (count > 1) {
-        qsort(records, (size_t)count, sizeof(*records), project_record_compare);
-    }
-    if (page->limit < 1) {
-        page->limit = 1;
-    } else if (page->limit > 500) {
-        page->limit = 500;
-    }
-    if (page->offset < 0) {
-        page->offset = 0;
-    }
-    page->start = page->offset < count ? page->offset : count;
-    int remaining = count - page->start;
-    page->end = page->start + (page->limit < remaining ? page->limit : remaining);
-}
-
 typedef enum {
     PROJECT_RECORD_SKIP = 0,
     PROJECT_RECORD_OK = 1,
@@ -3340,31 +3295,6 @@ static bool populate_project_record(const char *dir_path, bool include_stats,
     return true;
 }
 
-static void add_project_record_json(yyjson_mut_doc *doc, yyjson_mut_val *arr,
-                                    const mcp_project_record_t *record, bool include_stats) {
-    yyjson_mut_val *p = yyjson_mut_obj(doc);
-    yyjson_mut_obj_add_strcpy(doc, p, "name", record->name);
-    yyjson_mut_obj_add_strcpy(doc, p, "root_path", record->root_path);
-    if (record->branch) {
-        yyjson_mut_obj_add_strcpy(doc, p, "branch", record->branch);
-    }
-    if (include_stats) {
-        yyjson_mut_obj_add_int(doc, p, "nodes", record->nodes);
-        yyjson_mut_obj_add_int(doc, p, "edges", record->edges);
-        yyjson_mut_obj_add_int(doc, p, "size_bytes", record->size_bytes);
-    }
-    yyjson_mut_arr_add_val(arr, p);
-}
-
-static cbm_mcp_project_list_renderer_fn project_list_renderer;
-static cbm_mcp_read_override_free_fn project_list_payload_free;
-
-void cbm_mcp_set_project_list_renderer(cbm_mcp_project_list_renderer_fn renderer,
-                                        cbm_mcp_read_override_free_fn release) {
-    project_list_renderer = release ? renderer : NULL;
-    project_list_payload_free = release;
-}
-
 void cbm_mcp_render_project_table(cbm_sb_t *sb, const cbm_mcp_project_record_t *records,
                                    int page_count, bool metadata_only, bool include_stats) {
     /* Stable union schema: branch is an explicit empty marker instead of
@@ -3431,185 +3361,89 @@ void cbm_mcp_render_project_table(cbm_sb_t *sb, const cbm_mcp_project_record_t *
     free(cells);
 }
 
-/* list_projects: scan cache directory for .db files.
- * Each project is a single .db file — no central registry needed. */
-static char *handle_list_projects(cbm_mcp_server_t *srv, const char *args) {
-    bool metadata_only = false;
-    yyjson_doc *args_doc = args ? yyjson_read(args, strlen(args), 0) : NULL;
-    yyjson_val *args_root = args_doc ? yyjson_doc_get_root(args_doc) : NULL;
-    yyjson_val *metadata_value =
-        args_root && yyjson_is_obj(args_root) ? yyjson_obj_get(args_root, "metadata_only") : NULL;
-    metadata_only = metadata_value && yyjson_is_true(metadata_value);
-    char *detail = cbm_mcp_get_string_arg(args, "detail");
-    /* `include_details` is the boolean spelling main shipped for the same
-     * request; both select the stats projection. */
-    bool include_stats = !metadata_only && ((detail && strcmp(detail, "stats") == 0) ||
-                                            cbm_mcp_get_bool_arg(args, "include_details"));
-    free(detail);
-    if (args_doc) {
-        yyjson_doc_free(args_doc);
+/* Rust owns the list request and its page. This handle keeps native directory,
+ * path, and database operations behind the platform abstraction. */
+struct cbm_mcp_project_catalog {
+    char path[CBM_SZ_1K];
+    cbm_dir_t *dir;
+    cbm_mcp_server_t *server;
+};
+
+cbm_mcp_project_catalog_t *cbm_mcp_project_catalog_open(cbm_mcp_server_t *server,
+                                                        char **error) {
+    cbm_mcp_project_catalog_t *catalog = malloc(sizeof(*catalog));
+    if (!catalog) {
+        *error = cbm_mcp_text_result("out of memory while listing projects", true);
+        return NULL;
     }
 
-    char dir_path[CBM_SZ_1K];
-    cache_dir(dir_path, sizeof(dir_path));
-
-    cbm_dir_t *d = cbm_opendir(dir_path);
-
-    if (!d) {
+    cache_dir(catalog->path, sizeof(catalog->path));
+    catalog->dir = cbm_opendir(catalog->path);
+    if (!catalog->dir) {
         char msg[CBM_SZ_1K];
         snprintf(msg, sizeof(msg),
                  "{\"error\":\"cannot read cache directory: %s\",\"hint\":"
                  "\"Check directory permissions or run index_repository first.\"}",
-                 dir_path);
-        return cbm_mcp_text_result(msg, true);
+                 catalog->path);
+        *error = cbm_mcp_text_result(msg, true);
+        free(catalog);
+        return NULL;
     }
+    catalog->server = server;
+    *error = NULL;
+    return catalog;
+}
 
-    mcp_project_record_t *records = NULL;
-    int record_count = 0;
-    int record_cap = 0;
-    bool oom = false;
-    bool cancelled = false;
+cbm_mcp_project_catalog_result_t cbm_mcp_project_catalog_next(
+    cbm_mcp_project_catalog_t *catalog, cbm_mcp_project_record_t *record) {
     cbm_dirent_t *entry;
-    while ((entry = cbm_readdir(d)) != NULL) {
+    while ((entry = cbm_readdir(catalog->dir)) != NULL) {
         const char *name = entry->name;
         if (!cbm_is_project_index_db(name)) {
             continue;
         }
-        if (project_scan_should_stop(srv, name)) {
-            cancelled = true;
-            break;
+        if (project_scan_should_stop(catalog->server, name)) {
+            return CBM_MCP_CATALOG_CANCELLED;
         }
         char full_path[CBM_SZ_2K];
-        snprintf(full_path, sizeof(full_path), "%s/%s", dir_path, name);
-        int64_t size_bytes = cbm_file_size(full_path);
-        if (size_bytes < 0) {
+        snprintf(full_path, sizeof(full_path), "%s/%s", catalog->path, name);
+        int64_t size = cbm_file_size(full_path);
+        if (size < 0) {
             continue;
         }
-        mcp_project_record_t record = {0};
-        project_record_status_t read_status =
-            read_project_record_identity(dir_path, name, size_bytes, &record);
-        if (read_status == PROJECT_RECORD_OOM) {
-            oom = true;
-            break;
+        project_record_status_t status =
+            read_project_record_identity(catalog->path, name, size, record);
+        if (status == PROJECT_RECORD_OOM) {
+            return CBM_MCP_CATALOG_FAILED;
         }
-        if (read_status != PROJECT_RECORD_OK) {
-            continue;
+        if (status == PROJECT_RECORD_OK) {
+            return CBM_MCP_CATALOG_RECORD;
         }
-        if (record_count == record_cap) {
-            int new_cap = record_cap ? record_cap * 2 : 16;
-            void *grown = realloc(records, (size_t)new_cap * sizeof(*records));
-            if (!grown) {
-                project_record_clear(&record);
-                oom = true;
-                break;
-            }
-            records = grown;
-            record_cap = new_cap;
-        }
-        records[record_count++] = record;
     }
-    cbm_closedir(d);
+    cbm_closedir(catalog->dir);
+    catalog->dir = NULL;
+    return CBM_MCP_CATALOG_END;
+}
 
-    if (oom || cancelled) {
-        for (int i = 0; i < record_count; i++) {
-            project_record_clear(&records[i]);
-        }
-        free(records);
-        return cbm_mcp_text_result(cancelled ? "list_projects cancelled for this request"
-                                             : "out of memory while listing projects",
-                                   true);
+cbm_mcp_project_catalog_result_t cbm_mcp_project_catalog_hydrate(
+    cbm_mcp_project_catalog_t *catalog, cbm_mcp_project_record_t *record, bool include_stats) {
+    if (mcp_request_cancelled(catalog->server)) {
+        return CBM_MCP_CATALOG_CANCELLED;
     }
-    cbm_mcp_project_page_t page = {
-        .limit = cbm_mcp_get_int_arg(args, "limit", 50),
-        .offset = cbm_mcp_get_int_arg(args, "offset", 0),
-    };
-    build_project_page(records, record_count, &page);
-    int start = page.start;
-    int end = page.end;
-    if (!metadata_only) {
-        for (int i = start; i < end; i++) {
-            /* Populating a row reopens its database and asks git for the
-             * branch, so the page is polled like the scan above. */
-            if (mcp_request_cancelled(srv)) {
-                cancelled = true;
-                break;
-            }
-            if (!populate_project_record(dir_path, include_stats, &records[i])) {
-                oom = true;
-                break;
-            }
-        }
-    }
-    if (oom || cancelled) {
-        for (int i = 0; i < record_count; i++) {
-            project_record_clear(&records[i]);
-        }
-        free(records);
-        return cbm_mcp_text_result(cancelled ? "list_projects cancelled for this request"
-                                             : "failed to populate project page",
-                                   true);
-    }
+    return populate_project_record(catalog->path, include_stats, record)
+               ? CBM_MCP_CATALOG_RECORD
+               : CBM_MCP_CATALOG_FAILED;
+}
 
-    bool wants_json = mcp_wants_json(args);
-    char *payload = NULL;
-    const mcp_project_record_t *page_records = end > start ? records + start : NULL;
-    if (project_list_renderer) {
-        payload = project_list_renderer(page_records, record_count, &page, metadata_only,
-                                        include_stats, wants_json);
-    } else if (wants_json) {
-        yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
-        yyjson_mut_val *root = yyjson_mut_obj(doc);
-        yyjson_mut_doc_set_root(doc, root);
-        yyjson_mut_val *arr = yyjson_mut_arr(doc);
-        for (int i = 0; i < end - start; i++) {
-            add_project_record_json(doc, arr, &page_records[i], include_stats);
-        }
+void cbm_mcp_project_catalog_release_record(cbm_mcp_project_record_t *record) {
+    project_record_clear(record);
+}
 
-        yyjson_mut_obj_add_val(doc, root, "projects", arr);
-        yyjson_mut_obj_add_int(doc, root, "total", record_count);
-        yyjson_mut_obj_add_int(doc, root, "offset", page.offset);
-        yyjson_mut_obj_add_int(doc, root, "limit", page.limit);
-        yyjson_mut_obj_add_int(doc, root, "returned", end - start);
-        yyjson_mut_obj_add_bool(doc, root, "has_more", end < record_count);
-        if (end < record_count) {
-            yyjson_mut_obj_add_int(doc, root, "next_offset", end);
-        }
-        if (record_count == 0) {
-            yyjson_mut_obj_add_str(
-                doc, root, "hint",
-                "No projects indexed. Call index_repository(repo_path=...) first.");
-        }
-        payload = yy_doc_to_str(doc);
-        yyjson_mut_doc_free(doc);
-    } else {
-        cbm_sb_t sb;
-        cbm_sb_init(&sb);
-        cbm_mcp_render_project_table(&sb, page_records, end - start, metadata_only, include_stats);
-        cbm_tree_scalar_int(&sb, "total", record_count);
-        cbm_tree_scalar_int(&sb, "returned", end - start);
-        cbm_tree_scalar_bool(&sb, "has_more", end < record_count);
-        if (end < record_count) {
-            cbm_tree_scalar_int(&sb, "next_offset", end);
-        }
-        if (record_count == 0) {
-            cbm_tree_scalar_str(&sb, "hint",
-                                "No projects indexed. Call index_repository(repo_path=...) first.");
-        }
-        payload = cbm_sb_finish(&sb);
+void cbm_mcp_project_catalog_close(cbm_mcp_project_catalog_t *catalog) {
+    if (catalog->dir) {
+        cbm_closedir(catalog->dir);
     }
-
-    for (int i = 0; i < record_count; i++) {
-        project_record_clear(&records[i]);
-    }
-    free(records);
-
-    char *result = cbm_mcp_text_result(payload ? payload : "out of memory", payload == NULL);
-    if (payload && project_list_renderer) {
-        project_list_payload_free(payload);
-    } else {
-        free(payload);
-    }
-    return result;
+    free(catalog);
 }
 
 /* verify_project_indexed — returns a heap-allocated error JSON string when the
@@ -6592,7 +6426,8 @@ static const char **copy_cypher_cells(const cbm_mcp_cypher_cell_t *cells, size_t
 }
 
 static bool cypher_sink_begin(void *context, const cbm_mcp_cypher_cell_t *columns,
-                              size_t column_count, size_t row_capacity, bool truncated) {
+                              size_t column_count, size_t row_capacity, bool truncated,
+                              cbm_mcp_cypher_cell_t warning) {
     cbm_cypher_result_t *result = context;
     result->columns = copy_cypher_cells(columns, column_count);
     if (!result->columns) {
@@ -6600,6 +6435,12 @@ static bool cypher_sink_begin(void *context, const cbm_mcp_cypher_cell_t *column
     }
     result->col_count = (int)column_count;
     result->truncated = truncated;
+    if (warning.len) {
+        result->warning = copy_cypher_cell(warning);
+        if (!result->warning) {
+            return false;
+        }
+    }
     if (row_capacity) {
         result->rows = calloc(row_capacity, sizeof(*result->rows));
         if (!result->rows) {
@@ -6628,13 +6469,27 @@ static bool cypher_request_cancelled(void *context) {
     return mcp_request_cancelled(context);
 }
 
+/* Map the shared native budget to status codes understood by the Rust adapter. */
+static int cypher_request_budget_status(void *context) {
+    switch (cbm_cypher_budget_status(context)) {
+    case CBM_CYPHER_BUDGET_DEADLINE:
+        return CBM_MCP_CYPHER_DEADLINE;
+    case CBM_CYPHER_BUDGET_CANCELLED:
+        return CBM_MCP_CYPHER_CANCELLED;
+    default:
+        return CBM_MCP_CYPHER_OK;
+    }
+}
+
 /* The Rust evaluator receives the same read-batched connection from which
  * the query handler obtained the generation. The C handler owns pagination
- * and rendering for both evaluators. */
+ * and rendering for both evaluators. Linked builds try Rust by default;
+ * MORI_IMPL_QUERY=c keeps the native path available for comparisons. */
 static int evaluate_mcp_cypher(cbm_mcp_server_t *srv, cbm_store_t *store, const char *query,
                                const char *project, cbm_cypher_result_t *result) {
+    cbm_cypher_budget_t budget = cbm_cypher_budget_start(cypher_request_cancelled, srv);
     const char *backend = cbm_runtime_getenv("MORI_IMPL_QUERY");
-    if (rust_cypher_evaluator && project && backend && strcmp(backend, "rust") == 0) {
+    if (rust_cypher_evaluator && project && (!backend || strcmp(backend, "c") != 0)) {
         const cbm_mcp_cypher_sink_t sink = {
             .context = result,
             .begin = cypher_sink_begin,
@@ -6642,7 +6497,7 @@ static int evaluate_mcp_cypher(cbm_mcp_server_t *srv, cbm_store_t *store, const 
             .storage_error = cypher_sink_storage_error,
         };
         int status = rust_cypher_evaluator(cbm_store_get_db(store), query, project,
-                                           cypher_request_cancelled, srv, &sink);
+                                           cypher_request_budget_status, &budget, &sink);
         if (status != CBM_MCP_CYPHER_UNSUPPORTED) {
             cbm_log_debug("query_graph.evaluator", "backend", "rust");
             switch (status) {
@@ -6652,7 +6507,7 @@ static int evaluate_mcp_cypher(cbm_mcp_server_t *srv, cbm_store_t *store, const 
                 result->error = heap_strdup(CBM_CYPHER_DEADLINE_ERROR);
                 break;
             case CBM_MCP_CYPHER_CANCELLED:
-                result->error = heap_strdup("query_graph cancelled for this request");
+                result->error = heap_strdup(CBM_CYPHER_CANCELLED_ERROR);
                 break;
             case CBM_MCP_CYPHER_ROW_CEILING:
                 result->truncated = true;
@@ -6662,7 +6517,7 @@ static int evaluate_mcp_cypher(cbm_mcp_server_t *srv, cbm_store_t *store, const 
             return CBM_NOT_FOUND;
         }
     }
-    return cbm_cypher_execute(store, query, project, 0, result);
+    return cbm_cypher_execute_with_budget(store, query, project, 0, result, &budget);
 }
 
 static char *handle_query_graph(cbm_mcp_server_t *srv, const char *args) {
@@ -7616,46 +7471,6 @@ static bool mcp_read_file_bytes(const char *abs_path, cbm_sb_t *bytes) {
         cbm_sb_free(bytes);
     }
     return valid;
-}
-
-/* Lines [start, end] of an in-memory file, with read_file_lines' semantics
- * (text-mode line endings, NULL when the range is empty). */
-static char *mcp_slice_lines(cbm_sb_t *bytes, int start, int end) {
-    size_t begin = bytes->len;
-    size_t stop = bytes->len;
-    int lineno = 1;
-    for (size_t i = 0; i < bytes->len; i++) {
-        if (lineno >= start && begin == bytes->len) {
-            begin = i;
-        }
-        if (bytes->buf[i] == '\n') {
-            if (lineno >= end) {
-                stop = i + 1;
-                break;
-            }
-            lineno++;
-        }
-    }
-    if (begin >= stop) {
-        return NULL;
-    }
-    char saved = bytes->buf[stop];
-    bytes->buf[stop] = '\0';
-    char *slice = heap_strdup(bytes->buf + begin);
-    bytes->buf[stop] = saved;
-#ifdef _WIN32
-    /* read_file_lines opens in text mode. */
-    if (slice) {
-        char *out = slice;
-        for (const char *in = slice; *in; in++) {
-            if (!(in[0] == '\r' && in[1] == '\n')) {
-                *out++ = *in;
-            }
-        }
-        *out = '\0';
-    }
-#endif
-    return slice;
 }
 
 /* A path is current when its bytes were verified to be the indexed bytes,
@@ -14881,36 +14696,43 @@ static char *snippet_pdf_text(const cbm_node_t *node) {
     }
     yyjson_val *ds = yyjson_obj_get(yyjson_doc_get_root(pd), "docstring");
     const char *text = yyjson_is_str(ds) ? yyjson_get_str(ds) : NULL;
-    char *out = NULL;
-    if (text && text[0]) {
-        /* the same builder read_file_lines returns its text from */
-        cbm_sb_t sb;
-        cbm_sb_init(&sb);
-        cbm_sb_append_n(&sb, text, strlen(text));
-        out = cbm_sb_finish(&sb);
-    }
+    char *out = text && text[0] ? mori_snippet_source_text(text) : NULL;
     yyjson_doc_free(pd);
     return out;
 }
 
-/* #2585: when captured is non-NULL the lines come from those already-read
- * bytes instead of a fresh read of the file. */
-static char *resolve_snippet_source(const char *root_path, const char *file_path, int start,
-                                    int end, cbm_sb_t *captured, char **out_abs_path) {
+/* The same captured bytes supply both the freshness verdict and the snippet.
+ * Only an uncaptured, contained path may be reopened. */
+static char *resolve_snippet_source(const char *root_path, const char *file_path,
+                                    const cbm_mcp_snippet_window_t *window, bool source_drift,
+                                    const cbm_sb_t *captured, char **out_abs_path) {
     *out_abs_path = NULL;
     if (!root_path || !file_path) {
         return NULL;
     }
-    size_t apsz = strlen(root_path) + strlen(file_path) + MCP_SEPARATOR;
-    char *abs_path = malloc(apsz);
-    snprintf(abs_path, apsz, "%s/%s", root_path, file_path);
-
-    *out_abs_path = abs_path;
-    if (cbm_path_within_root(root_path, abs_path)) {
-        return captured ? mcp_slice_lines(captured, start, end)
-                        : read_file_lines(abs_path, start, end);
+    if (!source_drift) {
+        size_t apsz = strlen(root_path) + strlen(file_path) + MCP_SEPARATOR;
+        char *abs_path = malloc(apsz);
+        if (!abs_path) {
+            return NULL;
+        }
+        snprintf(abs_path, apsz, "%s/%s", root_path, file_path);
+        *out_abs_path = abs_path;
+        if (!cbm_path_within_root(root_path, abs_path)) {
+            return NULL;
+        }
     }
-    return NULL;
+    if (captured) {
+        return mori_snippet_captured_source(window, source_drift,
+                                           (const uint8_t *)captured->buf, captured->len);
+    }
+    if (source_drift) {
+        return NULL;
+    }
+    char *raw = read_file_lines(*out_abs_path, window->start, window->end);
+    char *text = mori_snippet_source_text(raw);
+    free(raw);
+    return text;
 }
 
 static bool utf8_is_cont(unsigned char c) {
@@ -15084,60 +14906,18 @@ static char *snippet_render_payload(yyjson_mut_doc *doc, const char *args) {
     return tree;
 }
 
-static int snippet_source_line_count(const char *source) {
-    if (!source || !source[0]) {
-        return 0;
-    }
-    int lines = 1;
-    for (const char *p = source; *p; p++) {
-        if (*p == '\n' && p[1] != '\0') {
-            lines++;
-        }
-    }
-    return lines;
-}
-
-/* Copy at most `line_limit` complete physical lines. A single over-budget
- * line therefore yields no source instead of a corrupt byte prefix. */
-static char *snippet_source_line_prefix(const char *source, int line_limit) {
-    if (!source || line_limit <= 0) {
-        return NULL;
-    }
-    const char *end = source;
-    int lines = 0;
-    while (*end && lines < line_limit) {
-        const char *newline = strchr(end, '\n');
-        if (!newline) {
-            end += strlen(end);
-            break;
-        }
-        end = newline + 1;
-        lines++;
-    }
-    size_t len = (size_t)(end - source);
-    char *copy = malloc(len + 1U);
-    if (!copy) {
-        return NULL;
-    }
-    memcpy(copy, source, len);
-    copy[len] = '\0';
-    return copy;
-}
-
 static void snippet_set_source_prefix(yyjson_mut_doc *doc, yyjson_mut_val *root,
-                                      const char *whole_source, int line_count, int start,
-                                      int original_end) {
+                                      const char *source, size_t source_len, int line_count,
+                                      int start, int original_end) {
     (void)yyjson_mut_obj_remove_key(root, "source");
     (void)yyjson_mut_obj_remove_key(root, "source_omitted");
     (void)yyjson_mut_obj_remove_key(root, "next_start_line");
     (void)yyjson_mut_obj_remove_key(root, "continuation_requires_higher_budget");
     (void)yyjson_mut_obj_remove_key(root, "continuation");
     if (line_count > 0) {
-        char *prefix = snippet_source_line_prefix(whole_source, line_count);
-        if (prefix) {
-            yyjson_mut_obj_add_strcpy(doc, root, "source", prefix);
-            free(prefix);
-        } else {
+        size_t prefix_len =
+            mori_snippet_source_prefix_len((const uint8_t *)source, source_len, line_count);
+        if (!yyjson_mut_obj_add_strncpy(doc, root, "source", source, prefix_len)) {
             yyjson_mut_obj_add_bool(doc, root, "source_omitted", true);
             line_count = 0;
         }
@@ -15338,60 +15118,6 @@ static void file_doc_candidates_tree(cbm_sb_t *sb, cbm_store_t *store, const cha
     yyjson_mut_doc_free(doc);
 }
 
-static cbm_mcp_snippet_window_planner_fn snippet_window_planner;
-
-void cbm_mcp_set_snippet_window_planner(cbm_mcp_snippet_window_planner_fn planner) {
-    snippet_window_planner = planner;
-}
-
-static cbm_mcp_snippet_window_t snippet_window(const cbm_mcp_snippet_window_request_t *request) {
-    if (snippet_window_planner) {
-        cbm_mcp_snippet_window_t window = snippet_window_planner(request);
-        cbm_log_debug("get_code_snippet.window", "backend", "rust");
-        return window;
-    }
-    int original_start = request->node_start > 0 ? request->node_start : SKIP_ONE;
-    /* A one-line node has a valid end equal to its start. */
-    int original_end = request->node_end;
-    if (original_end < original_start) {
-        original_end = original_start > INT_MAX - SNIPPET_DEFAULT_LINES
-                           ? INT_MAX
-                           : original_start + SNIPPET_DEFAULT_LINES;
-    }
-    bool outline = request->explicit_outline ||
-                   (!request->explicit_full && request->container &&
-                    original_end - original_start >= 200);
-    int start = request->requested_start;
-    if (outline || start < original_start || start > original_end) {
-        start = original_start;
-    }
-    int end = original_end;
-    int max_lines = request->max_lines;
-    if (max_lines <= 0 || max_lines > MCP_SNIPPET_MAX_LINES) {
-        max_lines = MCP_SNIPPET_MAX_LINES;
-    }
-    /* Cap whole-file reads. Compare the span before adding to avoid overflowing
-     * the line number. */
-    if (!outline && end - start >= max_lines) {
-        end = start + (max_lines - 1);
-    }
-    int max_output_tokens = request->max_output_tokens;
-    if (max_output_tokens < 0) {
-        max_output_tokens = 0;
-    } else if (max_output_tokens > 0 && max_output_tokens < 128) {
-        max_output_tokens = 128;
-    } else if (max_output_tokens > 1000000) {
-        max_output_tokens = 1000000;
-    }
-    return (cbm_mcp_snippet_window_t){.original_start = original_start,
-                                      .original_end = original_end,
-                                      .start = start,
-                                      .end = end,
-                                      .max_output_tokens = max_output_tokens,
-                                      .outline = outline,
-                                      .clipped = end < original_end};
-}
-
 static char *build_snippet_response(cbm_mcp_server_t *srv, cbm_node_t *node,
                                     const char *match_method, bool include_neighbors,
                                     cbm_node_t *alternatives, int alt_count, const char *args) {
@@ -15412,7 +15138,9 @@ static char *build_snippet_response(cbm_mcp_server_t *srv, cbm_node_t *node,
                       strcmp(node->label, "Class") == 0 || strcmp(node->label, "Interface") == 0),
     };
     free(source_mode);
-    cbm_mcp_snippet_window_t window = snippet_window(&request);
+    cbm_mcp_snippet_window_t window = mori_snippet_plan(&request);
+    CBM_MSAN_WRITTEN(&window, sizeof(window));
+    cbm_log_debug("get_code_snippet.window", "backend", "rust");
     int original_start = window.original_start;
     int original_end = window.original_end;
     int start = window.start;
@@ -15447,15 +15175,11 @@ static char *build_snippet_response(cbm_mcp_server_t *srv, cbm_node_t *node,
     }
     char *abs_path = NULL;
     char *source = NULL;
-    if (outline || source_drift) {
-        source = NULL;
-    } else if (snippet_is_pdf(node->file_path)) {
-        source = snippet_pdf_text(node); /* never the file's bytes */
-    } else {
-        /* Without captured bytes (not tracked, unreadable) the file is read
-         * here, and the snippet is never content-verified. */
-        source = resolve_snippet_source(root_path, node->file_path, start, end,
-                                        captured_ok ? &captured : NULL, &abs_path);
+    if (!outline) {
+        source = snippet_is_pdf(node->file_path)
+                     ? snippet_pdf_text(node)
+                     : resolve_snippet_source(root_path, node->file_path, &window, source_drift,
+                                               captured_ok ? &captured : NULL, &abs_path);
     }
     cbm_sb_free(&captured);
 
@@ -15556,18 +15280,13 @@ static char *build_snippet_response(cbm_mcp_server_t *srv, cbm_node_t *node,
         outline_members_total = eligible;
         outline_members_returned = emitted;
         cbm_store_free_nodes(members, member_count);
-    } else if (source) {
+    } else {
         yyjson_mut_obj_add_str(doc, root_obj, "source_mode", "full");
-        char *safe_source = sanitize_utf8_lossy(source);
-        if (safe_source) {
-            yyjson_mut_obj_add_strcpy(doc, root_obj, "source", safe_source);
-            free(safe_source);
+        if (source) {
+            yyjson_mut_obj_add_strcpy(doc, root_obj, "source", source);
         } else {
             yyjson_mut_obj_add_str(doc, root_obj, "source", "(source not available)");
         }
-    } else {
-        yyjson_mut_obj_add_str(doc, root_obj, "source_mode", "full");
-        yyjson_mut_obj_add_str(doc, root_obj, "source", "(source not available)");
     }
 
     /* match_method — omitted for exact matches */
@@ -15655,15 +15374,15 @@ static char *build_snippet_response(cbm_mcp_server_t *srv, cbm_node_t *node,
     }
 
     if (bounded_default && payload && strlen(payload) > snippet_byte_budget && !outline && source) {
-        char *safe_whole_source = sanitize_utf8_lossy(source);
-        int available_lines = snippet_source_line_count(safe_whole_source);
+        size_t source_len = strlen(source);
+        int available_lines = mori_snippet_source_line_count(source);
         int low = 0;
         int high = available_lines;
         int best_lines = -1;
         char *best_payload = NULL;
         while (low <= high) {
             int middle = low + (high - low) / 2;
-            snippet_set_source_prefix(doc, root_obj, safe_whole_source, middle, start,
+            snippet_set_source_prefix(doc, root_obj, source, source_len, middle, start,
                                       original_end);
             char *candidate = snippet_render_payload(doc, args);
             if (candidate && strlen(candidate) <= snippet_byte_budget) {
@@ -15678,14 +15397,13 @@ static char *build_snippet_response(cbm_mcp_server_t *srv, cbm_node_t *node,
         }
         free(payload);
         if (best_payload) {
-            snippet_set_source_prefix(doc, root_obj, safe_whole_source, best_lines, start,
+            snippet_set_source_prefix(doc, root_obj, source, source_len, best_lines, start,
                                       original_end);
             payload = best_payload;
         } else {
-            snippet_set_source_prefix(doc, root_obj, safe_whole_source, 0, start, original_end);
+            snippet_set_source_prefix(doc, root_obj, source, source_len, 0, start, original_end);
             payload = snippet_render_payload(doc, args);
         }
-        free(safe_whole_source);
     }
 
     /* Large outlines/neighbor/alternative metadata still obey the default
@@ -15707,7 +15425,7 @@ static char *build_snippet_response(cbm_mcp_server_t *srv, cbm_node_t *node,
     free(nb_callees);
     free(root_path);
     free(abs_path);
-    free(source);
+    mori_snippet_free_source(source);
 
     char *result = cbm_mcp_text_result(payload ? payload : "out of memory", payload == NULL);
     free(payload);
@@ -22882,7 +22600,8 @@ static char *dispatch_tool(cbm_mcp_server_t *srv, const char *tool_name, const c
     }
 
     if (strcmp(tool_name, "list_projects") == 0) {
-        return handle_list_projects(srv, args_json);
+        cbm_log_debug("list_projects.dispatch", "implementation", "rust");
+        return cbm_rust_mcp_list_projects(srv, args_json);
     }
     if (strcmp(tool_name, "get_graph_schema") == 0) {
         return handle_get_graph_schema(srv, args_json);
@@ -23336,54 +23055,6 @@ static long long mcp_elapsed_us(struct timespec start, struct timespec end) {
            ((long long)(end.tv_nsec - start.tv_nsec) / MCP_MS_TO_US);
 }
 
-/* Method selection for the C reference path. */
-enum {
-    MCP_METHOD_UNKNOWN = 0,
-    MCP_METHOD_INITIALIZE,
-    MCP_METHOD_PING,
-    MCP_METHOD_RESOURCES_LIST,
-    MCP_METHOD_RESOURCE_TEMPLATES_LIST,
-    MCP_METHOD_PROMPTS_LIST,
-    MCP_METHOD_PROMPTS_GET,
-    MCP_METHOD_TOOLS_LIST,
-    MCP_METHOD_TOOLS_CALL,
-    MCP_METHOD_CANCELLED,
-    MCP_METHOD_DISCOVER,
-};
-
-static cbm_mcp_method_selector_fn mcp_method_selector;
-
-void cbm_mcp_set_method_selector(cbm_mcp_method_selector_fn select) {
-    mcp_method_selector = select;
-}
-
-static int select_mcp_method(const char *method) {
-    if (mcp_method_selector) {
-        return mcp_method_selector(method);
-    }
-    static const struct {
-        const char *name;
-        int kind;
-    } methods[] = {
-        {"initialize", MCP_METHOD_INITIALIZE},
-        {"ping", MCP_METHOD_PING},
-        {"resources/list", MCP_METHOD_RESOURCES_LIST},
-        {"resources/templates/list", MCP_METHOD_RESOURCE_TEMPLATES_LIST},
-        {"prompts/list", MCP_METHOD_PROMPTS_LIST},
-        {"prompts/get", MCP_METHOD_PROMPTS_GET},
-        {"tools/list", MCP_METHOD_TOOLS_LIST},
-        {"tools/call", MCP_METHOD_TOOLS_CALL},
-        {"notifications/cancelled", MCP_METHOD_CANCELLED},
-        {"server/discover", MCP_METHOD_DISCOVER},
-    };
-    for (size_t i = 0; method && i < sizeof(methods) / sizeof(methods[0]); i++) {
-        if (strcmp(method, methods[i].name) == 0) {
-            return methods[i].kind;
-        }
-    }
-    return MCP_METHOD_UNKNOWN;
-}
-
 typedef struct {
     cbm_mcp_server_t *srv;
     cbm_jsonrpc_request_t req;
@@ -23474,7 +23145,7 @@ static void mcp_request_unknown(mcp_request_context_t *ctx, bool discover) {
     ctx->is_error = !discover;
 }
 
-/* Keep this table in sync with RequestOps in mcp_dispatch.rs. The callback
+/* Keep this table in sync with RequestOps in mcp_dispatch/methods.rs. Rust
  * borrows ctx for this call only. C owns the parsed request and all outputs. */
 typedef struct {
     void (*initialize)(mcp_request_context_t *);
@@ -23489,54 +23160,8 @@ typedef struct {
     void (*unknown)(mcp_request_context_t *, bool discover);
 } mcp_request_ops_t;
 
-typedef void (*mcp_dispatch_fn)(const char *method, bool has_id, mcp_request_context_t *,
-                                const mcp_request_ops_t *);
-static mcp_dispatch_fn mcp_dispatch;
-
-/* Rust registers before any request threads start. */
-void cbm_mcp_set_dispatch(mcp_dispatch_fn dispatch) {
-    mcp_dispatch = dispatch;
-}
-
-static void mcp_dispatch_c(mcp_request_context_t *ctx) {
-    int method = select_mcp_method(ctx->req.method);
-    if (!ctx->req.has_id) {
-        if (method == MCP_METHOD_CANCELLED) {
-            mcp_request_cancel_notification(ctx);
-        }
-        return;
-    }
-
-    switch (method) {
-    case MCP_METHOD_INITIALIZE:
-        mcp_request_initialize(ctx);
-        break;
-    case MCP_METHOD_PING:
-        mcp_request_ping(ctx);
-        break;
-    case MCP_METHOD_RESOURCES_LIST:
-        mcp_request_resources_list(ctx);
-        break;
-    case MCP_METHOD_RESOURCE_TEMPLATES_LIST:
-        mcp_request_resource_templates_list(ctx);
-        break;
-    case MCP_METHOD_PROMPTS_LIST:
-        mcp_request_prompts_list(ctx);
-        break;
-    case MCP_METHOD_PROMPTS_GET:
-        mcp_request_prompts_get(ctx);
-        break;
-    case MCP_METHOD_TOOLS_LIST:
-        mcp_request_tools_list(ctx);
-        break;
-    case MCP_METHOD_TOOLS_CALL:
-        mcp_request_tools_call(ctx);
-        break;
-    default:
-        mcp_request_unknown(ctx, method == MCP_METHOD_DISCOVER);
-        break;
-    }
-}
+extern void cbm_rust_mcp_dispatch(const char *method, bool has_id, mcp_request_context_t *ctx,
+                                  const mcp_request_ops_t *ops);
 
 static void mcp_dispatch_request(mcp_request_context_t *ctx) {
     static const mcp_request_ops_t ops = {
@@ -23551,16 +23176,11 @@ static void mcp_dispatch_request(mcp_request_context_t *ctx) {
         .cancel_notification = mcp_request_cancel_notification,
         .unknown = mcp_request_unknown,
     };
-    if (mcp_dispatch) {
-        const char *method = ctx->req.method ? ctx->req.method : "";
-        mcp_dispatch(method, ctx->req.has_id, ctx, &ops);
-        cbm_log_debug("mcp.dispatch", "backend", "rust", "method", method,
-                      "has_id", ctx->req.has_id ? "true" : "false");
-    } else {
-        mcp_dispatch_c(ctx);
-    }
+    const char *method = ctx->req.method ? ctx->req.method : "";
+    cbm_rust_mcp_dispatch(method, ctx->req.has_id, ctx, &ops);
+    cbm_log_debug("mcp.dispatch", "backend", "rust", "method", method, "has_id",
+                  ctx->req.has_id ? "true" : "false");
 }
-
 char *cbm_mcp_server_handle(cbm_mcp_server_t *srv, const char *line) {
     mcp_request_context_t ctx = {.srv = srv};
     if (cbm_jsonrpc_parse(line, &ctx.req) < 0) {

@@ -269,8 +269,6 @@ def _audit(repo_root: pathlib.Path, allowlist_path: pathlib.Path) -> int:
     consumed: set[tuple[str, str]] = set()
     for source_path in sorted((repo_root / "src").rglob("*.c")):
         relative = source_path.relative_to(repo_root).as_posix()
-        if relative == "src/ui/httpd.c":
-            continue
         masked = _mask_non_code(source_path.read_text(encoding="utf-8", errors="replace"))
         all_calls = _scan_calls(masked)
         for function in RAW_FUNCTIONS:

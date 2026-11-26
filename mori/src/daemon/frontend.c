@@ -4,9 +4,11 @@
 #include "daemon/frontend.h"
 
 #include "daemon/application.h"
+#include "daemon/frontend_session.h"
 #include "foundation/compat.h"
 #include "foundation/compat_thread.h"
 #include "foundation/platform.h"
+#include "foundation/sanitized.h"
 #include "foundation/subprocess.h"
 #include "mcp/mcp.h"
 
@@ -18,8 +20,6 @@
 #include <string.h>
 
 enum {
-    FRONTEND_QUEUE_CAPACITY = 8,
-    FRONTEND_QUEUE_BYTES_MAX = 12 * 1024 * 1024,
     FRONTEND_REQUEST_TIMEOUT_MS = 24 * 60 * 60 * 1000,
     FRONTEND_CLOSE_TIMEOUT_MS = 5000,
     FRONTEND_JOIN_WATCHDOG_MS = FRONTEND_CLOSE_TIMEOUT_MS,
@@ -62,33 +62,16 @@ enum {
 };
 
 typedef struct {
-    char *message;
-    size_t length;
-    bool content_length_framed;
-    bool has_id;
-    int64_t id;
-    char *id_str;
-    cbm_daemon_runtime_application_token_t request_token;
-    bool cancelled;
-} frontend_item_t;
-
-typedef struct {
     cbm_mutex_t mutex;
     cbm_daemon_runtime_client_t *client;
     cbm_version_cohort_manager_t *cohort_manager;
     const cbm_daemon_frontend_session_config_t *session;
     FILE *out;
-    frontend_item_t queue[FRONTEND_QUEUE_CAPACITY];
-    size_t head;
-    size_t count;
-    size_t queued_bytes;
+    mori_frontend_queue_t *queue;
     bool input_closed;
     bool stopping;
     bool worker_done;
     bool in_request;
-    bool active_has_id;
-    int64_t active_id;
-    const char *active_id_str;
     cbm_daemon_runtime_application_token_t active_request_token;
     bool active_cancelled;
     bool failed;
@@ -328,8 +311,8 @@ static bool frontend_should_stop(frontend_state_t *state) {
      * term, any daemon-side failure of that last item was classified as an
      * expected stop and its response silently dropped with a success exit —
      * an unanswerable failure mode for the client. */
-    bool stopping =
-        state->stopping || (state->input_closed && state->count == 0 && !state->in_request);
+    bool stopping = state->stopping || (state->input_closed && !state->in_request &&
+                                        mori_frontend_queue_is_empty(state->queue));
     cbm_mutex_unlock(&state->mutex);
     return stopping;
 }
@@ -378,31 +361,20 @@ static void *frontend_join_watchdog(void *opaque) {
 static bool frontend_pop_begin(frontend_state_t *state, frontend_item_t *item) {
     bool popped = false;
     cbm_mutex_lock(&state->mutex);
-    if (!state->stopping && state->count > 0) {
-        frontend_item_t *queued = &state->queue[state->head];
-        cbm_daemon_runtime_application_token_t request_token =
-            CBM_DAEMON_RUNTIME_APPLICATION_TOKEN_INVALID;
-        bool token_ready = queued->cancelled || cbm_daemon_runtime_client_application_token_reserve(
-                                                    state->client, &request_token);
-        if (!token_ready) {
+    if (!state->stopping) {
+        int result = mori_frontend_queue_pop(state->queue, state->client,
+                                             cbm_daemon_runtime_client_application_token_reserve,
+                                             item);
+        if (result < 0) {
             state->failed = true;
             state->stopping = true;
-            cbm_mutex_unlock(&state->mutex);
-            return false;
+        } else if (result > 0) {
+            CBM_MSAN_WRITTEN(item, sizeof(*item));
+            state->in_request = true;
+            state->active_request_token = item->request_token;
+            state->active_cancelled = false;
+            popped = true;
         }
-        *item = state->queue[state->head];
-        memset(&state->queue[state->head], 0, sizeof(state->queue[state->head]));
-        state->head = (state->head + 1U) % FRONTEND_QUEUE_CAPACITY;
-        state->count--;
-        state->queued_bytes -= item->length;
-        state->in_request = true;
-        state->active_has_id = item->has_id;
-        state->active_id = item->id;
-        state->active_id_str = item->id_str;
-        item->request_token = request_token;
-        state->active_request_token = request_token;
-        state->active_cancelled = false;
-        popped = true;
     }
     cbm_mutex_unlock(&state->mutex);
     return popped;
@@ -411,9 +383,7 @@ static bool frontend_pop_begin(frontend_state_t *state, frontend_item_t *item) {
 static void frontend_end_request(frontend_state_t *state, bool failed) {
     cbm_mutex_lock(&state->mutex);
     state->in_request = false;
-    state->active_has_id = false;
-    state->active_id = 0;
-    state->active_id_str = NULL;
+    mori_frontend_queue_finish(state->queue);
     state->active_request_token = CBM_DAEMON_RUNTIME_APPLICATION_TOKEN_INVALID;
     state->active_cancelled = false;
     state->failed = state->failed || failed;
@@ -507,12 +477,6 @@ bool cbm_daemon_frontend_cancellation_matches_request(const char *message, int64
     return matches;
 }
 
-typedef enum {
-    FRONTEND_CANCELLATION_STALE = 1,
-    FRONTEND_CANCELLATION_QUEUED = 2,
-    FRONTEND_CANCELLATION_ACTIVE = 3,
-} frontend_cancellation_route_t;
-
 /* Cancellation is an out-of-band frontend control message. A matching active
  * request routes its exact runtime token without closing the authenticated
  * session. A queued request is marked and receives a cancellation error
@@ -525,24 +489,11 @@ static bool frontend_route_cancellation(frontend_state_t *state, const char *mes
         return false;
     }
 
-    frontend_cancellation_route_t route = FRONTEND_CANCELLATION_STALE;
     cbm_mutex_lock(&state->mutex);
-    if (state->in_request && state->active_has_id &&
-        cbm_mcp_cancel_request_matches(request.params_raw, state->active_id,
-                                       state->active_id_str)) {
+    int route = mori_frontend_queue_cancel(state->queue, request.params_raw,
+                                           cbm_mcp_cancel_request_matches);
+    if (route == FRONTEND_CANCELLATION_ACTIVE) {
         state->active_cancelled = true;
-        route = FRONTEND_CANCELLATION_ACTIVE;
-    } else {
-        for (size_t offset = 0; offset < state->count; offset++) {
-            size_t index = (state->head + offset) % FRONTEND_QUEUE_CAPACITY;
-            frontend_item_t *item = &state->queue[index];
-            if (item->has_id &&
-                cbm_mcp_cancel_request_matches(request.params_raw, item->id, item->id_str)) {
-                item->cancelled = true;
-                route = FRONTEND_CANCELLATION_QUEUED;
-                break;
-            }
-        }
     }
     cbm_mutex_unlock(&state->mutex);
     cbm_jsonrpc_request_free(&request);
@@ -746,54 +697,37 @@ static bool frontend_enqueue(frontend_state_t *state, char *message, bool conten
             return false;
         }
     }
-    /* A frame that exceeds the whole byte budget can never be admitted no
-     * matter how long we wait; only that case is a hard failure. */
-    if (length > FRONTEND_QUEUE_BYTES_MAX) {
-        cbm_mutex_lock(&state->mutex);
-        if (!state->stopping && !state->failed) {
-            state->failed = true;
-            state->stopping = true;
-        }
-        cbm_mutex_unlock(&state->mutex);
-        free(id_str);
-        return false;
-    }
-    /* A full queue is BACKPRESSURE, not failure. This runs on the stdin reader
-     * thread, so blocking here stops further reads and lets the kernel pipe
-     * absorb the client's burst — a pipelining client is a client going fast,
-     * not a client going wrong. The old code failed the whole session at frame
-     * capacity+1, killing it with every buffered response unwritten: any 7+
-     * pipelined requests (e.g. an agent issuing parallel tool calls) died with
-     * rc=1 and zero output (#1522 follow-up). Waits are bounded only by the
-     * stop/fail flags, which every teardown path already sets — the same
-     * condition the polling worker and watchdogs key on. */
+    const frontend_item_t item = {
+        .message = message,
+        .length = length,
+        .content_length_framed = content_length_framed,
+        .has_id = has_id,
+        .id = id,
+        .id_str = id_str,
+        .request_token = CBM_DAEMON_RUNTIME_APPLICATION_TOKEN_INVALID,
+    };
+    /* Waiting here applies backpressure to stdin until work drains or teardown
+     * starts. Only an item larger than the entire budget fails admission. */
     for (;;) {
         cbm_mutex_lock(&state->mutex);
-        bool stopped = state->stopping || state->failed;
-        if (stopped) {
+        if (state->stopping || state->failed) {
             cbm_mutex_unlock(&state->mutex);
             free(id_str);
             return false;
         }
-        bool capacity = state->count < FRONTEND_QUEUE_CAPACITY &&
-                        state->queued_bytes <= FRONTEND_QUEUE_BYTES_MAX &&
-                        length <= FRONTEND_QUEUE_BYTES_MAX - state->queued_bytes;
-        if (capacity) {
-            size_t tail = (state->head + state->count) % FRONTEND_QUEUE_CAPACITY;
-            state->queue[tail] = (frontend_item_t){
-                .message = message,
-                .length = length,
-                .content_length_framed = content_length_framed,
-                .has_id = has_id,
-                .id = id,
-                .id_str = id_str,
-            };
-            state->count++;
-            state->queued_bytes += length;
-            cbm_mutex_unlock(&state->mutex);
-            return true;
+        int admission = mori_frontend_queue_push(state->queue, &item);
+        if (admission < 0) {
+            state->failed = true;
+            state->stopping = true;
         }
         cbm_mutex_unlock(&state->mutex);
+        if (admission < 0) {
+            free(id_str);
+            return false;
+        }
+        if (admission > 0) {
+            return true;
+        }
         cbm_usleep(FRONTEND_WAIT_US);
     }
 }
@@ -869,6 +803,7 @@ int cbm_daemon_frontend_mcp_run(cbm_daemon_runtime_client_t *client,
         .cohort_manager = cohort_manager,
         .session = session,
         .out = out,
+        .queue = mori_frontend_queue_new(free),
     };
     cbm_mutex_init(&state.mutex);
     atomic_init(&state.completed_items, 0);
@@ -876,6 +811,7 @@ int cbm_daemon_frontend_mcp_run(cbm_daemon_runtime_client_t *client,
         frontend_maintenance_monitor_start(cohort_manager, frontend_cancel_for_maintenance, &state,
                                            EXIT_SUCCESS, "MCP frontend", true);
     if (!maintenance_monitor) {
+        mori_frontend_queue_free(state.queue);
         cbm_mutex_destroy(&state.mutex);
         (void)cbm_daemon_runtime_client_close(client, FRONTEND_CLOSE_TIMEOUT_MS);
         return -1;
@@ -885,6 +821,7 @@ int cbm_daemon_frontend_mcp_run(cbm_daemon_runtime_client_t *client,
         if (!cbm_daemon_maintenance_monitor_stop(&maintenance_monitor)) {
             _Exit(EXIT_FAILURE);
         }
+        mori_frontend_queue_free(state.queue);
         cbm_mutex_destroy(&state.mutex);
         (void)cbm_daemon_runtime_client_close(client, FRONTEND_CLOSE_TIMEOUT_MS);
         return -1;
@@ -964,9 +901,7 @@ int cbm_daemon_frontend_mcp_run(cbm_daemon_runtime_client_t *client,
     } else if (!stop_begun) {
         result = -1;
     }
-    for (size_t i = 0; i < FRONTEND_QUEUE_CAPACITY; i++) {
-        frontend_item_free(&state.queue[i]);
-    }
+    mori_frontend_queue_free(state.queue);
     if (state.failed) {
         result = -1;
     }

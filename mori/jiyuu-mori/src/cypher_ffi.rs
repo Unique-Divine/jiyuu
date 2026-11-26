@@ -2,7 +2,6 @@
 
 use std::ffi::{CStr, c_char, c_int, c_void};
 use std::panic;
-use std::time::Instant;
 
 use rusqlite::{Connection, ffi::sqlite3};
 
@@ -32,6 +31,7 @@ struct Sink {
         usize,
         usize,
         bool,
+        Cell,
     ) -> bool,
     row: unsafe extern "C" fn(*mut c_void, *const Cell) -> bool,
     storage_error: unsafe extern "C" fn(*mut c_void, Cell),
@@ -47,17 +47,18 @@ enum Status {
     Error,
 }
 
-type Cancel = unsafe extern "C" fn(*mut c_void) -> bool;
+type BudgetStatus = unsafe extern "C" fn(*mut c_void) -> c_int;
 type Evaluate = unsafe extern "C" fn(
     *mut sqlite3,
     *const c_char,
     *const c_char,
-    Cancel,
+    BudgetStatus,
     *mut c_void,
     *const Sink,
 ) -> c_int;
 
 unsafe extern "C" {
+    fn cbm_cypher_max_depth() -> c_int;
     fn cbm_mcp_set_cypher_evaluator(evaluate: Evaluate);
 }
 
@@ -70,15 +71,23 @@ unsafe extern "C" fn evaluate(
     db: *mut sqlite3,
     query: *const c_char,
     project: *const c_char,
-    cancelled: Cancel,
-    cancel_context: *mut c_void,
+    budget_status: BudgetStatus,
+    budget_context: *mut c_void,
     sink: *const Sink,
 ) -> c_int {
     panic::catch_unwind(|| {
         // SAFETY: C provides the live read-batched handle, NUL-terminated
         // strings, and callbacks with contexts valid for this invocation.
-        let cancelled = || unsafe { cancelled(cancel_context) };
-        let mut budget = ExecutionBudget::new(&Instant::now, &cancelled);
+        let check = || match unsafe { budget_status(budget_context) } {
+            status if status == Status::Deadline as c_int => {
+                Err(ExecutionError::Deadline)
+            }
+            status if status == Status::Cancelled as c_int => {
+                Err(ExecutionError::Cancelled)
+            }
+            _ => Ok(()),
+        };
+        let mut budget = ExecutionBudget::shared(&check);
         #[cfg(debug_assertions)]
         if let Some(limit) = std::env::var("MORI_TEST_ORDERED_COUNT_GROUP_LIMIT")
             .ok()
@@ -94,10 +103,27 @@ unsafe extern "C" fn evaluate(
         let Ok(project) = project.to_str() else {
             return Status::Unsupported;
         };
-        let Ok(query) = cypher_linear::classify(source) else {
-            return Status::Unsupported;
-        };
         let sink = unsafe { &*sink };
+        let query = cypher_linear::classify(source);
+        if let Err(error) = budget.check() {
+            return match error {
+                ExecutionError::Deadline => Status::Deadline,
+                ExecutionError::Cancelled => Status::Cancelled,
+                _ => Status::Error,
+            };
+        }
+        let query = match query {
+            Ok(query) => query,
+            Err(error) => {
+                return if let Some(detail) = error.diagnostic() {
+                    sink.error(&detail)
+                } else {
+                    Status::Unsupported
+                };
+            }
+        };
+        // SAFETY: the native limit reader returns a positive integer.
+        budget.path_depth_cap = unsafe { cbm_cypher_max_depth() } as u32;
         // from_handle borrows the native handle without taking ownership.
         let result = unsafe { Connection::from_handle(db) }
             .map_err(ExecutionError::Storage)
@@ -113,11 +139,7 @@ unsafe extern "C" fn evaluate(
             Err(ExecutionError::Storage(error)) => {
                 let detail =
                     format!("query aborted: reading the graph failed ({error})");
-                // SAFETY: C copies the detail during the call.
-                unsafe {
-                    (sink.storage_error)(sink.context, detail.as_bytes().into())
-                };
-                Status::Error
+                sink.error(&detail)
             }
         }
     })
@@ -125,6 +147,12 @@ unsafe extern "C" fn evaluate(
 }
 
 impl Sink {
+    fn error(&self, detail: &str) -> Status {
+        // SAFETY: C copies the detail during the call.
+        unsafe { (self.storage_error)(self.context, detail.as_bytes().into()) };
+        Status::Error
+    }
+
     fn emit(&self, result: &ResultRows) -> Status {
         let mut cells: Vec<_> = result
             .columns
@@ -140,6 +168,12 @@ impl Sink {
                 cells.len(),
                 result.rows.len(),
                 result.truncated,
+                result
+                    .warning()
+                    .as_deref()
+                    .unwrap_or_default()
+                    .as_bytes()
+                    .into(),
             )
         } {
             return Status::Error;

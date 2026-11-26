@@ -2,7 +2,7 @@
 
 Send a JSON HTTP `POST` to `https://ops-api.sai.fun/graphql` with
 `Authorization: Bearer <issued-key>`. Load `SAI_DEAL_DESK_TOKEN` using
-[Install and Connect](install.md#connect-the-agent).
+[Install and Connect](../workflows/install.md#connect-the-agent).
 
 ## Check the Credential
 
