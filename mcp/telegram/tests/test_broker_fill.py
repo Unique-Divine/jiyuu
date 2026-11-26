@@ -51,15 +51,132 @@ def test_journal_scopes_cap_and_dispatch_identity_to_the_owner(monkeypatch, tmp_
     assert other.snapshot(now_ms())["addsToday"] == 1
 
 
+def test_trial_records_a_short_premium_wait_and_stops_across_restart(monkeypatch, tmp_path):
+    now = 1_800_000_000_000
+    monkeypatch.setattr(fill_module, "now_ms", lambda: now)
+    state = fixture_state(monkeypatch, tmp_path)
+    journal = Journal(state, "42")
+    trial = {
+        "id": "2d0a9c4b-32a4-42c3-9568-cc934bbc77d0",
+        "state": "running",
+        "generation": 1,
+        "cap": 32,
+        "activateAtMs": now - 1,
+        "expiresAtMs": now + 3 * fill_module.DAY_MS,
+        "attemptLimit": 120,
+    }
+    journal.configure_trial(trial)
+    action = Action.parse(create_request())
+    event_id = journal.trial_attempt(action, "channels.createChannel")
+    now += 10
+    hold = journal.wait(
+        "channels.createChannel",
+        "create",
+        errors.FloodPremiumWaitError(request=None, capture=2),
+        origin="managed",
+        event_id=event_id,
+    )
+    assert hold and hold["errorCode"] == "hold"
+    restarted = Journal(state, "42")
+    now += 60_000
+    action = replace(action, expires=now + 1_000)
+    assert restarted.snapshot(now)["holds"] == []
+    blocked = restarted.guard(action, now, reserve=False)
+    assert blocked and blocked["errorCode"] == "trial_flood_stop"
+    events = restarted.trial_events(trial["id"], 0)
+    assert len(events) == 1
+    assert events[0]["id"] == event_id
+    assert events[0]["outcome"] == "flood_premium_wait"
+    assert events[0]["waitS"] == 2
+    assert restarted.trial_events(trial["id"], events[0]["sequence"]) == []
+    now = (now // fill_module.DAY_MS + 1) * fill_module.DAY_MS
+    action = replace(action, expires=now + 1_000)
+    assert restarted.guard(action, now, reserve=False) is not None
+    restarted.configure_trial(trial | {"generation": 2, "cap": 16})
+    assert restarted.guard(action, now, reserve=False) is None
+
+
+@pytest.mark.asyncio
+async def test_trial_socket_replays_flood_and_correlates_dispatch_history(monkeypatch, tmp_path):
+    from uuid import uuid4
+
+    from telegram_mcp import call_history
+
+    class FakeClient:
+        async def get_me(self):
+            return SimpleNamespace(id=42, bot=False)
+
+        async def iter_dialogs(self, *, limit):
+            if False:
+                yield
+
+        async def __call__(self, request):
+            assert isinstance(request, functions.channels.CreateChannelRequest)
+            raise errors.FloodWaitError(request=request, capture=5)
+
+    state = fixture_state(monkeypatch, tmp_path)
+    history = call_history.History(state.tool / "logs")
+    monkeypatch.setattr(call_history, "_history", history)
+    owner = PoolTransport(cast(TelegramClient, FakeClient()), state, "42", b"")
+    broker = Broker({"42": owner.broker_snapshot}, {"42": owner.dispatch})
+    trial_id = str(uuid4())
+    request_id = str(uuid4())
+    now = now_ms()
+    envelope = {"v": 1, "accountId": "42"}
+
+    async def call(operation, **fields):
+        request = envelope | {"id": str(uuid4()), "op": operation} | fields
+        return json.loads(await bridge(state, frame(request)))
+
+    async with listen(state, broker):
+        assert (await call("account.snapshot"))["error"]["code"] == "inventory_refresh_pending"
+        await owner.snapshot()
+        assert (
+            await call(
+                "trial.configure",
+                trial={
+                    "id": trial_id,
+                    "state": "running",
+                    "generation": 1,
+                    "cap": 32,
+                    "activateAtMs": now - 1,
+                    "expiresAtMs": now + fill_module.DAY_MS,
+                    "attemptLimit": 120,
+                },
+            )
+        )["result"]["configured"]
+        create = create_request() | {"id": request_id}
+        assert (
+            await call("fill.execute", **{key: create[key] for key in ("id", "action", "limits")})
+        )["result"]["errorCode"] == "hold"
+        result = await call("trial.events", trialId=trial_id, after=0)
+        assert result["result"]["events"][0]["outcome"] == "flood_wait"
+        assert result["result"]["events"][0]["fillId"] == create["action"]["fillId"]
+        assert owner.journal.manual_trial_blocked()
+    assert history.flush()
+    trace = [
+        row
+        for row in call_history.read_rows(state.tool / "logs")
+        if row.get("requestId") == request_id
+    ]
+    assert [event["event"] for event in trace] == ["call.start", "call.dispatch", "call.end"]
+    assert trace[-1]["fillId"] == create["action"]["fillId"]
+    assert trace[-1]["code"] == "hold"
+
+
 @pytest.mark.asyncio
 async def test_capacity_snapshot_counts_groups_after_two_thousand_direct_dialogs(
     monkeypatch, tmp_path
 ):
+    scans = 0
+
     class FakeClient:
         async def get_me(self):
             return SimpleNamespace(id=42, bot=False, premium=True)
 
         async def iter_dialogs(self, *, limit):
+            nonlocal scans
+            scans += 1
             dialogs = [SimpleNamespace(entity=object())] * 2100
             dialogs.extend(
                 [
@@ -70,18 +187,49 @@ async def test_capacity_snapshot_counts_groups_after_two_thousand_direct_dialogs
                         )
                     ),
                     SimpleNamespace(
-                        entity=types.Channel(92, "Joined channel", types.ChatPhotoEmpty(), None)
+                        entity=types.Channel(
+                            92,
+                            fill_module.TITLE,
+                            types.ChatPhotoEmpty(),
+                            None,
+                            creator=True,
+                            megagroup=True,
+                        )
                     ),
                 ]
             )
             for dialog in dialogs[:limit]:
                 yield dialog
 
+        async def get_input_entity(self, entity):
+            return types.InputPeerChannel(entity.id, 1)
+
+        async def __call__(self, request):
+            assert isinstance(request, functions.channels.GetFullChannelRequest)
+            return SimpleNamespace(
+                chats=[
+                    types.Channel(
+                        92,
+                        fill_module.TITLE,
+                        types.ChatPhotoEmpty(),
+                        None,
+                        creator=True,
+                        megagroup=True,
+                    )
+                ],
+                full_chat=SimpleNamespace(about="Chat with the Sai team. Ref: abcdef01"),
+            )
+
     state = fixture_state(monkeypatch, tmp_path)
     transport = PoolTransport(cast(TelegramClient, FakeClient()), state, "42", b"")
     result = await transport.snapshot()
     assert result["groupCount"] == 1
     assert result["telegramPremium"] is True
+    assert await transport.observe(Action.parse(create_request(reconcile=True))) == {
+        "outcome": "succeeded",
+        "chatId": "-1000000000092",
+    }
+    assert scans == 1
 
 
 @pytest.mark.asyncio
@@ -170,6 +318,7 @@ async def test_lost_create_stays_uncertain_and_never_sends_twice(monkeypatch, tm
     restarted = PoolTransport(client, state, "42", b"")
     broker = Broker({"42": restarted.snapshot}, {"42": restarted.dispatch})
     async with listen(state, broker):
+        await restarted.snapshot()
         assert json.loads(await bridge(state, frame(request)))["result"] == {
             "outcome": "uncertain"
         }
@@ -213,8 +362,47 @@ async def test_flood_on_readback_after_a_create_always_remains_uncertain(monkeyp
 
     state = fixture_state(monkeypatch, tmp_path)
     account = PoolTransport(cast(TelegramClient, ResultClient()), state, "42", b"")
+    await account.snapshot()
     assert await account.dispatch(create_request()) == {"outcome": "uncertain"}
-    assert account.journal.snapshot(now_ms())["holds"] == []
+    assert account.journal.snapshot(now_ms())["holds"][0]["source"] == "flood_wait"
+
+
+@pytest.mark.asyncio
+async def test_cold_create_defers_before_dispatch_and_misses_use_distinct_scans(
+    monkeypatch, tmp_path
+):
+    import asyncio
+
+    release = asyncio.Event()
+    scans = 0
+
+    class FakeClient:
+        async def get_me(self):
+            return SimpleNamespace(id=42, bot=False)
+
+        async def iter_dialogs(self, *, limit):
+            nonlocal scans
+            scans += 1
+            await release.wait()
+            if False:
+                yield
+
+    owner = PoolTransport(
+        cast(TelegramClient, FakeClient()), fixture_state(monkeypatch, tmp_path), "42", b""
+    )
+    result = await asyncio.wait_for(owner.dispatch(create_request()), 1)
+    assert result["outcome"] == "retry"
+    assert result["errorCode"] == "inventory_refresh_pending"
+    with owner.journal.connect() as db:
+        assert db.execute("SELECT count(*) FROM dispatch_v1").fetchone()[0] == 0
+    release.set()
+    await owner.snapshot()
+    action = Action.parse(create_request(reconcile=True))
+    assert await owner.observe(action) == {"outcome": "not_found"}
+    assert (await owner.observe(action))["errorCode"] == "inventory_refresh_pending"
+    await owner.snapshot()
+    assert await owner.observe(action) == {"outcome": "not_found"}
+    assert scans == 2
 
 
 @pytest.mark.asyncio

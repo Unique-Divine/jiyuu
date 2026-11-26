@@ -54,6 +54,7 @@ from sanitize import (
     sanitize_name,
     sanitize_user_content,
 )
+from telegram_mcp import call_history
 from telegram_mcp.session_store import Profile, State, StoreError, read_profile, valid_name
 from telegram_mcp.client_identity import client_identity_kwargs
 from telegram_mcp.request_policy import (
@@ -211,6 +212,7 @@ def _install_annotation_hook(
 
 
 _install_annotation_hook()
+call_history.install_mcp_hook(mcp)
 
 
 _EXPOSED_TOOLS_MODES = {"all", "read-only"}
@@ -417,14 +419,20 @@ def get_client(account: str | None = None) -> TelegramClient:
     """Resolve account label to TelegramClient."""
     if account is None:
         if len(clients) == 1:
-            return next(iter(clients.values()))
+            client = next(iter(clients.values()))
+            call_history.record_account(getattr(client, "_self_id", None))
+            return client
+        call_history.record_failure("denied", "account_required")
         raise ValueError(f"Account is required. Available accounts: {', '.join(clients.keys())}")
     label = account.lower()
     if label not in clients:
+        call_history.record_failure("denied", "unknown_account")
         raise ValueError(
             f"Unknown account '{account}'. Available accounts: {', '.join(clients.keys())}"
         )
-    return clients[label]
+    client = clients[label]
+    call_history.record_account(getattr(client, "_self_id", None))
+    return client
 
 
 def is_multi_mode() -> bool:
@@ -734,6 +742,10 @@ def log_and_format_error(
             logger.warning(f"{function_name}: {limit.message()}")
             return format_request_error(RequestLimited(limit))
 
+    call_history.record_failure(
+        "denied" if isinstance(error, ValidationError) else "error",
+        "validation_error" if isinstance(error, ValidationError) else "tool_error",
+    )
     # Generate a consistent error code
     if isinstance(prefix, str) and prefix == "VALIDATION-001":
         # Special case for validation errors

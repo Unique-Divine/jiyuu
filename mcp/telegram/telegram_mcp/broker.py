@@ -4,6 +4,7 @@ import argparse
 import asyncio
 from collections.abc import Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
+from contextlib import nullcontext
 import json
 import os
 import re
@@ -13,13 +14,16 @@ import struct
 import sys
 from typing import Any
 
+from telegram_mcp import call_history
 from telegram_mcp.session_store import State, StoreError, lock_file
 
 MAX_FRAME = 16_384
 READ_TIMEOUT = 5
 REQUEST_TIMEOUT = 95
 ID = re.compile(r"[a-zA-Z0-9._:-]{1,96}")
-OPERATIONS = frozenset({"account.snapshot", "fill.observe", "fill.execute"})
+OPERATIONS = frozenset(
+    {"account.snapshot", "fill.observe", "fill.execute", "trial.configure", "trial.events"}
+)
 Snapshot = Callable[[], Awaitable[dict[str, Any]]]
 PeerConnected = Callable[[], bool]
 Fill = Callable[[dict[str, Any], PeerConnected], Awaitable[dict[str, Any]]]
@@ -84,6 +88,7 @@ class Broker:
         request_id = None
         reply = None
         peer_read: asyncio.Task[bytes] | None = None
+        trace = None
         try:
             if not same_user(writer):
                 return
@@ -91,6 +96,19 @@ class Broker:
             body = request(raw)
             request_id = body["id"]
             account = body["accountId"]
+            history = call_history.current()
+            if history is not None:
+                supplied_action = body.get("action")
+                action = supplied_action if isinstance(supplied_action, dict) else {}
+                trace = history.call(
+                    "broker",
+                    body["op"],
+                    request_id=request_id,
+                    account_id=account,
+                    fill_id=action.get("fillId"),
+                    action_id=action.get("actionId"),
+                    transport="unix",
+                )
             if account not in self.snapshots:
                 raise BrokerError("account_unavailable")
             lock = self.locks[account]
@@ -114,13 +132,28 @@ class Broker:
                             or (peer_read is not None and peer_read.done())
                         ),
                     )
-                result = await asyncio.wait_for(requested, REQUEST_TIMEOUT)
+                with call_history.tool_call(trace) if trace is not None else nullcontext():
+                    if trace is not None:
+                        trace.dispatch()
+                    result = await asyncio.wait_for(requested, REQUEST_TIMEOUT)
+            if trace is not None:
+                trace.finish(result.get("outcome", "ok"), code=result.get("errorCode"))
             reply = {"v": 1, "id": request_id, "result": result}
         except BrokerError as error:
+            if trace is not None:
+                trace.finish("denied", code=error.code)
             reply = {"v": 1, "id": request_id, "error": {"code": error.code}}
+        except asyncio.TimeoutError:
+            if trace is not None:
+                trace.finish("timeout", code="timeout")
+            reply = {"v": 1, "id": request_id, "error": {"code": "broker_unavailable"}}
         except Exception:
+            if trace is not None:
+                trace.finish("error", code="broker_unavailable")
             reply = {"v": 1, "id": request_id, "error": {"code": "broker_unavailable"}}
         finally:
+            if trace is not None:
+                trace.finish("cancelled")
             if peer_read is not None:
                 peer_read.cancel()
                 await asyncio.gather(peer_read, return_exceptions=True)
