@@ -871,7 +871,7 @@ static const char *worker_fence_path(const cbm_index_worker_handle_t *handle) {
 static void worker_request_resource_termination(cbm_index_worker_handle_t *handle,
                                                 cbm_index_resource_t resource, uint64_t observed,
                                                 uint64_t limit, bool probe_failed) {
-    int error;
+    int error = 0;
     int action = mori_index_supervision_limit(handle->supervision, worker_fence_path(handle),
                                               worker_fence_create_exclusive, &error,
                                               worker_cancel_process, handle->process);
