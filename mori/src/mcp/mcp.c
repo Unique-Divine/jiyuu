@@ -75,6 +75,7 @@ enum {
 #include "watcher/watcher.h"
 #include "foundation/mem.h"
 #include "foundation/mem_core.h"
+#include "foundation/sanitized.h"
 #include "foundation/hash_table.h"
 #include "foundation/dyn_array.h"
 #include "foundation/json_writer.h"
@@ -15138,6 +15139,7 @@ static char *build_snippet_response(cbm_mcp_server_t *srv, cbm_node_t *node,
     };
     free(source_mode);
     cbm_mcp_snippet_window_t window = mori_snippet_plan(&request);
+    CBM_MSAN_WRITTEN(&window, sizeof(window));
     cbm_log_debug("get_code_snippet.window", "backend", "rust");
     int original_start = window.original_start;
     int original_end = window.original_end;
