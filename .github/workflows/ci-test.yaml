@@ -607,30 +607,21 @@ jobs:
         working-directory: mori
         run: scripts/test.sh --suites "doc_mentions_rs doc_mentions_jvm doc_mentions"
       - name: Smoke-test the candidate standalone executable
+        id: standalone-smoke
         if: needs.changes.outputs.mori == 'true'
         working-directory: mori
         run: |
           set -euo pipefail
           scripts/build.sh BUILD_DIR=build/candidate-standalone
-          binary="$PWD/build/candidate-standalone/codebase-memory-mcp"
-          scratch="$(mktemp -d /tmp/mori-native.XXXXXX)"
-          mkdir "$scratch/home" "$scratch/rt" "$scratch/cache"
-          chmod 700 "$scratch/home" "$scratch/rt" "$scratch/cache"
-          candidate=(env -i "PATH=$PATH" "HOME=$scratch/home"
-            "CBM_RUNTIME_DIR=$scratch/rt" "CBM_CACHE_DIR=$scratch/cache" "$binary")
-          cleanup() {
-            "${candidate[@]}" daemon stop >/dev/null 2>&1 || true
-            rm -rf "$scratch"
-          }
-          trap cleanup EXIT
-          "${candidate[@]}" cli --quiet index_repository --repo_path "$PWD/tests/fixtures/parity-repo" |
-            jq -e '.status == "indexed"'
-          symbols="$(nm --defined-only "$binary")"
-          grep -Eq '[[:space:]][Tt] mori_fts_write$' <<< "$symbols"
-          if grep -Eq '[[:space:]][Tt] cbm_text_set_.*_hook_for_testing$' <<< "$symbols"; then
-            echo 'unexpected managed-text fixture hooks in standalone candidate' >&2
-            exit 1
-          fi
+          scripts/smoke-built-binary.sh "$PWD/build/candidate-standalone/codebase-memory-mcp"
+      - name: Report standalone smoke result
+        if: always() && needs.changes.outputs.mori == 'true'
+        env:
+          ARCH: ${{ matrix.arch }}
+          SMOKE_RESULT: ${{ steps.standalone-smoke.outcome }}
+        run: |
+          printf 'Standalone smoke for %s (fixture index, Rust FTS symbol, no test hooks): **%s**\n' \
+            "$ARCH" "$SMOKE_RESULT" >> "$GITHUB_STEP_SUMMARY"
       - name: Verify native fixtures exercised Rust GraphQL callbacks
         if: needs.changes.outputs.mori == 'true'
         run: just --justfile mori/justfile test-graphql-rust build/c
@@ -783,6 +774,21 @@ jobs:
       - name: CLI parity
         if: needs.changes.outputs.mori_linked == 'true'
         run: just --justfile mori/jiyuu-mori/justfile parity
+      # Reuse the exact candidate already built by CLI parity. Compare this
+      # result with the native standalone smoke before removing that build.
+      - name: Shadow standalone smoke with the linked candidate
+        id: linked-smoke-shadow
+        if: needs.changes.outputs.mori_linked == 'true'
+        continue-on-error: true
+        run: mori/scripts/smoke-built-binary.sh "$PWD/target/debug/mori"
+      - name: Report linked smoke shadow result
+        if: always() && needs.changes.outputs.mori_linked == 'true'
+        env:
+          ARCH: ${{ matrix.arch }}
+          SMOKE_RESULT: ${{ steps.linked-smoke-shadow.outcome }}
+        run: |
+          printf 'Linked smoke shadow for %s (fixture index, Rust FTS symbol, no test hooks): **%s**\n' \
+            "$ARCH" "$SMOKE_RESULT" >> "$GITHUB_STEP_SUMMARY"
       # The release reference includes the accepted GraphQL fixture behavior.
       - name: Public graph and tool replay
         if: needs.changes.outputs.mori_linked == 'true'
