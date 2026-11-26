@@ -101,6 +101,8 @@ mod route_writer;
 #[cfg(any(feature = "native-engine-abi", test))]
 mod job_recovery;
 #[cfg(any(feature = "native-engine-abi", test))]
+mod index_supervision;
+#[cfg(any(feature = "native-engine-abi", test))]
 mod watcher;
 
 #[cfg(all(feature = "graphql-callbacks", not(test)))]
