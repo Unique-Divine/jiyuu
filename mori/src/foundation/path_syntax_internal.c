@@ -1,5 +1,6 @@
 #include "foundation/path_syntax_internal.h"
-#include <stdbool.h>
+#include "foundation/constants.h"
+#include <stdio.h>
 #include <string.h>
 #ifdef _WIN32
 #include <limits.h>
@@ -8,6 +9,57 @@
 #endif
 #include <windows.h>
 #endif
+
+bool cbm_repo_rel_join(const char *dir, const char *v, char *out, size_t sz) {
+    bool anchored = v[0] == '\x01';
+    const char *rel = anchored ? v + SKIP_ONE : v;
+    char buf[CBM_SZ_2K];
+    if (anchored) {
+        snprintf(buf, sizeof(buf), "%s", rel);
+    } else {
+        snprintf(buf, sizeof(buf), "%s%s%s", dir, dir[0] ? "/" : "", rel);
+    }
+    size_t n = 0;
+    out[0] = '\0';
+    for (const char *p = buf; *p;) {
+        while (*p == '/') {
+            p++;
+        }
+        size_t sl = strcspn(p, "/");
+        if (sl == 0) {
+            break;
+        }
+        if (sl == SKIP_ONE && p[0] == '.') {
+            p += sl;
+            continue;
+        }
+        if (sl == PAIR_LEN && p[0] == '.' && p[SKIP_ONE] == '.') {
+            if (n == 0) {
+                return false;
+            }
+            while (n > 0 && out[n - SKIP_ONE] != '/') {
+                n--;
+            }
+            if (n > 0) {
+                n--;
+            }
+            out[n] = '\0';
+            p += sl;
+            continue;
+        }
+        if (n + sl + PAIR_LEN > sz) {
+            return false;
+        }
+        if (n) {
+            out[n++] = '/';
+        }
+        memcpy(out + n, p, sl);
+        n += sl;
+        out[n] = '\0';
+        p += sl;
+    }
+    return true;
+}
 
 static unsigned char path_upper(unsigned char c) {
     return c >= 'a' && c <= 'z' ? (unsigned char)(c - 'a' + 'A') : c;

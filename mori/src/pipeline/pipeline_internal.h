@@ -1511,11 +1511,6 @@ void cbm_pipeline_pass_ansible(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t *f
  * The incremental planner's test for Ansible content. */
 bool cbm_ansible_is_sequence(const char *src);
 
-/* `v` (a path; "./" and "../" allowed) from repository directory `dir`, as a
- * repository path into out; false past the root or when it does not fit
- * (pass_terraform.c). */
-bool cbm_repo_rel_join(const char *dir, const char *v, char *out, size_t sz);
-
 /* The Image node of image reference `ref` (its repository as written, tag
  * and digest dropped; Docker Hub's host spellings as docker.io with library/
  * for an official image; registry "unknown" when the reference names no

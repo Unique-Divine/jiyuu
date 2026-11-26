@@ -21,6 +21,7 @@
 #include "foundation/limits.h"
 #include "foundation/log.h"
 #include "foundation/mem_core.h"
+#include "foundation/path_syntax_internal.h"
 #include "foundation/str_util.h"
 #include "foundation/json_writer.h" /* cbm_json_writer_allocator */
 #include "graph_buffer/graph_buffer.h"
@@ -130,64 +131,6 @@ static bool tf_string(const char *src, const char *mdir, TSNode n, char *out, si
         }
     }
     return true;
-}
-
-/* A path inside the module directory: "./a/../b" -> "<mdir>/b"; NULL past
- * the repository root. A value starting with the \x01 marker is already
- * from the root. */
-static bool tf_repo_path(const char *mdir, const char *v, char *out, size_t sz) {
-    bool anchored = v[0] == '\x01';
-    const char *rel = anchored ? v + SKIP_ONE : v;
-    char buf[CBM_SZ_2K];
-    if (anchored) {
-        snprintf(buf, sizeof(buf), "%s", rel);
-    } else {
-        snprintf(buf, sizeof(buf), "%s%s%s", mdir, mdir[0] ? "/" : "", rel);
-    }
-    size_t n = 0;
-    out[0] = '\0';
-    for (const char *p = buf; *p;) {
-        while (*p == '/') {
-            p++;
-        }
-        size_t sl = strcspn(p, "/");
-        if (sl == 0) {
-            break;
-        }
-        if (sl == SKIP_ONE && p[0] == '.') {
-            p += sl;
-            continue;
-        }
-        if (sl == PAIR_LEN && p[0] == '.' && p[SKIP_ONE] == '.') {
-            if (n == 0) {
-                return false;
-            }
-            while (n > 0 && out[n - SKIP_ONE] != '/') {
-                n--;
-            }
-            if (n > 0) {
-                n--;
-            }
-            out[n] = '\0';
-            p += sl;
-            continue;
-        }
-        if (n + sl + PAIR_LEN > sz) {
-            return false;
-        }
-        if (n) {
-            out[n++] = '/';
-        }
-        memcpy(out + n, p, sl);
-        n += sl;
-        out[n] = '\0';
-        p += sl;
-    }
-    return true;
-}
-
-bool cbm_repo_rel_join(const char *dir, const char *v, char *out, size_t sz) {
-    return tf_repo_path(dir, v, out, sz);
 }
 
 /* Chart.yaml path -> its (local) Chart node. */
@@ -575,7 +518,7 @@ static yyjson_mut_val *tf_values_item(const tf_t *t, yyjson_mut_doc *doc, TSNode
             char v[CBM_SZ_1K];
             char path[CBM_SZ_1K];
             if (!t->ctx->repo_path || !tf_string(t->src, t->mdir, arg, v, sizeof(v)) ||
-                !tf_repo_path(t->mdir, v, path, sizeof(path))) {
+                !cbm_repo_rel_join(t->mdir, v, path, sizeof(path))) {
                 return NULL;
             }
             const char **grown = cbm_arena_alloc(a, (size_t)(*nfiles + SKIP_ONE) * sizeof(*grown));
@@ -823,7 +766,7 @@ static void tf_helm_release(tf_t *t, TSNode block, const char *name) {
             snprintf(path, sizeof(path), "%s", chart);
             external = true;
         }
-    } else if (tf_repo_path(t->mdir, chart, path, sizeof(path))) {
+    } else if (cbm_repo_rel_join(t->mdir, chart, path, sizeof(path))) {
         tgt = tf_local_chart(t, path);
     }
     if (external) {
@@ -1189,7 +1132,7 @@ static void tf_mod_call(tf_mod_t *m, const char *name, TSNode block, TSNode body
         if (!tf_string(m->src, m->dir, ts_node_named_child(at, SKIP_ONE), v, sizeof(v)) ||
             (strncmp(v, "./", sizeof("./") - SKIP_ONE) != 0 &&
              strncmp(v, "../", sizeof("../") - SKIP_ONE) != 0) ||
-            !tf_repo_path(m->dir, v, dir, sizeof(dir)) ||
+            !cbm_repo_rel_join(m->dir, v, dir, sizeof(dir)) ||
             !tf_grow((void **)&m->mcalls, &m->call_cap, m->call_n, sizeof(*m->mcalls))) {
             return;
         }
@@ -1741,7 +1684,7 @@ static void tg_edge(tg_t *g, int64_t src, const cbm_gbuf_node_t *tgt, const char
 static const cbm_gbuf_node_t *tg_file(const tg_t *g, TSNode e, const char *base, char *path,
                                       size_t sz) {
     char v[CBM_SZ_1K];
-    if (ts_node_is_null(e) || !tg_eval(g, e, v, sizeof(v)) || !tf_repo_path(base, v, path, sz)) {
+    if (ts_node_is_null(e) || !tg_eval(g, e, v, sizeof(v)) || !cbm_repo_rel_join(base, v, path, sz)) {
         return NULL;
     }
     return cbm_ht_get(g->files, path);
@@ -1818,7 +1761,7 @@ static void tg_block(tg_t *g, TSNode b, char *inc, size_t inc_sz, int64_t *inc_n
         char dir[CBM_SZ_1K];
         TSNode e = tg_attr(g, bb, "config_path");
         if (!ts_node_is_null(e) && tg_eval(g, e, v, sizeof(v)) &&
-            tf_repo_path(g->udir, v, dir, sizeof(dir))) {
+            cbm_repo_rel_join(g->udir, v, dir, sizeof(dir))) {
             snprintf(path, sizeof(path), "%s%s%s", dir, dir[0] ? "/" : "", TG_UNIT);
             const cbm_gbuf_node_t *tgt = cbm_ht_get(g->files, path);
             snprintf(props, sizeof(props),
@@ -1832,7 +1775,7 @@ static void tg_block(tg_t *g, TSNode b, char *inc, size_t inc_sz, int64_t *inc_n
         if (!ts_node_is_null(e) && tg_eval(g, e, v, sizeof(v)) &&
             (strncmp(v, "./", sizeof("./") - SKIP_ONE) == 0 ||
              strncmp(v, "../", sizeof("../") - SKIP_ONE) == 0) &&
-            tf_repo_path(g->udir, v, path, sizeof(path))) {
+            cbm_repo_rel_join(g->udir, v, path, sizeof(path))) {
             const cbm_gbuf_node_t *tgt = g->folders ? cbm_ht_get(g->folders, path) : NULL;
             snprintf(props, sizeof(props), "{\"via\":\"terragrunt\",\"line\":%d}", line);
             tg_edge(g, tgt ? tg_def_node(g, g->unit, name) : 0, tgt, "IMPORTS", props);

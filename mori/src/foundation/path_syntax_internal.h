@@ -1,12 +1,18 @@
-/* Internal lexical checks shared by discovery and the pinned-tree adapter.
- * No allocation, IO, normalization, owner, callback or retained pointers. */
+/* Internal lexical path operations. No allocation, I/O or retained pointers. */
 #ifndef CBM_PATH_SYNTAX_INTERNAL_H
 #define CBM_PATH_SYNTAX_INTERNAL_H
 
+#include <stdbool.h>
 #include <stddef.h>
 #ifdef _WIN32
 #include <wchar.h>
 #endif
+
+/* Join a slash-separated path to a repository directory, collapsing "." and
+ * "..". A leading '\x01' makes v relative to the repository root. Returns
+ * false if traversal would pass the root or the output does not fit. out must
+ * hold sz writable bytes, with sz positive. */
+bool cbm_repo_rel_join(const char *dir, const char *v, char *out, size_t sz);
 
 enum { CBM_PATH_SYNTAX_MAX_BYTES = 4095 };
 typedef enum {

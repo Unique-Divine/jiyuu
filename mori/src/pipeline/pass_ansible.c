@@ -64,6 +64,7 @@
 #include "foundation/limits.h"
 #include "foundation/log.h"
 #include "foundation/mem_core.h"
+#include "foundation/path_syntax_internal.h"
 #include "foundation/str_util.h" /* cbm_json_escape */
 #include "graph_buffer/graph_buffer.h"
 #include "pipeline/pipeline.h"
