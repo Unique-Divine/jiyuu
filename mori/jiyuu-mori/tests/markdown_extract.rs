@@ -191,9 +191,10 @@ fn markdown_sections_use_rust_in_the_default_worker() {
         "{provider}"
     );
     assert_eq!(
-        section("Trailing").body.as_deref(),
+        section("Trailing-###").body.as_deref(),
         Some("Only trailing prose.")
     );
+    assert_eq!(section("Trailing-###").name, "Trailing ###");
     assert!(
         section("B.Shared")
             .body

@@ -191,7 +191,9 @@ impl<'a, K: Eq + Hash, V> Map<'a, K, V> {
     }
 
     pub(super) fn entry(&mut self, key: K) -> ScratchResult<Entry<'_, K, V>> {
-        if self.data.len() == self.data.capacity() {
+        if self.data.len() == self.data.capacity()
+            && !self.data.contains_key(&key)
+        {
             self.charge.scratch.permit()?;
             self.data.try_reserve(1).map_err(|_| Exhausted)?;
             // The standard map exposes usable entry capacity. Control bytes
@@ -207,5 +209,27 @@ impl<K, V> Deref for Map<'_, K, V> {
 
     fn deref(&self) -> &Self::Target {
         &self.data
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn updating_a_key_in_a_full_map_does_not_reserve() {
+        let scratch = Scratch::default();
+        let mut map = Map::new(&scratch);
+        *map.entry(0).unwrap().or_insert(0) = 1;
+        let capacity = map.capacity();
+        for key in 1..capacity {
+            map.entry(key).unwrap().or_insert(key);
+        }
+
+        scratch.fail_after(0);
+        *map.entry(0).unwrap().or_insert(0) += 1;
+        assert_eq!(map.get(&0), Some(&2));
+        assert_eq!(map.capacity(), capacity);
+        assert!(map.entry(capacity).is_err());
     }
 }

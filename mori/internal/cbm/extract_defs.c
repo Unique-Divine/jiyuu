@@ -13759,19 +13759,27 @@ static void markdown_emit_section(void *opaque, const TSNode *heading, const cha
     CBMExtractCtx *ctx = opaque;
     CBMArena *arena = ctx->arena;
     CBM_MSAN_WRITTEN(name, name_len);
+    char *owned_name = cbm_arena_strndup(arena, name, name_len);
+    if (!owned_name) {
+        return;
+    }
+    const char *owned_segment = "";
     if (segment_len) {
         CBM_MSAN_WRITTEN(segment, segment_len);
-    }
-    char *owned_name = cbm_arena_strndup(arena, name, name_len);
-    const char *owned_segment = segment_len ? cbm_arena_strndup(arena, segment, segment_len) : "";
-    if (owned_name && owned_segment) {
-        if (body_len) {
-            CBM_MSAN_WRITTEN(body, body_len);
+        owned_segment = owned_name;
+        if (segment_len != name_len || memcmp(segment, name, name_len) != 0) {
+            const char *copy = cbm_arena_strndup(arena, segment, segment_len);
+            if (copy) {
+                owned_segment = copy;
+            }
         }
-        const char *docstring = body_len ? cbm_arena_strndup(arena, body, body_len) : NULL;
-        cbm_ffi_ts_node_written(heading);
-        push_class_def_qn(ctx, *heading, owned_name, owned_segment, "Section", docstring);
     }
+    if (body_len) {
+        CBM_MSAN_WRITTEN(body, body_len);
+    }
+    const char *docstring = body_len ? cbm_arena_strndup(arena, body, body_len) : NULL;
+    cbm_ffi_ts_node_written(heading);
+    push_class_def_qn(ctx, *heading, owned_name, owned_segment, "Section", docstring);
 }
 
 static bool markdown_diagram_labels(void *opaque, const TSNode *fence, const char **labels) {
