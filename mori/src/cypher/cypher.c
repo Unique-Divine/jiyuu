@@ -3268,20 +3268,16 @@ static _Thread_local bool g_cypher_truncated = false;
 static _Thread_local char g_cypher_scan_error[CBM_SZ_512];
 static _Thread_local int64_t g_cypher_deadline_override_ms = -1; /* test hook; <0 = default */
 
-#ifdef CBM_ENABLE_TEST_SEAMS
 static _Thread_local cbm_cypher_test_clock_fn g_cypher_deadline_clock = NULL;
 
 void cbm_cypher_test_set_deadline_clock(cbm_cypher_test_clock_fn clock_fn) {
     g_cypher_deadline_clock = clock_fn;
 }
-#endif
 
 static uint64_t cypher_deadline_now(void) {
-#ifdef CBM_ENABLE_TEST_SEAMS
     if (g_cypher_deadline_clock) {
         return g_cypher_deadline_clock();
     }
-#endif
     return cbm_now_ms();
 }
 
@@ -3289,6 +3285,11 @@ cbm_cypher_budget_t cbm_cypher_budget_start(bool (*cancelled)(void *), void *con
     uint64_t duration = g_cypher_deadline_override_ms >= 0 ? (uint64_t)g_cypher_deadline_override_ms
                                                            : CYPHER_DEADLINE_BUDGET_MS;
     return (cbm_cypher_budget_t){cypher_deadline_now() + duration, cancelled, context};
+}
+
+uint64_t cbm_cypher_budget_remaining_ms(const cbm_cypher_budget_t *budget) {
+    uint64_t now = cypher_deadline_now();
+    return budget && budget->deadline_ms > now ? budget->deadline_ms - now : 0;
 }
 
 cbm_cypher_budget_status_t cbm_cypher_budget_status(const cbm_cypher_budget_t *budget) {

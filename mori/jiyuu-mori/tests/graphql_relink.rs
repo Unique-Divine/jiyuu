@@ -14,6 +14,9 @@ use jiyuu_mori as _;
 use rusqlite::{Connection, OpenFlags, params};
 use serde_json::{Value, json};
 
+#[cfg(debug_assertions)]
+#[path = "../src/cypher_ffi.rs"]
+mod cypher_ffi;
 #[path = "../src/cypher_linear.rs"]
 mod cypher_linear;
 mod support;
@@ -849,7 +852,7 @@ fn linear_cypher_stops_inside_high_fanout_adjacency() {
             Ok(())
         }
     };
-    let mut budget = ExecutionBudget::shared(&request_status);
+    let mut budget = ExecutionBudget::shared(&request_status, &|| 30_000);
     assert!(matches!(
         query.execute_with_budget(&db, CLIENT, &mut budget),
         Err(ExecutionError::Cancelled)
@@ -1775,17 +1778,39 @@ fn bounded_count_projects_native_groups_and_empty_results_in_rust() {
 
 #[cfg(debug_assertions)]
 #[test]
-fn ordered_count_overflow_falls_back_to_rank_late_groups() {
+fn ordered_count_overflow_ranks_late_groups_in_rust() {
     use cypher_linear::{ExecutionBudget, ExecutionError};
 
     const QUERY: &str = "MATCH (n:RankProbe) RETURN n.name, count(*) AS total ORDER BY total DESC LIMIT 1";
+    const TIES: &str = "MATCH (n:RankProbe) RETURN n.name, count(*) AS total ORDER BY total DESC LIMIT 3";
+    const NUMERIC: &str = "MATCH (n:RankProbe) RETURN n.name, count(*) AS total ORDER BY n.name DESC, total DESC LIMIT 3";
     const ZERO: &str = "MATCH (n:RankProbe) RETURN n.name, count(*) AS total ORDER BY total DESC LIMIT 0";
+    const WIDE: &str = "MATCH (n:RankProbe) RETURN n.name, count(*) AS total ORDER BY total DESC LIMIT 16384";
+    const THREE_MATCH: &str = "MATCH (a:RankStart)-[:CALLS]->(hub:RankHub)
+        MATCH (hub)-[:STEP]->(m:RankMiddle)
+        MATCH (m)-[:FINISH]->(n:RankProbe)
+        RETURN n.name, count(*) AS total ORDER BY total DESC LIMIT 1";
     let fixture = Fixture::new();
     let db = fixture.index(CLIENT);
+    let start = node(&db, CLIENT, "RankStart", "start", "rank.start", "rank.py");
+    let hub = node(&db, CLIENT, "RankHub", "hub", "rank.hub", "rank.py");
+    let middle = node(
+        &db,
+        CLIENT,
+        "RankMiddle",
+        "middle",
+        "rank.middle",
+        "rank.py",
+    );
+    edge(&db, CLIENT, start, hub, "CALLS", json!({}));
+    edge(&db, CLIENT, hub, middle, "STEP", json!({}));
     let mut tail = 0;
-    for (index, name) in ["alpha", "beta", "winner", "winner", "winner"]
-        .into_iter()
-        .enumerate()
+    for (index, name) in [
+        "10", "beta", "alpha", "winner", "winner", "winner", "2", "", "beta",
+        "alpha",
+    ]
+    .into_iter()
+    .enumerate()
     {
         tail = node(
             &db,
@@ -1795,32 +1820,100 @@ fn ordered_count_overflow_falls_back_to_rank_late_groups() {
             &format!("rank.{index}"),
             "rank.py",
         );
+        edge(&db, CLIENT, middle, tail, "FINISH", json!({}));
     }
     let mut budget = ExecutionBudget::new(&Instant::now, &|| false);
     budget.set_ordered_count_group_limit_for_tests(2);
     let query = cypher_linear::classify(QUERY).unwrap();
+    let result = query.execute_with_budget(&db, CLIENT, &mut budget).unwrap();
+    assert_eq!(utf8_rows(&result), [["winner", "3"]]);
+
+    let checks = Cell::new(0);
+    let cancelled = || {
+        checks.set(checks.get() + 1);
+        // First scan start, first overflow, scan end, pre/post sort, replay.
+        checks.get() >= 6
+    };
+    let mut budget = ExecutionBudget::new(&Instant::now, &cancelled);
+    budget.set_ordered_count_group_limit_for_tests(2);
     assert!(matches!(
         query.execute_with_budget(&db, CLIENT, &mut budget),
-        Err(ExecutionError::Unsupported)
+        Err(ExecutionError::Cancelled)
     ));
+    assert!(db.is_autocommit());
     drop(db);
 
     let pages = fixture.compare_query_pages_with_env(
-        &[(QUERY, 0, false), (ZERO, 0, true)],
+        &[
+            (QUERY, 0, true),
+            (TIES, 0, true),
+            (TIES, 1, true),
+            (TIES, 2, true),
+            (NUMERIC, 0, true),
+            (NUMERIC, 1, true),
+            (NUMERIC, 2, true),
+            (ZERO, 0, true),
+            (WIDE, 0, false),
+            (THREE_MATCH, 0, true),
+        ],
         &[("MORI_TEST_ORDERED_COUNT_GROUP_LIMIT", "2")],
     );
     assert_eq!(pages[0]["rows"], json!([["winner", "3"]]));
-    assert_eq!(pages[1]["rows"], json!([]));
+    assert_eq!(pages[1]["rows"], json!([["winner", "3"]]));
+    assert_eq!(pages[2]["rows"], json!([["beta", "2"]]));
+    assert_eq!(pages[3]["rows"], json!([["alpha", "2"]]));
+    assert_eq!(pages[4]["rows"], json!([["10", "1"]]));
+    assert_eq!(pages[5]["rows"], json!([["2", "1"]]));
+    assert_eq!(pages[6]["rows"], json!([["winner", "3"]]));
+    assert_eq!(pages[7]["rows"], json!([]));
+    assert_eq!(pages[8]["rows"], json!([["winner", "3"]]));
+    assert_eq!(pages[9]["rows"], json!([["winner", "3"]]));
 
-    // A later SQLite error must still be detected for LIMIT 0.
     let db = fixture.db(CLIENT);
     fail_node_read(&db, tail);
+    // A wide window gives up at overflow, before reading the failing row.
+    let mut budget = ExecutionBudget::new(&Instant::now, &|| false);
+    budget.set_ordered_count_group_limit_for_tests(2);
+    let wide = cypher_linear::classify(WIDE).unwrap();
+    assert!(matches!(
+        wide.execute_with_budget(&db, CLIENT, &mut budget),
+        Err(ExecutionError::Unsupported)
+    ));
+    // A later SQLite error must still be detected for LIMIT 0.
     let query = cypher_linear::classify(ZERO).unwrap();
     assert!(matches!(
         query.execute_on(&db, CLIENT),
         Err(ExecutionError::Storage(rusqlite::Error::SqliteFailure(_, Some(message))))
             if message == "integer overflow"
     ));
+}
+
+#[test]
+fn ordered_count_overflow_uses_rust_by_default() {
+    const QUERY: &str = "MATCH (n:RankProbe) RETURN n.name, count(*) AS total ORDER BY total DESC LIMIT 1";
+    let fixture = Fixture::new();
+    let db = fixture.index(CLIENT);
+    db.execute_batch(
+        "WITH RECURSIVE seq(n) AS (VALUES (1) UNION ALL SELECT n + 1 FROM seq WHERE n < 16387)
+         INSERT INTO nodes(project, label, name, qualified_name)
+         SELECT 'client', 'RankProbe',
+                CASE WHEN n > 16385 THEN 'winner' ELSE printf('key%05d', n) END,
+                printf('rank.%d', n) FROM seq;",
+    )
+    .unwrap();
+    drop(db);
+
+    let reference = fixture.query_reference_output(CLIENT, QUERY);
+    assert!(reference.status.success(), "{reference:?}");
+    let bin = Path::new(MORI);
+    fixture.start_query_daemon(bin, None);
+    let before = fixture.rust_query_count();
+    let candidate = fixture.query_output(bin, CLIENT, QUERY);
+    assert!(candidate.status.success(), "{candidate:?}");
+    assert_eq!(fixture.rust_query_count() - before, 1);
+    assert_eq!(candidate.stdout, reference.stdout);
+    let page: Value = serde_json::from_slice(&candidate.stdout).unwrap();
+    assert_eq!(page["rows"], json!([["winner", "2"]]));
 }
 
 #[test]
@@ -2439,6 +2532,185 @@ fn linear_cypher_matches_the_native_result_ceiling() {
             query.execute_on(&db, CLIENT),
             Err(cypher_linear::ExecutionError::RowCeiling)
         ));
+    }
+}
+
+#[test]
+fn three_match_default_dispatch_matches_both_c_evaluators() {
+    const MATCH: &str = "MATCH (a:ThreeStart)-[r:CALLS]->(hub:ThreeHub)
+        MATCH (m:ThreeMiddle)<-[s:STEP]-(hub)
+        MATCH (leaf:ThreeLeaf)-[t:FINISH]->(hub)
+        WHERE m.name = 'middle' AND leaf.name <> 'ignored'
+        RETURN a.name AS caller, leaf.name AS target, r.line AS line,
+               s.type AS step_type, t.rank AS priority";
+    const BOUND_PAIR: &str = "MATCH (a:ThreeStart)-[:CALLS]->(hub:ThreeHub)
+        MATCH (hub)-[:STEP]->(m:ThreeMiddle)
+        MATCH (a)-[t:CALLS]->(hub) RETURN m.name, t.line";
+    const SECOND_CLAUSE_ANCHOR: &str =
+        "MATCH (a:ThreeStart)-[:CALLS]->(hub:ThreeHub)
+        MATCH (hub)-[:STEP]->(m:ThreeMiddle)
+        MATCH (m)-[:PUBLISH]->(leaf:ThreeLeaf)
+        RETURN leaf.name ORDER BY leaf.name";
+    const FALLBACK: &str = "MATCH (a:ThreeStart)-[:CALLS]->(hub:ThreeHub)
+        MATCH (hub)-[:STEP]->(m:ThreeMiddle) MATCH (leaf:ThreeLeaf)
+        RETURN leaf.name ORDER BY leaf.name LIMIT 1";
+
+    let fixture = Fixture::new();
+    let db = fixture.index(CLIENT);
+    let add_node =
+        |label, name, qn| node(&db, CLIENT, label, name, qn, "three.py");
+    let hub = add_node("ThreeHub", "hub", "three.hub");
+    let dead = add_node("ThreeHub", "dead", "three.dead");
+    let middle = add_node("ThreeMiddle", "middle", "three.middle");
+    for qn in ["three.first", "three.second"] {
+        let start = add_node("ThreeStart", "start", qn);
+        edge(&db, CLIENT, start, hub, "CALLS", json!({"line": 10}));
+        edge(&db, CLIENT, start, dead, "CALLS", json!({"line": 99}));
+    }
+    edge(&db, CLIENT, hub, middle, "STEP", json!({}));
+    for (name, rank) in [("zulu", 2), ("alpha", 1), ("ignored", 0)] {
+        let leaf = add_node("ThreeLeaf", name, name);
+        edge(&db, CLIENT, leaf, hub, "FINISH", json!({"rank": rank}));
+        if name == "alpha" {
+            edge(&db, CLIENT, middle, leaf, "PUBLISH", json!({}));
+        }
+    }
+    drop(db);
+    fixture.stop_query_daemon(Path::new(MORI));
+
+    let ordered = format!("{MATCH} ORDER BY priority, target DESC");
+    let window = format!("{ordered} SKIP 1 LIMIT 2");
+    let empty = format!("{ordered} LIMIT 0");
+    let tied = format!("{MATCH} ORDER BY line LIMIT 3");
+    let run = |bin: &Path, backend: Option<&str>| {
+        fixture.start_query_daemon(bin, backend);
+        let query = |args, supported| {
+            let before = fixture.rust_query_count();
+            let page = fixture.mcp_query_text(bin, args);
+            assert_eq!(
+                fixture.rust_query_count() - before,
+                usize::from(backend.is_none() && supported),
+                "{page}"
+            );
+            page
+        };
+        let first = query(
+            json!({"project":CLIENT,"query":ordered,"format":"json","max_rows":1}),
+            true,
+        );
+        let page: Value = serde_json::from_str(&first).unwrap();
+        let cursor = page["next_cursor"].as_str().expect("first page cursor");
+        let second = query(
+            json!({"project":CLIENT,"query":ordered,"format":"json","max_rows":1,"cursor":cursor}),
+            true,
+        );
+        let mut pages = vec![first, second];
+        for (cypher, supported) in [
+            (MATCH, true),
+            (window.as_str(), true),
+            (empty.as_str(), true),
+            (BOUND_PAIR, true),
+            (FALLBACK, false),
+            (tied.as_str(), true),
+            (SECOND_CLAUSE_ANCHOR, true),
+        ] {
+            pages.push(query(
+                json!({"project":CLIENT,"query":cypher,"format":"json"}),
+                supported,
+            ));
+        }
+        fixture.stop_query_daemon(bin);
+        pages
+    };
+    let rust = run(Path::new(MORI), None);
+    assert_eq!(rust, run(Path::new(MORI), Some("c")));
+    assert_eq!(rust, run(&Fixture::reference_binary(), Some("c")));
+
+    let page =
+        |index: usize| serde_json::from_str::<Value>(&rust[index]).unwrap();
+    let alpha = json!(["start", "alpha", "10", "STEP", "1"]);
+    let zulu = json!(["start", "zulu", "10", "STEP", "2"]);
+    assert_eq!(
+        page(0)["columns"],
+        json!(["caller", "target", "line", "step_type", "priority"])
+    );
+    assert_eq!(page(0)["total"], 4);
+    assert_eq!(page(0)["total_relation"], "eq");
+    assert_eq!(page(0)["rows"], json!([alpha]));
+    assert_eq!(page(1)["offset"], 1);
+    assert_eq!(page(1)["rows"], json!([alpha]));
+    assert_eq!(page(2)["rows"], json!([zulu, alpha, zulu, alpha]));
+    assert_eq!(page(3)["rows"], json!([alpha, zulu]));
+    assert_eq!(page(4)["rows"], json!([]));
+    assert_eq!(page(5)["rows"], json!([["middle", "10"], ["middle", "10"]]));
+    assert_eq!(page(6)["rows"], json!([["alpha"]]));
+    assert_eq!(page(7)["rows"], json!([zulu, alpha, zulu]));
+    assert_eq!(page(8)["rows"], json!([["alpha"], ["alpha"]]));
+}
+
+#[test]
+fn three_match_default_dispatch_matches_c_at_the_row_ceiling() {
+    const MATCH: &str = "MATCH (a:CapStart)-[:CALLS]->(hub:CapHub)
+        MATCH (hub)-[:STEP]->(m:CapMiddle)
+        MATCH (hub)-[:FINISH]->(leaf:CapLeaf) RETURN leaf.name";
+    let fixture = Fixture::new();
+    let mut db = fixture.index(CLIENT);
+    let tx = db.transaction().unwrap();
+    let hub = node(&tx, CLIENT, "CapHub", "hub", "cap.hub", "cap.py");
+    // The three expansions multiply to 100,000 rows.
+    for (label, kind, count) in [
+        ("CapStart", "CALLS", 50),
+        ("CapMiddle", "STEP", 50),
+        ("CapLeaf", "FINISH", 40),
+    ] {
+        for i in 0..count {
+            let qn = format!("{label}.{i}");
+            let id = node(&tx, CLIENT, label, "node", &qn, "cap.py");
+            let (source, target) = if kind == "CALLS" {
+                (id, hub)
+            } else {
+                (hub, id)
+            };
+            edge(&tx, CLIENT, source, target, kind, json!({}));
+        }
+    }
+    tx.commit().unwrap();
+    drop(db);
+    fixture.stop_query_daemon(Path::new(MORI));
+
+    let reference = Fixture::reference_binary();
+    for (limit, expected_status) in [(99_999, 0), (100_000, 1)] {
+        let cypher = format!("{MATCH} LIMIT {limit}");
+        let run = |bin: &Path, backend| {
+            fixture.start_query_daemon(bin, backend);
+            let before = fixture.rust_query_count();
+            let answer = fixture.query_output(bin, CLIENT, &cypher);
+            assert_eq!(
+                fixture.rust_query_count() - before,
+                usize::from(backend.is_none()),
+                "{cypher}"
+            );
+            assert_eq!(
+                answer.status.code(),
+                Some(expected_status),
+                "{answer:?}"
+            );
+            (answer.stdout, answer.stderr)
+        };
+        let rust = run(Path::new(MORI), None);
+        assert_eq!(rust, run(Path::new(MORI), Some("c")));
+        assert_eq!(rust, run(&reference, Some("c")));
+        if expected_status == 0 {
+            let page: Value = serde_json::from_slice(&rust.0).unwrap();
+            assert_eq!(page["total"], limit);
+            assert_eq!(page["total_relation"], "eq");
+        } else {
+            assert!(
+                String::from_utf8_lossy(&rust.1)
+                    .contains("result exceeded 100k rows"),
+                "{rust:?}"
+            );
+        }
     }
 }
 

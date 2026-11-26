@@ -19,23 +19,28 @@ struct RawCursor {
     context: [u32; 3],
 }
 
+// The C bridge marks only the initialized fields before Tree-sitter reads them.
 unsafe extern "C" {
-    fn ts_node_is_null(node: RawNode) -> bool;
-    fn ts_node_type(node: RawNode) -> *const c_char;
-    fn ts_node_start_byte(node: RawNode) -> u32;
-    fn ts_node_end_byte(node: RawNode) -> u32;
-    fn ts_node_is_named(node: RawNode) -> bool;
-    fn ts_node_child_by_field_name(
-        node: RawNode,
+    fn cbm_ffi_ts_node_type(node: *const RawNode) -> *const c_char;
+    fn cbm_ffi_ts_node_start_byte(node: *const RawNode) -> u32;
+    fn cbm_ffi_ts_node_end_byte(node: *const RawNode) -> u32;
+    #[cfg(feature = "c-backend")]
+    fn cbm_ffi_ts_node_is_named(node: *const RawNode) -> bool;
+    fn cbm_ffi_ts_node_child_by_field_name(
+        node: *const RawNode,
         name: *const c_char,
         len: u32,
     ) -> RawNode;
-    fn ts_tree_cursor_new(node: RawNode) -> RawCursor;
-    fn ts_tree_cursor_delete(cursor: *mut RawCursor);
-    fn ts_tree_cursor_current_node(cursor: *const RawCursor) -> RawNode;
-    fn ts_tree_cursor_goto_first_child(cursor: *mut RawCursor) -> bool;
-    fn ts_tree_cursor_goto_next_sibling(cursor: *mut RawCursor) -> bool;
-    fn ts_tree_cursor_goto_parent(cursor: *mut RawCursor) -> bool;
+    fn cbm_ffi_ts_tree_cursor_new(node: *const RawNode) -> RawCursor;
+    fn cbm_ffi_ts_tree_cursor_reset_to(
+        cursor: *mut RawCursor,
+        source: *const RawCursor,
+    );
+    fn cbm_ffi_ts_tree_cursor_delete(cursor: *mut RawCursor);
+    fn cbm_ffi_ts_tree_cursor_current_node(cursor: *const RawCursor) -> RawNode;
+    fn cbm_ffi_ts_tree_cursor_goto_first_child(cursor: *mut RawCursor) -> bool;
+    fn cbm_ffi_ts_tree_cursor_goto_next_sibling(cursor: *mut RawCursor) -> bool;
+    fn cbm_ffi_ts_tree_cursor_goto_parent(cursor: *mut RawCursor) -> bool;
 }
 
 pub(crate) struct TreeCursor(RawCursor);
@@ -49,34 +54,41 @@ impl TreeCursor {
     /// from the cursor may be used only while the tree stays live.
     pub(crate) unsafe fn new(node: RawNode) -> Self {
         // SAFETY: The caller provides the live node and tree.
-        Self(unsafe { ts_tree_cursor_new(node) })
+        Self(unsafe { cbm_ffi_ts_tree_cursor_new(&node) })
+    }
+
+    /// # Safety
+    /// The source tree must remain alive for the destination cursor's lifetime.
+    pub(crate) unsafe fn reset_to(&mut self, source: &Self) {
+        // SAFETY: Both cursors are live, and the destination is exclusively borrowed.
+        unsafe { cbm_ffi_ts_tree_cursor_reset_to(&mut self.0, &source.0) };
     }
 
     pub(crate) fn node(&self) -> RawNode {
         // SAFETY: A live cursor has a current node in its borrowed tree.
-        unsafe { ts_tree_cursor_current_node(&self.0) }
+        unsafe { cbm_ffi_ts_tree_cursor_current_node(&self.0) }
     }
 
     pub(crate) fn first_child(&mut self) -> bool {
         // SAFETY: This method exclusively borrows the live cursor.
-        unsafe { ts_tree_cursor_goto_first_child(&mut self.0) }
+        unsafe { cbm_ffi_ts_tree_cursor_goto_first_child(&mut self.0) }
     }
 
     pub(crate) fn next_sibling(&mut self) -> bool {
         // SAFETY: This method exclusively borrows the live cursor.
-        unsafe { ts_tree_cursor_goto_next_sibling(&mut self.0) }
+        unsafe { cbm_ffi_ts_tree_cursor_goto_next_sibling(&mut self.0) }
     }
 
     pub(crate) fn parent(&mut self) -> bool {
         // SAFETY: This method exclusively borrows the live cursor.
-        unsafe { ts_tree_cursor_goto_parent(&mut self.0) }
+        unsafe { cbm_ffi_ts_tree_cursor_goto_parent(&mut self.0) }
     }
 }
 
 impl Drop for TreeCursor {
     fn drop(&mut self) {
         // SAFETY: The guard uniquely owns the initialized cursor.
-        unsafe { ts_tree_cursor_delete(&mut self.0) };
+        unsafe { cbm_ffi_ts_tree_cursor_delete(&mut self.0) };
     }
 }
 
@@ -85,13 +97,13 @@ impl RawNode {
     pub(crate) unsafe fn field(self, name: &CStr) -> Option<Self> {
         // SAFETY: The caller guarantees the live tree, and name is a C string.
         let child = unsafe {
-            ts_node_child_by_field_name(
-                self,
+            cbm_ffi_ts_node_child_by_field_name(
+                &self,
                 name.as_ptr(),
                 name.count_bytes() as u32,
             )
         };
-        (!unsafe { ts_node_is_null(child) }).then_some(child)
+        (!child.id.is_null()).then_some(child)
     }
 
     /// Walk visible children in source order, including anonymous tokens.
@@ -114,9 +126,13 @@ impl RawNode {
         })
     }
 
+    #[cfg(feature = "c-backend")]
     pub(crate) unsafe fn named_children(self) -> impl Iterator<Item = Self> {
         // SAFETY: Namedness is checked while each yielded node's tree is live.
-        unsafe { self.children().filter(|child| ts_node_is_named(*child)) }
+        unsafe {
+            self.children()
+                .filter(|child| cbm_ffi_ts_node_is_named(child))
+        }
     }
 
     pub(crate) unsafe fn child_of_kind(self, name: &CStr) -> Option<Self> {
@@ -126,13 +142,14 @@ impl RawNode {
 
     pub(crate) unsafe fn is(self, kind: &CStr) -> bool {
         // SAFETY: Native node kinds are NUL-terminated for a valid live node.
-        unsafe { CStr::from_ptr(ts_node_type(self)) == kind }
+        unsafe { CStr::from_ptr(cbm_ffi_ts_node_type(&self)) == kind }
     }
 
     pub(crate) unsafe fn range(self) -> std::ops::Range<usize> {
         // SAFETY: The caller guarantees the live tree.
         unsafe {
-            ts_node_start_byte(self) as usize..ts_node_end_byte(self) as usize
+            cbm_ffi_ts_node_start_byte(&self) as usize
+                ..cbm_ffi_ts_node_end_byte(&self) as usize
         }
     }
 }
