@@ -103,18 +103,53 @@ def key(inputs: dict[str, str]) -> str:
     return hashlib.sha256(json.dumps(inputs, sort_keys=True).encode()).hexdigest()
 
 
-def verify(directory: Path, inputs: dict[str, str]) -> None:
+def verified_inputs(directory: Path) -> dict[str, str]:
     binary = directory / EXECUTABLE
     manifest = directory / MANIFEST
-    if binary.is_symlink() or manifest.is_symlink():
-        raise ValueError(f"reference cache contains a symbolic link in {directory}")
-    expected = json.loads(manifest.read_text())
-    if expected != {"inputs": inputs, "sha256": digest(binary)}:
-        raise ValueError(
-            f"reference cache identity or checksum mismatch in {directory}"
-        )
+    if not directory.is_dir() or directory.is_symlink():
+        raise ValueError(f"invalid reference directory {directory}")
+    if any(path.is_symlink() or not path.is_file() for path in (binary, manifest)):
+        raise ValueError(f"reference files must be regular files in {directory}")
+    record = json.loads(manifest.read_text())
+    if not isinstance(record, dict) or record.keys() != {"inputs", "sha256"}:
+        raise ValueError(f"invalid reference manifest in {directory}")
+    inputs = record["inputs"]
+    if not isinstance(inputs, dict) or not all(
+        isinstance(value, str) for value in inputs.values()
+    ):
+        raise ValueError(f"invalid reference build inputs in {directory}")
+    if record["sha256"] != digest(binary):
+        raise ValueError(f"reference checksum mismatch in {directory}")
     if not os.access(binary, os.X_OK):
         raise ValueError(f"reference is not executable: {binary}")
+    return inputs
+
+
+def verify_release(directory: Path, target: str, version: str) -> None:
+    # The producer checked the exact build environment. The consuming runner
+    # needs the same target, version, and recipe, even if its image differs.
+    expected = {
+        "reference": REFERENCE,
+        "grammars": GRAMMARS,
+        "target": target,
+        "system": platform.system(),
+        "architecture": platform.machine(),
+        "builder": digest(BUILDER),
+        "cache_tool": digest(Path(__file__)),
+        "MORI_REFERENCE_VERSION": version,
+        "MORI_WITH_UI": "1",
+        "TEST_SEAMS": "0",
+    }
+    observed = verified_inputs(directory)
+    for name, value in expected.items():
+        if observed.get(name) != value:
+            raise ValueError(f"release reference {name} mismatch in {directory}")
+    print(f"Verified release C reference {key(observed)}")
+
+
+def verify(directory: Path, inputs: dict[str, str]) -> None:
+    if verified_inputs(directory) != inputs:
+        raise ValueError(f"reference cache identity mismatch in {directory}")
 
 
 def build_or_verify(directory: Path, inputs: dict[str, str]) -> None:
@@ -168,10 +203,17 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("pin", help="print the frozen reference source commit")
+    commands.add_parser("grammar-pin", help="print the pinned grammar lock digest")
     grammar = commands.add_parser(
         "verify-grammar", help="verify the pinned grammar lock"
     )
     grammar.add_argument("path", type=Path)
+    release = commands.add_parser(
+        "verify-release", help="verify a release reference from a sibling job"
+    )
+    release.add_argument("target")
+    release.add_argument("version")
+    release.add_argument("directory", type=Path)
     for command in ("key", "ensure"):
         cache = commands.add_parser(command)
         cache.add_argument("target")
@@ -182,11 +224,15 @@ def main() -> None:
     try:
         if args.command == "pin":
             print(REFERENCE)
+        elif args.command == "grammar-pin":
+            print(GRAMMARS)
         elif args.command == "verify-grammar":
             if digest(args.path) != GRAMMARS:
                 raise ValueError(f"reference grammar lock mismatch in {args.path}")
         elif args.command == "key":
             print(key(identity(args.target)))
+        elif args.command == "verify-release":
+            verify_release(args.directory, args.target, args.version)
         else:
             build_or_verify(args.directory.absolute(), identity(args.target))
     except (OSError, ValueError, subprocess.CalledProcessError) as error:
