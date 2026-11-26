@@ -53,8 +53,6 @@ enum {
     MSB_FIELDS = 5,
     MSB_NAME_MAX = 256,   /* a property name; a longer one never has a known value */
     MSB_VALUE_MAX = 4096, /* an expanded value; a longer one is unknown */
-    MSB_COND_DEPTH = 32,  /* parentheses of a condition; deeper is unknown */
-    MSB_SIGNIFICANT = 15, /* the decimal digits a double holds exactly */
     MSB_PATH_MARK = 1,    /* first byte of a repository-absolute path */
     MSB_INIT = 16,
 };
@@ -1703,10 +1701,6 @@ static const char *msb_expand(msb_eval_t *ev, int file, const char *text) {
 
 /* ── Conditions ──────────────────────────────────────────────────── */
 
-static msb_tri_t tri_not(msb_tri_t v) {
-    return v == MSB_UNKNOWN ? MSB_UNKNOWN : (v == MSB_TRUE ? MSB_FALSE : MSB_TRUE);
-}
-
 static msb_tri_t tri_and(msb_tri_t a, msb_tri_t b) {
     if (a == MSB_FALSE || b == MSB_FALSE) {
         return MSB_FALSE;
@@ -1737,126 +1731,6 @@ static bool ci_is(const char *a, size_t an, const char *word) {
     return ci_eq_n(a, an, word, strlen(word));
 }
 
-/* A string MSBuild converts to a boolean: 1, 0, or -1 for any other. */
-static int msb_bool(const char *s, size_t n) {
-    if (ci_is(s, n, "true") || ci_is(s, n, "on") || ci_is(s, n, "yes")) {
-        return SKIP_ONE;
-    }
-    if (ci_is(s, n, "false") || ci_is(s, n, "off") || ci_is(s, n, "no")) {
-        return 0;
-    }
-    return CBM_NOT_FOUND;
-}
-
-/* A decimal number as its parts, leading and trailing zeros dropped. */
-typedef struct {
-    bool neg;
-    const char *ip;
-    size_t il;
-    const char *fp;
-    size_t fl;
-} msb_num_t;
-
-/* [+-]digits[.digits] or [+-].digits, nothing else. */
-static bool msb_decimal(const char *s, size_t n, msb_num_t *out) {
-    size_t i = 0;
-    memset(out, 0, sizeof(*out));
-    if (i < n && (s[i] == '+' || s[i] == '-')) {
-        out->neg = s[i] == '-';
-        i++;
-    }
-    size_t is = i;
-    while (i < n && isdigit((unsigned char)s[i])) {
-        i++;
-    }
-    size_t ie = i;
-    size_t fs = i;
-    size_t fe = i;
-    if (i < n && s[i] == '.') {
-        i++;
-        fs = i;
-        while (i < n && isdigit((unsigned char)s[i])) {
-            i++;
-        }
-        fe = i;
-    }
-    if (i != n || (ie == is && fe == fs)) {
-        return false;
-    }
-    bool nonzero = false;
-    for (size_t k = is; k < fe; k++) {
-        nonzero = nonzero || (s[k] != '0' && s[k] != '.');
-    }
-    while (is < ie && s[is] == '0') {
-        is++;
-    }
-    while (fe > fs && s[fe - SKIP_ONE] == '0') {
-        fe--;
-    }
-    out->ip = s + is;
-    out->il = ie - is;
-    out->fp = s + fs;
-    out->fl = fe - fs;
-    if (!nonzero) {
-        out->neg = false; /* -0 is 0 */
-    }
-    return true;
-}
-
-/* Text some conversion could read as a number although msb_decimal does not
- * (hexadecimal, an exponent). */
-static bool msb_numberish(const char *s, size_t n) {
-    if (n == 0 || !(isdigit((unsigned char)s[0]) || s[0] == '+' || s[0] == '-' || s[0] == '.')) {
-        return false;
-    }
-    for (size_t i = 0; i < n; i++) {
-        unsigned char c = (unsigned char)s[i];
-        if (!(isxdigit(c) || c == 'x' || c == 'X' || c == '.' || c == '+' || c == '-')) {
-            return false;
-        }
-    }
-    return true;
-}
-
-/* MSBuild's `==` on two expanded operands, as far as it can be known. */
-static msb_tri_t msb_equal_spans(const char *a, size_t an, const char *b, size_t bn) {
-    if (ci_eq_n(a, an, b, bn)) {
-        return MSB_TRUE; /* the same text is equal under every conversion */
-    }
-    /* An absolute path: where the repository lies is not known here, so its
-     * real text is not. Two of them differ as their marked texts do; one is
-     * never the empty string; any other comparison is open. */
-    bool ma = an > 0 && a[0] == MSB_PATH_MARK;
-    bool mb = bn > 0 && b[0] == MSB_PATH_MARK;
-    if (memchr(a + ma, MSB_PATH_MARK, an - ma) || memchr(b + mb, MSB_PATH_MARK, bn - mb)) {
-        return MSB_UNKNOWN;
-    }
-    if (ma || mb) {
-        return ((ma && mb) || an == 0 || bn == 0) ? MSB_FALSE : MSB_UNKNOWN;
-    }
-    int ba = msb_bool(a, an);
-    int bb = msb_bool(b, bn);
-    if (ba >= 0 && bb >= 0) {
-        return ba == bb ? MSB_TRUE : MSB_FALSE;
-    }
-    msb_num_t na;
-    msb_num_t nb;
-    bool da = msb_decimal(a, an, &na);
-    bool db = msb_decimal(b, bn, &nb);
-    if (da && db) {
-        if (na.il + na.fl > MSB_SIGNIFICANT || nb.il + nb.fl > MSB_SIGNIFICANT) {
-            return MSB_UNKNOWN; /* MSBuild compares doubles: these may round together */
-        }
-        bool same = na.neg == nb.neg && na.il == nb.il && na.fl == nb.fl &&
-                    memcmp(na.ip, nb.ip, na.il) == 0 && memcmp(na.fp, nb.fp, na.fl) == 0;
-        return same ? MSB_TRUE : MSB_FALSE;
-    }
-    if ((da || msb_numberish(a, an)) && (db || msb_numberish(b, bn))) {
-        return MSB_UNKNOWN;
-    }
-    return MSB_FALSE;
-}
-
 static void trim_span(const char **s, size_t *n) {
     while (*n > 0 && isspace((unsigned char)(*s)[0])) {
         (*s)++;
@@ -1867,223 +1741,33 @@ static void trim_span(const char **s, size_t *n) {
     }
 }
 
-/* A property's value keeps the white space its element was written with.
- * Whether a comparison sees it is not something to guess: the two readings
- * must agree. */
-static msb_tri_t msb_equal(const char *a, const char *b) {
-    size_t an = strlen(a);
-    size_t bn = strlen(b);
-    msb_tri_t as_written = msb_equal_spans(a, an, b, bn);
-    trim_span(&a, &an);
-    trim_span(&b, &bn);
-    msb_tri_t trimmed = msb_equal_spans(a, an, b, bn);
-    return as_written == trimmed ? as_written : MSB_UNKNOWN;
-}
-
-/* A value standing alone as a condition. */
-static msb_tri_t msb_truth(const char *v) {
-    size_t n = strlen(v);
-    int as_written = msb_bool(v, n);
-    trim_span(&v, &n);
-    int trimmed = msb_bool(v, n);
-    if (as_written != trimmed || trimmed < 0) {
-        return MSB_UNKNOWN;
-    }
-    return trimmed ? MSB_TRUE : MSB_FALSE;
-}
-
+/* The Rust parser borrows operands until its per-comparison reset. The
+ * existing expansion path owns scratch allocation and records property reads
+ * against the current file and cache dependency view. */
 typedef struct {
     msb_eval_t *ev;
     int file;
-    const char *s;
-    int depth;
-    bool bad; /* not a condition this reader can parse */
-} msb_cond_t;
+} msb_cond_host_t;
 
-static void cond_ws(msb_cond_t *c) {
-    while (isspace((unsigned char)*c->s)) {
-        c->s++;
-    }
+int mori_msbuild_condition(const char *condition, void *context,
+                           const char *(*read)(void *, const char *, size_t, bool),
+                           void (*reset)(void *));
+int mori_msbuild_equal(const char *left, const char *right);
+
+static const char *msb_cond_read(void *context, const char *text, size_t len, bool expand) {
+    msb_cond_host_t *host = context;
+    const char *value = scratch_strndup(host->ev, text, len);
+    return value && expand ? msb_expand(host->ev, host->file, value) : value;
 }
 
-/* The keyword `kw` (lower case) stands next: consume it. */
-static bool cond_keyword(msb_cond_t *c, const char *kw) {
-    cond_ws(c);
-    size_t n = strlen(kw);
-    for (size_t i = 0; i < n; i++) {
-        if (tolower((unsigned char)c->s[i]) != kw[i]) {
-            return false;
-        }
-    }
-    unsigned char after = (unsigned char)c->s[n];
-    if (isalnum(after) || after == '_') {
-        return false;
-    }
-    c->s += n;
-    return true;
+static void msb_cond_reset(void *context) {
+    msb_cond_host_t *host = context;
+    cbm_arena_reset(&host->ev->scratch);
 }
 
-/* Past the group opened by the '(' at c->s (quotes respected); false when it
- * does not close. */
-static bool cond_skip_group(msb_cond_t *c) {
-    int depth = 0;
-    for (const char *p = c->s; *p; p++) {
-        if (*p == '\'') {
-            p = strchr(p + SKIP_ONE, '\'');
-            if (!p) {
-                return false;
-            }
-        } else if (*p == '(') {
-            depth++;
-        } else if (*p == ')' && --depth == 0) {
-            c->s = p + SKIP_ONE;
-            return true;
-        }
-    }
-    return false;
-}
-
-/* An operand: 'text', $(Property), a bare word, or a function call. Returns
- * its value, NULL when that is not known; *ok false when no operand stands
- * here. */
-static const char *cond_value(msb_cond_t *c, bool *ok) {
-    cond_ws(c);
-    *ok = true;
-    const char *s = c->s;
-    if (*s == '\'') {
-        const char *e = strchr(s + SKIP_ONE, '\'');
-        if (!e) {
-            *ok = false;
-            return NULL;
-        }
-        c->s = e + SKIP_ONE;
-        const char *lit = scratch_strndup(c->ev, s + SKIP_ONE, (size_t)(e - s - SKIP_ONE));
-        return lit ? msb_expand(c->ev, c->file, lit) : NULL;
-    }
-    if (s[0] == '$' && s[1] == '(') {
-        c->s = s + SKIP_ONE;
-        if (!cond_skip_group(c)) {
-            *ok = false;
-            return NULL;
-        }
-        const char *ref = scratch_strndup(c->ev, s, (size_t)(c->s - s));
-        return ref ? msb_expand(c->ev, c->file, ref) : NULL;
-    }
-    const char *e = s;
-    while (isalnum((unsigned char)*e) || *e == '_' || *e == '.' || *e == '-' || *e == '+') {
-        e++;
-    }
-    if (e == s) {
-        *ok = false;
-        return NULL;
-    }
-    c->s = e;
-    cond_ws(c);
-    if (*c->s == '(') {
-        *ok = cond_skip_group(c); /* Exists(...), HasTrailingSlash(...): not evaluated */
-        return NULL;
-    }
-    return scratch_strndup(c->ev, s, (size_t)(e - s));
-}
-
-static msb_tri_t cond_or(msb_cond_t *c);
-
-static msb_tri_t cond_comparison_value(msb_cond_t *c) {
-    bool ok = false;
-    const char *lhs = cond_value(c, &ok);
-    if (!ok) {
-        c->bad = true;
-        return MSB_UNKNOWN;
-    }
-    cond_ws(c);
-    char op0 = c->s[0];
-    char op1 = op0 ? c->s[1] : '\0';
-    if ((op0 == '=' || op0 == '!') && op1 == '=') {
-        c->s += PAIR_LEN;
-        const char *rhs = cond_value(c, &ok);
-        if (!ok) {
-            c->bad = true;
-            return MSB_UNKNOWN;
-        }
-        msb_tri_t v = (lhs && rhs) ? msb_equal(lhs, rhs) : MSB_UNKNOWN;
-        return op0 == '!' ? tri_not(v) : v;
-    }
-    if (op0 == '<' || op0 == '>') {
-        c->s += op1 == '=' ? PAIR_LEN : SKIP_ONE; /* an order of numbers or versions */
-        (void)cond_value(c, &ok);
-        c->bad = c->bad || !ok;
-        return MSB_UNKNOWN;
-    }
-    return lhs ? msb_truth(lhs) : MSB_UNKNOWN;
-}
-
-/* Both operands must survive through comparison, including every error
- * return. Only the primitive result escapes to the surrounding condition. */
-static msb_tri_t cond_comparison(msb_cond_t *c) {
-    msb_tri_t result = cond_comparison_value(c);
-    cbm_arena_reset(&c->ev->scratch);
-    return result;
-}
-
-static msb_tri_t cond_primary(msb_cond_t *c) {
-    cond_ws(c);
-    bool negate = false;
-    while (c->s[0] == '!' && c->s[1] != '=') {
-        negate = !negate;
-        c->s++;
-        cond_ws(c);
-    }
-    msb_tri_t v = MSB_UNKNOWN;
-    if (*c->s == '(') {
-        if (c->depth >= MSB_COND_DEPTH) {
-            c->bad = true;
-            return MSB_UNKNOWN;
-        }
-        c->s++;
-        c->depth++;
-        v = cond_or(c);
-        c->depth--;
-        cond_ws(c);
-        if (*c->s != ')') {
-            c->bad = true;
-            return MSB_UNKNOWN;
-        }
-        c->s++;
-    } else {
-        v = cond_comparison(c);
-    }
-    return negate ? tri_not(v) : v;
-}
-
-static msb_tri_t cond_and(msb_cond_t *c) {
-    msb_tri_t v = cond_primary(c);
-    while (!c->bad && cond_keyword(c, "and")) {
-        v = tri_and(v, cond_primary(c));
-    }
-    return v;
-}
-
-static msb_tri_t cond_or(msb_cond_t *c) {
-    msb_tri_t v = cond_and(c);
-    while (!c->bad && cond_keyword(c, "or")) {
-        v = tri_or(v, cond_and(c));
-    }
-    return v;
-}
-
-/* A Condition attribute, read in `file`. `and` binds tighter than `or`. */
-static msb_tri_t msb_cond(msb_eval_t *ev, int file, const char *cond) {
-    if (!cond) {
-        return MSB_TRUE;
-    }
-    msb_cond_t c = {.ev = ev, .file = file, .s = cond};
-    cond_ws(&c);
-    if (!*c.s) {
-        return MSB_TRUE;
-    }
-    msb_tri_t v = cond_or(&c);
-    cond_ws(&c);
-    return (c.bad || *c.s) ? MSB_UNKNOWN : v;
+static msb_tri_t msb_cond(msb_eval_t *ev, int file, const char *condition) {
+    msb_cond_host_t host = {.ev = ev, .file = file};
+    return mori_msbuild_condition(condition, &host, msb_cond_read, msb_cond_reset);
 }
 
 /* ── Imports ─────────────────────────────────────────────────────── */
@@ -3006,8 +2690,10 @@ static const char *const *msb_implicit(msb_eval_t *ev, int project) {
     if (!p) {
         return NULL;
     }
-    msb_tri_t on =
-        p->value ? tri_or(msb_equal(p->value, "enable"), msb_equal(p->value, "true")) : MSB_UNKNOWN;
+    msb_tri_t on = MSB_UNKNOWN;
+    if (p->value) {
+        on = tri_or(mori_msbuild_equal(p->value, "enable"), mori_msbuild_equal(p->value, "true"));
+    }
     if (on == MSB_UNKNOWN) {
         ev->open = true;
         ev->unevaluable++;

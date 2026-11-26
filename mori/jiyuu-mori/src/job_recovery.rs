@@ -1,5 +1,7 @@
 //! Retry contained index worker failures without releasing the daemon's job reservation.
 
+mod provider_repair;
+
 use std::ffi::c_int;
 
 const CANCELLED: u8 = 1;

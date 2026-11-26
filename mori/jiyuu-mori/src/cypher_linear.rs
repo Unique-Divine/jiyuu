@@ -1069,16 +1069,12 @@ fn match_query<'a>(
         slots.push(slot);
     }
     let mut paths = paths::Plan::new(optional, &nodes, &hops, slots);
-    if parser.tokens.path_syntax {
-        paths.parse_clauses(parser)?;
-    }
+    paths.parse_clauses(parser)?;
     let filter = parser
         .keyword("WHERE")
         .then(|| parser.where_expr())
         .transpose()?;
-    if parser.tokens.path_syntax {
-        paths.parse_clauses(parser)?;
-    }
+    paths.parse_clauses(parser)?;
     let paths = paths.into_optional()?;
     let with = parser
         .keyword("WITH")

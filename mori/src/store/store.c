@@ -3696,67 +3696,13 @@ typedef struct {
     void *context;
 } file_outline_cancel_guard_t;
 
-static bool file_outline_cancelled(const file_outline_cancel_guard_t *guard) {
-    return guard && guard->cancel && guard->cancel(guard->context);
+static bool file_outline_cancelled(void *context) {
+    const file_outline_cancel_guard_t *guard = context;
+    return guard->cancel && guard->cancel(guard->context);
 }
 
 static int file_outline_progress_cancel(void *context) {
-    return file_outline_cancelled((const file_outline_cancel_guard_t *)context) ? 1 : 0;
-}
-
-static bool file_outline_build_sql(char *sql, size_t sql_size, bool count_only, int label_count) {
-    int written =
-        snprintf(sql, sql_size,
-                 count_only ? "SELECT COUNT(*) FROM nodes WHERE project = ?1 AND file_path = ?2 "
-                              "AND label NOT IN ('Module','Package','File','Folder','Project')"
-                            : "SELECT name, label, qualified_name, start_line, end_line FROM nodes "
-                              "WHERE project = ?1 AND file_path = ?2 "
-                              "AND label NOT IN ('Module','Package','File','Folder','Project')");
-    if (written < 0 || (size_t)written >= sql_size) {
-        return false;
-    }
-    size_t used = (size_t)written;
-    if (label_count > 0) {
-        written = snprintf(sql + used, sql_size - used, " AND label IN (");
-        if (written < 0 || (size_t)written >= sql_size - used) {
-            return false;
-        }
-        used += (size_t)written;
-        for (int i = 0; i < label_count; i++) {
-            written = snprintf(sql + used, sql_size - used, "%s?%d", i > 0 ? "," : "", i + 3);
-            if (written < 0 || (size_t)written >= sql_size - used) {
-                return false;
-            }
-            used += (size_t)written;
-        }
-        written = snprintf(sql + used, sql_size - used, ")");
-        if (written < 0 || (size_t)written >= sql_size - used) {
-            return false;
-        }
-        used += (size_t)written;
-    }
-    if (!count_only) {
-        int limit_bind = label_count + 3;
-        int offset_bind = limit_bind + 1;
-        written = snprintf(sql + used, sql_size - used,
-                           " ORDER BY start_line, end_line, label COLLATE BINARY, "
-                           "name COLLATE BINARY, qualified_name COLLATE BINARY, id "
-                           "LIMIT ?%d OFFSET ?%d",
-                           limit_bind, offset_bind);
-        if (written < 0 || (size_t)written >= sql_size - used) {
-            return false;
-        }
-    }
-    return true;
-}
-
-static void file_outline_bind_common(sqlite3_stmt *stmt, const char *project, const char *file_path,
-                                     const char *const *labels, int label_count) {
-    bind_text(stmt, ST_COL_1, project);
-    bind_text(stmt, ST_COL_2, file_path);
-    for (int i = 0; i < label_count; i++) {
-        bind_text(stmt, i + 3, labels[i]);
-    }
+    return file_outline_cancelled(context) ? 1 : 0;
 }
 
 void cbm_store_free_file_outline(cbm_file_outline_row_t *rows, int count) {
@@ -3764,63 +3710,18 @@ void cbm_store_free_file_outline(cbm_file_outline_row_t *rows, int count) {
         return;
     }
     for (int i = 0; i < count; i++) {
-        free((char *)rows[i].name);
-        free((char *)rows[i].label);
-        free((char *)rows[i].qualified_name);
+        sqlite3_free((char *)rows[i].name);
+        sqlite3_free((char *)rows[i].label);
+        sqlite3_free((char *)rows[i].qualified_name);
     }
-    free(rows);
+    sqlite3_free(rows);
 }
 
-static cbm_file_outline_reader_fn file_outline_reader;
-
-void cbm_store_set_file_outline_reader(cbm_file_outline_reader_fn reader) {
-    file_outline_reader = reader;
-}
-
-typedef struct {
-    const file_outline_cancel_guard_t *guard;
-    cbm_file_outline_row_t *rows;
-    int count;
-    int limit;
-    size_t text_bytes;
-} file_outline_page_t;
-
-static char *file_outline_copy_text(const char *bytes, size_t length) {
-    const char *nul = memchr(bytes, '\0', length);
-    if (nul) {
-        length = (size_t)(nul - bytes);
-    }
-    char *copy = malloc(length + 1U);
-    if (copy) {
-        memcpy(copy, bytes, length);
-        copy[length] = '\0';
-    }
-    return copy;
-}
-
-static int file_outline_emit(void *context, const cbm_file_outline_row_t *row,
-                             const size_t lengths[3]) {
-    file_outline_page_t *page = context;
-    if (file_outline_cancelled(page->guard)) {
-        return CBM_STORE_CANCELLED;
-    }
-    size_t text_bytes = lengths[0] + lengths[1] + lengths[2] + 3U;
-    if (page->count == page->limit ||
-        text_bytes > CBM_STORE_FILE_OUTLINE_MAX_TEXT_BYTES - page->text_bytes) {
-        return CBM_STORE_SCAN_LIMIT;
-    }
-    cbm_file_outline_row_t *copy = &page->rows[page->count++];
-    *copy = (cbm_file_outline_row_t){.name = file_outline_copy_text(row->name, lengths[0]),
-                                      .label = file_outline_copy_text(row->label, lengths[1]),
-                                      .qualified_name = file_outline_copy_text(row->qualified_name, lengths[2]),
-                                      .start_line = row->start_line,
-                                      .end_line = row->end_line};
-    if (!copy->name || !copy->label || !copy->qualified_name) {
-        return CBM_STORE_ERR;
-    }
-    page->text_bytes += text_bytes;
-    return CBM_STORE_OK;
-}
+/* Rust borrows this store's connection while the native progress guard is live. */
+extern int mori_read_file_outline(sqlite3 *db, const char *project, const char *file_path,
+                                  const char *const *labels, int label_count, int limit, int offset,
+                                  size_t text_budget, cbm_store_cancel_fn cancel, void *context,
+                                  cbm_file_outline_row_t **out, int *count, int *total);
 
 int cbm_store_get_file_outline(cbm_store_t *s, const char *project, const char *file_path,
                                const char *const *labels, int label_count, int limit, int offset,
@@ -3857,139 +3758,20 @@ int cbm_store_get_file_outline(cbm_store_t *s, const char *project, const char *
         return CBM_STORE_ERR;
     }
 
-    if (file_outline_reader) {
-        file_outline_page_t page = {.guard = &guard, .limit = limit};
-        page.rows = calloc((size_t)limit, sizeof(*page.rows));
-        int status = page.rows ? file_outline_reader(s->db, project, file_path, labels,
-                                                     label_count, limit, offset, total,
-                                                     file_outline_emit, &page)
-                               : CBM_STORE_ERR;
-        if (file_outline_cancelled(&guard)) {
-            status = CBM_STORE_CANCELLED;
-        }
-        store_progress_release(s, &guard);
-        if (status != CBM_STORE_OK) {
-            cbm_store_free_file_outline(page.rows, page.count);
-            *total = 0;
-            return status;
-        }
-        *out = page.rows;
-        *count = page.count;
-        return CBM_STORE_OK;
+    int status = mori_read_file_outline(s->db, project, file_path, labels, label_count, limit,
+                                        offset, CBM_STORE_FILE_OUTLINE_MAX_TEXT_BYTES,
+                                        file_outline_cancelled, &guard, out, count, total);
+    if (file_outline_cancelled(&guard)) {
+        status = CBM_STORE_CANCELLED;
     }
-
-    char sql[ST_SQL_BUF];
-    if (!file_outline_build_sql(sql, sizeof(sql), true, label_count)) {
-        store_progress_release(s, &guard);
-        return CBM_STORE_ERR;
-    }
-    sqlite3_stmt *stmt = NULL;
-    int rc = sqlite3_prepare_v2(s->db, sql, CBM_NOT_FOUND, &stmt, NULL);
-    if (rc != SQLITE_OK) {
-        store_set_error_sqlite(s, "file outline count prepare");
-        store_progress_release(s, &guard);
-        return CBM_STORE_ERR;
-    }
-    file_outline_bind_common(stmt, project, file_path, labels, label_count);
-    rc = sqlite3_step(stmt);
-    if (rc == SQLITE_ROW) {
-        *total = sqlite3_column_int(stmt, 0);
-    }
-    sqlite3_finalize(stmt);
-    if (rc == SQLITE_INTERRUPT || file_outline_cancelled(&guard)) {
-        store_progress_release(s, &guard);
-        *total = 0;
-        return CBM_STORE_CANCELLED;
-    }
-    if (rc != SQLITE_ROW) {
-        store_set_error_sqlite(s, "file outline count");
-        store_progress_release(s, &guard);
-        *total = 0;
-        return CBM_STORE_ERR;
-    }
-
-    if (!file_outline_build_sql(sql, sizeof(sql), false, label_count)) {
-        store_progress_release(s, &guard);
-        *total = 0;
-        return CBM_STORE_ERR;
-    }
-    stmt = NULL;
-    rc = sqlite3_prepare_v2(s->db, sql, CBM_NOT_FOUND, &stmt, NULL);
-    if (rc != SQLITE_OK) {
-        store_set_error_sqlite(s, "file outline prepare");
-        store_progress_release(s, &guard);
-        *total = 0;
-        return CBM_STORE_ERR;
-    }
-    file_outline_bind_common(stmt, project, file_path, labels, label_count);
-    sqlite3_bind_int(stmt, label_count + 3, limit);
-    sqlite3_bind_int(stmt, label_count + 4, offset);
-
-    cbm_file_outline_row_t *rows = calloc((size_t)limit, sizeof(*rows));
-    if (!rows) {
-        sqlite3_finalize(stmt);
-        store_progress_release(s, &guard);
-        *total = 0;
-        return CBM_STORE_ERR;
-    }
-    size_t text_bytes = 0U;
-    int n = 0;
-    bool was_cancelled = false;
-    for (;;) {
-        if (file_outline_cancelled(&guard)) {
-            was_cancelled = true;
-            break;
-        }
-        rc = sqlite3_step(stmt);
-        if (rc != SQLITE_ROW) {
-            break;
-        }
-        const char *name = (const char *)sqlite3_column_text(stmt, 0);
-        const char *label = (const char *)sqlite3_column_text(stmt, 1);
-        const char *qn = (const char *)sqlite3_column_text(stmt, 2);
-        size_t row_bytes = (size_t)sqlite3_column_bytes(stmt, 0) +
-                           (size_t)sqlite3_column_bytes(stmt, 1) +
-                           (size_t)sqlite3_column_bytes(stmt, 2) + 3U;
-        if (row_bytes > CBM_STORE_FILE_OUTLINE_MAX_TEXT_BYTES - text_bytes) {
-            sqlite3_finalize(stmt);
-            store_progress_release(s, &guard);
-            cbm_store_free_file_outline(rows, n);
-            *total = 0;
-            return CBM_STORE_SCAN_LIMIT;
-        }
-        rows[n].name = heap_strdup(name ? name : "");
-        rows[n].label = heap_strdup(label ? label : "");
-        rows[n].qualified_name = heap_strdup(qn ? qn : "");
-        rows[n].start_line = sqlite3_column_int(stmt, 3);
-        rows[n].end_line = sqlite3_column_int(stmt, 4);
-        if (!rows[n].name || !rows[n].label || !rows[n].qualified_name) {
-            sqlite3_finalize(stmt);
-            store_progress_release(s, &guard);
-            cbm_store_free_file_outline(rows, n + 1);
-            *total = 0;
-            return CBM_STORE_ERR;
-        }
-        text_bytes += row_bytes;
-        n++;
-    }
-    was_cancelled = was_cancelled || rc == SQLITE_INTERRUPT || file_outline_cancelled(&guard);
-    sqlite3_finalize(stmt);
     store_progress_release(s, &guard);
-    if (was_cancelled) {
-        cbm_store_free_file_outline(rows, n);
+    if (status != CBM_STORE_OK) {
+        cbm_store_free_file_outline(*out, *count);
+        *out = NULL;
+        *count = 0;
         *total = 0;
-        return CBM_STORE_CANCELLED;
     }
-    if (rc != SQLITE_DONE) {
-        store_set_error_sqlite(s, "file outline rows");
-        cbm_store_free_file_outline(rows, n);
-        *total = 0;
-        return CBM_STORE_ERR;
-    }
-
-    *out = rows;
-    *count = n;
-    return CBM_STORE_OK;
+    return status;
 }
 
 int cbm_store_count_nodes(cbm_store_t *s, const char *project) {

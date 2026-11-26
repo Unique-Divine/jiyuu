@@ -3,7 +3,11 @@
 pub mod ipc;
 
 #[cfg(feature = "native-engine-abi")]
+mod ansible;
+#[cfg(feature = "native-engine-abi")]
 mod architecture_projection;
+#[cfg(feature = "native-engine-abi")]
+mod closure_plan;
 #[cfg(any(feature = "native-engine-abi", test))]
 mod complexity;
 #[cfg(feature = "native-engine-abi")]
@@ -21,19 +25,33 @@ mod jvm_doc_links;
 #[cfg(feature = "native-engine-abi")]
 mod kubernetes;
 #[cfg(feature = "native-engine-abi")]
+mod msbuild_condition;
+#[cfg(feature = "native-engine-abi")]
 mod native_graph_buffer;
 #[cfg(feature = "native-engine-abi")]
 mod native_hash_table;
+#[cfg(feature = "native-engine-abi")]
+mod native_parser;
+#[cfg(any(feature = "native-engine-abi", test))]
+mod operator_helm;
 #[cfg(feature = "native-engine-abi")]
 mod pdf_doc_links;
 #[cfg(feature = "native-engine-abi")]
 mod rust_doc_cargo;
 #[cfg(feature = "native-engine-abi")]
 mod rust_doc_path;
+#[cfg(any(feature = "native-engine-abi", test))]
+mod semantic_candidates;
 #[cfg(feature = "native-engine-abi")]
 mod shell_pass;
 #[cfg(any(feature = "native-engine-abi", test))]
 mod similarity;
+#[cfg(any(feature = "native-engine-abi", test))]
+mod snippet_window;
+#[cfg(any(feature = "native-engine-abi", test))]
+mod swift_package_map;
+#[cfg(feature = "native-engine-abi")]
+mod terraform;
 #[cfg(feature = "native-engine-abi")]
 mod test_impact_git;
 
@@ -157,6 +175,8 @@ mod config_text_edit;
 mod config_toml_edit;
 #[cfg(feature = "native-engine-abi")]
 mod config_yaml_edit;
+#[cfg(feature = "native-engine-abi")]
+mod file_outline;
 #[cfg(feature = "native-engine-abi")]
 mod fts_writer;
 #[cfg(feature = "native-engine-abi")]

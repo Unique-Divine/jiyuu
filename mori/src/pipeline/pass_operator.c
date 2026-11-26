@@ -1,7 +1,7 @@
 /*
  * pass_operator.c — Go Kubernetes operators (PHASE1 P1.2).
  *
- * A controller-runtime operator ties Go code to Kubernetes kinds in three
+ * A controller-runtime operator ties Go code to Kubernetes kinds in four
  * ways the type graph alone does not carry:
  *   - a controller is built `For(&v1.Widget{})`, `Owns(&v1.Gadget{})`,
  *     `Watches(&v1.X{}, ...)` or watches `source.Kind(cache, &v1.X{})`:
@@ -991,17 +991,6 @@ typedef struct {
     int param;  /* index of the chart-directory parameter */
 } gc_loader_t;
 
-typedef struct {
-    const char *dir; /* graph-owned chart dir path */
-    int64_t id;
-} gc_chart_t;
-
-typedef struct {
-    gc_chart_t *items;
-    int count;
-    int cap;
-} gc_charts_t;
-
 /* One chart load whose argument evaluated: linked once all are read. */
 typedef struct {
     int64_t fn;
@@ -1023,11 +1012,9 @@ typedef struct {
     int nnoted;
     int cap_noted;
     CBMHashTable *consts; /* dir -> CBMHashTable name -> expression (owned) */
-    CBMHashTable *charts; /* chart dir basename -> gc_charts_t */
     gc_site_t *sites;
     int nsites;
     int cap_sites;
-    int edges;
 } gc_t;
 
 typedef struct {
@@ -1397,7 +1384,7 @@ static CBMHashTable *gc_consts(gc_t *g, const char *dir) {
     }
     cbm_ht_set(g->consts, key, t);
     size_t dl = strlen(dir);
-    for (int i = 0; i < g->nfiles; i++) {
+    for (int i = 0; i < g->nfiles && !cbm_pipeline_check_cancel(g->ctx); i++) {
         const char *fp = g->files[i]->file_path;
         const char *slash = strrchr(fp, '/');
         size_t fdl = slash ? (size_t)(slash - fp) : 0;
@@ -1618,98 +1605,6 @@ static void gc_eval(const gc_scope_t *sc, const char *s, size_t n, int depth, gc
     }
 }
 
-/* ── Charts and edges ── */
-
-static void gc_free_chart_list(const char *key, void *value, void *ud) {
-    (void)ud;
-    gc_charts_t *v = value;
-    cbm_free(CBM_MEM_CLASS_OTHER, v->items);
-    cbm_free(CBM_MEM_CLASS_OTHER, v);
-    cbm_free(CBM_MEM_CLASS_OTHER, (void *)key);
-}
-
-static CBMHashTable *gc_chart_index(const cbm_gbuf_t *gb) {
-    CBMHashTable *ix = cbm_ht_create(0);
-    const cbm_gbuf_node_t **nodes = NULL;
-    int count = 0;
-    if (!ix || cbm_gbuf_find_by_label(gb, "Chart", &nodes, &count) != 0) {
-        return ix;
-    }
-    for (int i = 0; i < count; i++) {
-        const char *fp = nodes[i]->file_path;
-        const char *qn = nodes[i]->qualified_name;
-        const char *slash = fp ? strrchr(fp, '/') : NULL;
-        const char *base = slash ? slash + SKIP_ONE : fp;
-        if (!fp || !qn || cbm_pipeline_chart_is_external(nodes[i]) ||
-            (strcmp(base, "Chart.yaml") != 0 && strcmp(base, "Chart.yml") != 0) || !slash) {
-            continue;
-        }
-        const char *db = slash;
-        while (db > fp && db[-SKIP_ONE] != '/') {
-            db--;
-        }
-        char key[CBM_SZ_256];
-        snprintf(key, sizeof(key), "%.*s", (int)(slash - db), db);
-        gc_charts_t *v = cbm_ht_get(ix, key);
-        if (!v) {
-            v = cbm_calloc(CBM_MEM_CLASS_OTHER, sizeof(*v));
-            char *k = cbm_mem_strdup(CBM_MEM_CLASS_OTHER, key);
-            if (!v || !k) {
-                cbm_free(CBM_MEM_CLASS_OTHER, v);
-                cbm_free(CBM_MEM_CLASS_OTHER, k);
-                continue;
-            }
-            cbm_ht_set(ix, k, v);
-        }
-        if (gc_grow((void **)&v->items, &v->cap, v->count, sizeof(*v->items))) {
-            v->items[v->count++] = (gc_chart_t){fp, nodes[i]->id};
-        }
-    }
-    return ix;
-}
-
-/* The one chart directory a value names: the tail itself, or the only chart
- * directory ending with it. */
-static const gc_chart_t *gc_match(gc_t *g, const gc_val_t *v, char *dir, size_t dir_sz) {
-    const char *t = v->s;
-    while (t[0] == '.' && t[SKIP_ONE] == '/') {
-        t += PAIR_LEN;
-    }
-    while (*t == '/') {
-        t++;
-    }
-    snprintf(dir, dir_sz, "%s", t);
-    size_t dl = strlen(dir);
-    while (dl && dir[dl - SKIP_ONE] == '/') {
-        dir[--dl] = '\0';
-    }
-    if (!dl) {
-        return NULL;
-    }
-    const char *base = strrchr(dir, '/');
-    base = base ? base + SKIP_ONE : dir;
-    const gc_charts_t *list = cbm_ht_get(g->charts, base);
-    const gc_chart_t *hit = NULL;
-    for (int i = 0; list && i < list->count; i++) {
-        atomic_fetch_add_explicit(&g_op_candidates, SKIP_ONE, memory_order_relaxed);
-        const char *cd = list->items[i].dir; /* "<dir>/Chart.yaml" */
-        size_t cl = (size_t)(strrchr(cd, '/') - cd);
-        bool same = cl == dl && strncmp(cd, dir, dl) == 0;
-        bool tail = cl > dl && cd[cl - dl - SKIP_ONE] == '/' && strncmp(cd + cl - dl, dir, dl) == 0;
-        if (same || tail) {
-            if (hit) {
-                return NULL;
-            }
-            hit = &list->items[i];
-        }
-    }
-    if (hit) {
-        const char *cd = hit->dir;
-        snprintf(dir, dir_sz, "%.*s", (int)(strrchr(cd, '/') - cd), cd);
-    }
-    return hit;
-}
-
 /* The body of the top-level function around `at`, else NULL; *sig: its
  * `func` keyword. */
 static const char *gc_body_of(const char *text, const char *at, const char **end,
@@ -1774,105 +1669,68 @@ static void gc_link_call(gc_t *g, const char *file, const char *text, const char
                     v.open_root && v.root[0] ? cbm_mem_strdup(CBM_MEM_CLASS_OTHER, v.root) : NULL};
 }
 
-static void gc_edge(gc_t *g, const gc_site_t *s, const gc_chart_t *hit, const char *chart,
+/* Rust borrows the collected sites and graph-owned chart paths for this
+ * call. The graph buffer remains responsible for copying edge properties. */
+typedef struct {
+    cbm_pipeline_ctx_t *ctx;
+    const cbm_gbuf_node_t **charts;
+} gc_link_run_t;
+
+typedef struct {
+    int64_t id;
+    const char *path;
+} gc_chart_t;
+
+typedef struct {
+    gc_chart_t (*chart_at)(const gc_link_run_t *run, int index);
+    bool (*cancelled)(const gc_link_run_t *run);
+    void (*emit)(gc_link_run_t *run, const gc_site_t *site, int64_t chart_id, const char *chart,
+                 const char *root);
+} gc_link_ops_t;
+
+extern int cbm_rust_operator_helm_deploys(gc_link_run_t *run, const gc_link_ops_t *ops,
+                                          int chart_count, const gc_site_t *sites, int site_count,
+                                          uint64_t *candidates);
+
+static gc_chart_t gc_chart_at(const gc_link_run_t *run, int index) {
+    const cbm_gbuf_node_t *node = run->charts[index];
+    if (!node->file_path || !node->qualified_name || cbm_pipeline_chart_is_external(node)) {
+        return (gc_chart_t){0};
+    }
+    return (gc_chart_t){node->id, node->file_path};
+}
+
+static bool gc_link_cancelled(const gc_link_run_t *run) {
+    return cbm_pipeline_check_cancel(run->ctx) != 0;
+}
+
+static void gc_emit(gc_link_run_t *run, const gc_site_t *site, int64_t chart_id, const char *chart,
                     const char *root) {
     char esc[CBM_SZ_1K];
     char resc[CBM_SZ_512];
     char props[CBM_SZ_2K];
     cbm_json_escape(esc, (int)sizeof(esc), chart);
-    cbm_json_escape(resc, (int)sizeof(resc), root ? root : "");
+    cbm_json_escape(resc, (int)sizeof(resc), root);
     snprintf(props, sizeof(props), "{\"via\":\"helm-sdk\",\"chart\":\"%s\"%s%s%s,\"line\":%d}", esc,
-             root ? ",\"root\":\"" : "", root ? resc : "", root ? "\"" : "", s->line);
-    cbm_gbuf_insert_edge(g->ctx->gbuf, s->fn, hit->id, "DEPLOYS", props);
-    g->edges++;
+             root ? ",\"root\":\"" : "", resc, root ? "\"" : "", site->line);
+    cbm_gbuf_insert_edge(run->ctx->gbuf, site->fn, chart_id, "DEPLOYS", props);
 }
 
-/* The repository dir a chart load's unknown root stood for: the matched
- * chart directory without the tail. */
-static void gc_root_dir(const char *chart, const char *tail, char *out, size_t out_sz) {
-    while (tail[0] == '.' && tail[SKIP_ONE] == '/') {
-        tail += PAIR_LEN;
+static int gc_link_sites(gc_t *g) {
+    gc_link_run_t run = {.ctx = g->ctx};
+    int count = 0;
+    if (g->nsites == 0 || cbm_pipeline_check_cancel(g->ctx) ||
+        cbm_gbuf_find_by_label(g->ctx->gbuf, "Chart", &run.charts, &count) != 0) {
+        return 0;
     }
-    while (*tail == '/') {
-        tail++;
-    }
-    size_t cl = strlen(chart);
-    size_t tl = strlen(tail);
-    while (tl && tail[tl - SKIP_ONE] == '/') {
-        tl--;
-    }
-    size_t rl = cl > tl ? cl - tl - SKIP_ONE : 0;
-    snprintf(out, out_sz, "%.*s", (int)rl, chart);
-}
-
-static const char GC_CONFLICT[] = "\x01";
-
-/* Remember that root text `root` stood for directory `rdir`; two different
- * directories for one root text: it stands for none. */
-static void gc_note_root(CBMHashTable *roots, const char *root, const char *rdir) {
-    const char *known = cbm_ht_get(roots, root);
-    if (!known) {
-        char *k = cbm_mem_strdup(CBM_MEM_CLASS_OTHER, root);
-        char *d = cbm_mem_strdup(CBM_MEM_CLASS_OTHER, rdir);
-        if (k && d) {
-            cbm_ht_set(roots, k, d);
-            return;
-        }
-        cbm_free(CBM_MEM_CLASS_OTHER, k);
-        cbm_free(CBM_MEM_CLASS_OTHER, d);
-        return;
-    }
-    if (strcmp(known, GC_CONFLICT) != 0 && strcmp(known, rdir) != 0) {
-        char *c = cbm_mem_strdup(CBM_MEM_CLASS_OTHER, GC_CONFLICT);
-        if (c) {
-            cbm_free(CBM_MEM_CLASS_OTHER, cbm_ht_set(roots, cbm_ht_get_key(roots, root), c));
-        }
-    }
-}
-
-/* Link the chart loads: a tail exactly one chart directory ends with; else,
- * when the loads under the same unknown root (opt.ChartsDirectory) whose
- * tail matched one directory all put that root at one place, <root>/<tail>. */
-static void gc_link_sites(gc_t *g) {
-    CBMHashTable *roots = cbm_ht_create(0); /* root text -> its dir (owned) */
-    for (int i = 0; roots && i < g->nsites; i++) {
-        const gc_site_t *s = &g->sites[i];
-        gc_val_t v = {.known = true, .open_root = s->root != NULL};
-        snprintf(v.s, sizeof(v.s), "%s", s->tail);
-        char chart[CBM_SZ_1K];
-        if (s->root && gc_match(g, &v, chart, sizeof(chart))) {
-            char rdir[CBM_SZ_1K];
-            gc_root_dir(chart, s->tail, rdir, sizeof(rdir));
-            gc_note_root(roots, s->root, rdir);
-        }
-    }
-    for (int i = 0; roots && i < g->nsites; i++) {
-        const gc_site_t *s = &g->sites[i];
-        gc_val_t v = {.known = true, .open_root = s->root != NULL};
-        snprintf(v.s, sizeof(v.s), "%s", s->tail);
-        char chart[CBM_SZ_1K];
-        const gc_chart_t *hit = gc_match(g, &v, chart, sizeof(chart));
-        if (hit) {
-            gc_edge(g, s, hit, chart, NULL);
-            continue;
-        }
-        const char *rdir = s->root ? cbm_ht_get(roots, s->root) : NULL;
-        if (!rdir || strcmp(rdir, GC_CONFLICT) == 0) {
-            continue;
-        }
-        gc_val_t full = {.known = true};
-        snprintf(full.s, sizeof(full.s), "%s%s%s", rdir, rdir[0] ? "/" : "", s->tail);
-        char want[CBM_SZ_1K];
-        snprintf(want, sizeof(want), "%s", full.s);
-        hit = gc_match(g, &full, chart, sizeof(chart));
-        if (hit && strcmp(chart, want) == 0) {
-            gc_edge(g, s, hit, chart, rdir);
-        }
-    }
-    if (roots) {
-        cbm_ht_foreach(roots, gc_free_expr, NULL);
-        cbm_ht_free(roots);
-    }
+    static const gc_link_ops_t ops = {gc_chart_at, gc_link_cancelled, gc_emit};
+    uint64_t candidates = 0;
+    int edges = cbm_rust_operator_helm_deploys(&run, &ops, count, g->sites, g->nsites, &candidates);
+    atomic_fetch_add_explicit(&g_op_candidates, candidates, memory_order_relaxed);
+    char logged_edges[CBM_SZ_32];
+    snprintf(logged_edges, sizeof(logged_edges), "%d", edges);
+    cbm_log_info("pass.operator_helm", "implementation", "rust", "chart_deploys", logged_edges);
+    return edges;
 }
 
 /* The chart loads in one file: calls of a noted loader (qualified by an
@@ -1956,8 +1814,7 @@ static int gc_run(gc_t *g) {
         return 0;
     }
     g->consts = cbm_ht_create(0);
-    g->charts = gc_chart_index(g->ctx->gbuf);
-    for (int i = 0; g->consts && g->charts && i < g->nnoted; i++) {
+    for (int i = 0; g->consts && i < g->nnoted && !cbm_pipeline_check_cancel(g->ctx); i++) {
         const char *noted = g->noted[i];
         if (!noted || (g->nloaders == 0 && noted[0] != GC_NOTED_SDK)) {
             continue; /* no loader it could call */
@@ -1971,18 +1828,12 @@ static int gc_run(gc_t *g) {
             cbm_free(CBM_MEM_CLASS_OTHER, text);
         }
     }
-    if (g->charts) {
-        gc_link_sites(g);
-    }
+    int edges = gc_link_sites(g);
     if (g->consts) {
         cbm_ht_foreach(g->consts, gc_free_consts, NULL);
         cbm_ht_free(g->consts);
     }
-    if (g->charts) {
-        cbm_ht_foreach(g->charts, gc_free_chart_list, NULL);
-        cbm_ht_free(g->charts);
-    }
-    return g->edges;
+    return edges;
 }
 
 static void gc_free(gc_t *g) {
@@ -2025,7 +1876,7 @@ int cbm_pipeline_pass_operator(cbm_pipeline_ctx_t *ctx) {
     CBMHashTable *groups = cbm_ht_create(0);
     CBMHashTable *seen = cbm_ht_create(0);
     op_modules_t mods = {0};
-    for (int i = 0; i < nfiles; i++) {
+    for (int i = 0; i < nfiles && !cbm_pipeline_check_cancel(ctx); i++) {
         const char *slash = strrchr(files[i]->file_path, '/');
         if (strcmp(slash ? slash + SKIP_ONE : files[i]->file_path, "go.mod") == 0) {
             char path[CBM_SZ_4K];
@@ -2042,8 +1893,8 @@ int cbm_pipeline_pass_operator(cbm_pipeline_ctx_t *ctx) {
     int handles = 0;
     int embeds = 0;
     bool ready = by_file && groups && seen && ix.dir_types;
-    for (int i = 0; ready && i < nfiles; i++) {
-        if (!op_is_go(files[i]->file_path) || cbm_pipeline_check_cancel(ctx)) {
+    for (int i = 0; ready && i < nfiles && !cbm_pipeline_check_cancel(ctx); i++) {
+        if (!op_is_go(files[i]->file_path)) {
             continue;
         }
         char path[CBM_SZ_4K];
@@ -2062,7 +1913,8 @@ int cbm_pipeline_pass_operator(cbm_pipeline_ctx_t *ctx) {
         gc_note(&gc, files[i]->file_path, text);
         cbm_free(CBM_MEM_CLASS_OTHER, text);
     }
-    int crd_types = ready ? op_link_crd_types(gb, &ix, groups) : 0;
+    int crd_types =
+        ready && !cbm_pipeline_check_cancel(ctx) ? op_link_crd_types(gb, &ix, groups) : 0;
     gc.ctx = ctx;
     gc.mods = &mods;
     gc.by_file = by_file;
@@ -2100,5 +1952,5 @@ int cbm_pipeline_pass_operator(cbm_pipeline_ctx_t *ctx) {
         cbm_log_info("pass.operator", "handles", h, "embeds", e, "crd_types", c, "chart_deploys",
                      d);
     }
-    return 0;
+    return cbm_pipeline_check_cancel(ctx);
 }

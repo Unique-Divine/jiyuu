@@ -1,12 +1,11 @@
 //! Rust startup for the linked C program.
 
 use std::ffi::{CStr, CString, OsStr, c_char, c_int, c_void};
-use std::ops::ControlFlow;
 use std::os::unix::ffi::OsStrExt;
 use std::{panic, ptr};
 
 use crate::stdio::c_transport;
-use crate::store::{FileOutlineQuery, Store};
+use crate::store::Store;
 use crate::tools;
 use rusqlite::{Connection, ffi::sqlite3};
 
@@ -24,33 +23,6 @@ struct GraphSchemaOptions {
     offset: c_int,
     include_properties: bool,
 }
-
-#[repr(C)]
-struct OutlineRow {
-    name: *const c_char,
-    label: *const c_char,
-    qualified_name: *const c_char,
-    start_line: c_int,
-    end_line: c_int,
-}
-
-type OutlineEmit = unsafe extern "C" fn(
-    context: *mut c_void,
-    row: *const OutlineRow,
-    lengths: *const usize,
-) -> c_int;
-type OutlineReader = unsafe extern "C" fn(
-    db: *mut sqlite3,
-    project: *const c_char,
-    file_path: *const c_char,
-    labels: *const *const c_char,
-    label_count: c_int,
-    limit: c_int,
-    offset: c_int,
-    total: *mut c_int,
-    emit: OutlineEmit,
-    context: *mut c_void,
-) -> c_int;
 
 type ProjectIdentityEmit = unsafe extern "C" fn(
     context: *mut c_void,
@@ -81,9 +53,7 @@ type ProjectMetadataReader = unsafe extern "C" fn(
     context: *mut c_void,
 ) -> bool;
 
-const STORE_OK: c_int = 0;
 const STORE_ERR: c_int = -1;
-const STORE_CANCELLED: c_int = -3;
 
 unsafe extern "C" {
     /// Prepares the native runtime, then calls back into Rust to select the
@@ -98,7 +68,6 @@ unsafe extern "C" {
         metadata: ProjectMetadataReader,
     );
     fn cbm_store_get_db(store: *mut c_void) -> *mut sqlite3;
-    fn cbm_store_set_file_outline_reader(reader: OutlineReader);
     fn cbm_mcp_project_adr_presence(
         store: *mut c_void,
         project: *const c_char,
@@ -198,88 +167,6 @@ unsafe extern "C" fn read_project_metadata(
     .ok()
     .flatten()
     .is_some()
-}
-
-unsafe extern "C" fn read_file_outline(
-    db: *mut sqlite3,
-    project: *const c_char,
-    file_path: *const c_char,
-    labels: *const *const c_char,
-    label_count: c_int,
-    limit: c_int,
-    offset: c_int,
-    total: *mut c_int,
-    emit: OutlineEmit,
-    context: *mut c_void,
-) -> c_int {
-    let result = panic::catch_unwind(|| {
-        // SAFETY: the C store validates the NUL-terminated arguments and
-        // label array before the call. The SQLite handle remains owned by C.
-        let (project, path, labels, connection) = unsafe {
-            let labels = if label_count == 0 {
-                &[]
-            } else {
-                std::slice::from_raw_parts(labels, label_count as usize)
-            };
-            let labels = labels
-                .iter()
-                .map(|&label| CStr::from_ptr(label).to_bytes())
-                .collect::<Vec<_>>();
-            (
-                CStr::from_ptr(project).to_bytes(),
-                CStr::from_ptr(file_path).to_bytes(),
-                labels,
-                Connection::from_handle(db)?,
-            )
-        };
-        let query = FileOutlineQuery {
-            project,
-            path,
-            labels: &labels,
-            limit,
-            offset,
-        };
-        Store::from_connection(connection).file_outline(query, |row| {
-            let fields = [row.name, row.label, row.qualified_name];
-            let pointers = fields.map(|bytes| {
-                if bytes.is_empty() {
-                    c"".as_ptr()
-                } else {
-                    bytes.as_ptr().cast()
-                }
-            });
-            let lengths = fields.map(<[u8]>::len);
-            let raw = OutlineRow {
-                name: pointers[0],
-                label: pointers[1],
-                qualified_name: pointers[2],
-                start_line: row.start_line,
-                end_line: row.end_line,
-            };
-            // SAFETY: the C sink copies the row synchronously before SQLite
-            // advances, using the exact byte lengths of the borrowed slices.
-            let status = unsafe { emit(context, &raw, lengths.as_ptr()) };
-            if status == STORE_OK {
-                ControlFlow::Continue(())
-            } else {
-                ControlFlow::Break(status)
-            }
-        })
-    });
-    match result {
-        Ok(Ok(ControlFlow::Continue(count))) => {
-            // SAFETY: the C store validates the output pointer before calling.
-            unsafe { *total = count };
-            STORE_OK
-        }
-        Ok(Ok(ControlFlow::Break(status))) => status,
-        Ok(Err(rusqlite::Error::SqliteFailure(error, _)))
-            if error.code == rusqlite::ErrorCode::OperationInterrupted =>
-        {
-            STORE_CANCELLED
-        }
-        _ => STORE_ERR,
-    }
 }
 
 unsafe extern "C" fn read_override(
@@ -402,7 +289,6 @@ pub unsafe extern "C" fn main(argc: c_int, argv: *mut *mut c_char) -> c_int {
         crate::search::register();
         crate::path_verdict::register();
         crate::trace_predecessor::register();
-        crate::snippet_window::register();
         crate::ingest_trace::register();
         if std::env::var_os("MORI_IMPL_PYTHON_IMPORTS").as_deref()
             == Some(OsStr::new("rust"))
@@ -414,7 +300,6 @@ pub unsafe extern "C" fn main(argc: c_int, argv: *mut *mut c_char) -> c_int {
     // SAFETY: these process-wide callbacks are registered before C starts any work.
     unsafe {
         cbm_mcp_set_read_override(read_override, release_payload);
-        cbm_store_set_file_outline_reader(read_file_outline);
         cbm_mcp_set_project_readers(
             read_project_identity,
             read_project_stats,
