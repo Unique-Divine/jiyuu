@@ -73,6 +73,26 @@ class ParityTest(unittest.TestCase):
       self.assertIn("--require-rust-query requires tool-call replay",
                     errors.getvalue())
 
+  def test_require_rust_query_rejects_corruption_mode(self) -> None:
+    with (redirect_stderr(io.StringIO()) as errors,
+          self.assertRaises(SystemExit) as raised):
+      parity.main(["ci", "--corrupt", "rows", "--require-rust-query", "call:unknown"])
+    self.assertEqual(raised.exception.code, 2)
+    self.assertIn("--require-rust-query cannot be combined with --corrupt",
+                  errors.getvalue())
+
+  def test_disable_ui_configures_only_the_scratch_cache(self) -> None:
+    side = parity.Side("b", "/bin/true", self.tmp + "/cache", self.tmp + "/rt")
+    with patch.object(parity.subprocess, "run") as run:
+      run.return_value.returncode = 0
+      side.disable_ui()
+      self.assertEqual(run.call_args.args[0],
+                       ["/bin/true", "config", "set", "ui_enabled", "false"])
+      self.assertEqual(run.call_args.kwargs["env"]["CBM_CACHE_DIR"], side.cache)
+      run.return_value.returncode = 1
+      with self.assertRaisesRegex(RuntimeError, "could not disable"):
+        side.disable_ui()
+
   def test_rust_query_replay_checks_execution_even_when_replies_match(self) -> None:
     args = {"query": "MATCH (f) RETURN f.name", "format": "json"}
     call = {"tool": "query_graph", "args": args}

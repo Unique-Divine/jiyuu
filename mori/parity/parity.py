@@ -210,6 +210,15 @@ class Side:
       stdin=subprocess.DEVNULL)
     return p.returncode, p.stdout, p.stderr
 
+  def disable_ui(self) -> None:
+    p = subprocess.run(
+      [self.bin, "config", "set", "ui_enabled", "false"], cwd="/",
+      env=self.env(), capture_output=True, text=True, timeout=120,
+      stdin=subprocess.DEVNULL)
+    if p.returncode != 0:
+      raise RuntimeError(f"side {self.name}: could not disable the Graph UI "
+                         "before verifying Rust query execution")
+
   def daemon(self, action: str) -> int:
     p = subprocess.run([self.bin, "daemon", action], cwd="/",
                        env=self.env(), capture_output=True, text=True,
@@ -744,7 +753,7 @@ def print_summary(results: list[RepoResult], l4: list[dict[str, Any]],
           f"{l4_stats.get('dropped', 0)} dropped (project not a corpus "
           f"placeholder), {l4_stats['errors_a']} error results, "
           f"{l4_stats['timeouts']} call timeouts, {l4_stats['differing']} "
-          f"with reply differences, {l4_stats['wall_s']} s: {cell(s)}")
+          f"with reply differences or timeouts, {l4_stats['wall_s']} s: {cell(s)}")
     if "rust_query_checks" in l4_stats:
       failed = l4_stats["rust_query_failures"]
       passed = l4_stats["rust_query_checks"] - failed
@@ -827,6 +836,10 @@ def run(repos: list[tuple[str, str]], call_list: list[dict[str, Any]] | None,
     meta = {**meta, "require_rust_query": sorted(require_rust)}
   entries = allowlist.load_all(a.allowlist)
   sides = make_sides(a.bin_a, a.bin_b, a.work, a.rt_prefix, a.scratch_root)
+  if require_rust:
+    # An HTTP query can write the same witness to the daemon log. Disable
+    # that entry point in the private cache before any command starts it.
+    sides[1].disable_ui()
   for side, exporter, graphql_mode in zip(
       sides, (a.export_a, a.export_b), (a.graphql_a, a.graphql_b)):
     side.exporter = exporter
@@ -886,6 +899,8 @@ def run(repos: list[tuple[str, str]], call_list: list[dict[str, Any]] | None,
     sides[1].verify_rust_queries = bool(require_rust)
     started = [s.daemon("start") == 0 for s in sides]
     try:
+      if require_rust and not started[1]:
+        raise RuntimeError("side b: could not start the isolated replay daemon")
       l4, l4_stats = replay(sides, call_list, roots, projects, entries, require_rust)
       l4_stats["dropped"] = dropped
     finally:
@@ -1194,6 +1209,8 @@ def main(argv: list[str]) -> int:
     a.skip_l4 = True
   if a.cmd in ("run", "ci") and a.require_rust_query and a.skip_l4:
     ap.error("--require-rust-query requires tool-call replay")
+  if a.cmd == "ci" and a.require_rust_query and a.corrupt:
+    ap.error("--require-rust-query cannot be combined with --corrupt")
   if getattr(a, "scratch_root", None) is None and a.cmd in ("run", "ci"):
     a.scratch_root = default_scratch_roots()
   base = None

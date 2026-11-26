@@ -59,7 +59,8 @@ report or compute it with `calls.call_id(tool, args)` on the saved request
 before resolving its placeholders.
 
 This flag enables the Rust query implementation and debug logging in the
-side B replay daemon. The runner looks for exactly one
+side B replay daemon. The harness disables the Graph UI in side B's
+scratch cache before starting any daemon. The runner looks for exactly one
 `query_graph.evaluator` debug event with `backend=rust` appended during
 each selected request, including any extra pages the comparison needs.
 Missing or ambiguous evidence fails the run even when both replies match.
