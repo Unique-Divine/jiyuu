@@ -233,23 +233,33 @@ impl<'a> Plan<'a> {
             };
         }
 
-        // Widen mandatory MATCH only to a pair of fixed single hops joined
-        // on a written node alias. The C evaluator still handles cross joins.
-        let [clause] = self.clauses.as_slice() else {
-            return Err(Unsupported);
-        };
-        let [tail] = clause.tails.as_slice() else {
-            return Err(Unsupported);
-        };
-        let shared = |endpoint: &Endpoint<'_>| {
-            endpoint.pattern.named && self.first_slots.contains(&endpoint.slot)
-        };
+        // Each mandatory single hop must attach to a written node alias
+        // from the preceding binding, which includes every earlier clause.
         if self.ranged
-            || clause.first_edge != 1
+            || self.clauses.len() > 2
+            || self.clauses[0].first_edge != 1
             || !self.unique_first_bindings()
-            || !(shared(&clause.head) || shared(tail))
         {
             return Err(Unsupported);
+        }
+        let mut bound = [false; NODE_SLOTS];
+        for &slot in &self.first_slots {
+            bound[slot] = true;
+        }
+        for clause in &self.clauses {
+            let [tail] = clause.tails.as_slice() else {
+                return Err(Unsupported);
+            };
+            let endpoints = [&clause.head, tail];
+            if !endpoints
+                .iter()
+                .any(|node| node.pattern.named && bound[node.slot])
+            {
+                return Err(Unsupported);
+            }
+            for node in endpoints {
+                bound[node.slot] = true;
+            }
         }
         Ok(Some(self))
     }
@@ -854,7 +864,7 @@ mod tests {
     }
 
     #[test]
-    fn mandatory_joins_outside_two_connected_fixed_hops_use_c() {
+    fn mandatory_joins_outside_connected_fixed_hops_use_c() {
         for pattern in [
             "MATCH (a)-[:CALLS]->(b) MATCH (c)-[:CALLS]->(d)",
             "MATCH (a)-[:CALLS]->() MATCH (c)-[:CALLS]->()",
@@ -864,8 +874,15 @@ mod tests {
             "MATCH (a)-[:CALLS]->(b) MATCH (b)",
             "MATCH (a)-[:CALLS]->(b)-[:CALLS]->(c) MATCH (c)-[:CALLS]->(d)",
             "MATCH (a)-[:CALLS]->(b) MATCH (b)-[:CALLS]->(c)-[:CALLS]->(d)",
-            "MATCH (a)-[:CALLS]->(b) MATCH (b)-[:CALLS]->(c) MATCH (c)-[:CALLS]->(d)",
+            "MATCH (a)-->(b) MATCH (b)-->(c) MATCH (d)-->(e)",
+            "MATCH (a)-->(b) MATCH (c)-->(d) MATCH (b)-->(c)",
+            "MATCH (a)-->(b) MATCH (b)-->(c) MATCH (c)-[:CALLS*1]->(d)",
+            "MATCH (a)-->(b) MATCH (b)-->(c) MATCH (c)-->(d)-->(e)",
+            "MATCH (a)-->(b) MATCH (b)-->(c) MATCH (c)",
+            "MATCH (a)-->(b) MATCH (b)-->(c) MATCH (c)-->(d) MATCH (d)-->(e)",
+            "MATCH (a)--> (b) MATCH (b)-->() MATCH ()-->(d)",
             "MATCH (a)-[r:CALLS]->(b) MATCH (b)-[r:CALLS]->(c)",
+            "MATCH (a)-[r:CALLS]->(b) MATCH (b)-->(c) MATCH (c)-[r:CALLS]->(d)",
         ] {
             let source = format!("{pattern} RETURN a.name");
             assert_eq!(
@@ -880,6 +897,41 @@ mod tests {
             )
             .unwrap_err(),
             ParseError::Unsupported,
+        );
+    }
+
+    #[test]
+    fn three_match_cancellation_interrupts_the_final_adjacency_scan() {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch(GRAPH).unwrap();
+        db.execute_batch(
+            "INSERT INTO edges VALUES (2, 'p', 3, 1, 'NEXT', '{}');
+             WITH RECURSIVE ids(i) AS (
+                 SELECT 3 UNION ALL SELECT i + 1 FROM ids WHERE i < 1100
+             )
+             INSERT INTO edges SELECT i, 'p', 1, 2, 'LAST', '{}' FROM ids;",
+        )
+        .unwrap();
+        let query = classify(
+            "MATCH (s:Start)-[:CALLS]->(hub)
+             MATCH (hub)-[:NEXT]->(again)
+             MATCH (again)-[:LAST]->(leaf)
+             RETURN leaf.name LIMIT 1",
+        )
+        .unwrap();
+        let polls = Cell::new(0);
+        let cancelled = || {
+            polls.set(polls.get() + 1);
+            polls.get() == 2
+        };
+        let mut budget = ExecutionBudget::new(&Instant::now, &cancelled);
+        assert!(matches!(
+            query.execute_with_budget(&db, "p", &mut budget),
+            Err(ExecutionError::Cancelled)
+        ));
+        assert_eq!(
+            query.execute_on(&db, "p").unwrap().rows,
+            [[b"two".to_vec()]]
         );
     }
 
