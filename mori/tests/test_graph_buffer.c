@@ -1245,6 +1245,203 @@ TEST(gbuf_merge_empty_src_into_populated_dst) {
     PASS();
 }
 
+TEST(gbuf_worker_merge_keeps_canonical_ids_and_edge_order) {
+    _Atomic int64_t shared = 1;
+    cbm_gbuf_t *dst = cbm_gbuf_new_shared_ids("test", "/tmp", &shared);
+    cbm_gbuf_t *src = cbm_gbuf_new_worker("test", "/tmp", &shared);
+
+    int64_t folder = cbm_gbuf_upsert_node(dst, "Folder", "pkg", "pkg", "pkg", 0, 0, "{}");
+    int64_t fn = cbm_gbuf_upsert_node(dst, "Function", "f", "pkg.f", "z.go", 1, 4, "{}");
+    int64_t module = cbm_gbuf_upsert_node(src, "Module", "pkg", "pkg", "a.go", 1, 4, "{}");
+    int64_t worker_fn = cbm_gbuf_upsert_node(src, "Function", "f", "pkg.f", "a.go", 1, 4,
+                                            "{\"worker\":true}");
+    int64_t new_fn = cbm_gbuf_upsert_node(src, "Function", "g", "pkg.g", "a.go", 6, 8, "{}");
+    cbm_gbuf_insert_edge(src, module, worker_fn, "CALLS", "{\"ordinal\":1}");
+    cbm_gbuf_insert_edge(src, worker_fn, new_fn, "CALLS", "{\"ordinal\":2}");
+
+    ASSERT_EQ(cbm_gbuf_merge(dst, src), 0);
+    cbm_gbuf_free(src);
+    ASSERT_EQ(cbm_gbuf_merge(dst, dst), 0);
+
+    const cbm_gbuf_node_t *container = cbm_gbuf_find_by_qn(dst, "pkg");
+    ASSERT_NOT_NULL(container);
+    ASSERT_EQ(container->id, folder);
+    ASSERT_STR_EQ(container->label, "Folder");
+    const cbm_gbuf_node_t *updated = cbm_gbuf_find_by_qn(dst, "pkg.f");
+    ASSERT_NOT_NULL(updated);
+    ASSERT_EQ(updated->id, fn);
+    ASSERT_STR_EQ(updated->file_path, "a.go");
+    ASSERT_STR_EQ(updated->properties_json, "{\"worker\":true}");
+    const cbm_gbuf_node_t *copied = cbm_gbuf_find_by_qn(dst, "pkg.g");
+    ASSERT_NOT_NULL(copied);
+    ASSERT_EQ(copied->id, new_fn);
+
+    const cbm_gbuf_edge_t **edges = NULL;
+    int count = 0;
+    ASSERT_EQ(cbm_gbuf_find_edges_by_type(dst, "CALLS", &edges, &count), 0);
+    ASSERT_EQ(count, 2);
+    ASSERT_EQ(edges[0]->source_id, folder);
+    ASSERT_EQ(edges[0]->target_id, fn);
+    ASSERT_STR_EQ(edges[0]->properties_json, "{\"ordinal\":1}");
+    ASSERT_EQ(edges[1]->source_id, fn);
+    ASSERT_EQ(edges[1]->target_id, new_fn);
+    ASSERT_STR_EQ(edges[1]->properties_json, "{\"ordinal\":2}");
+
+    cbm_gbuf_free(dst);
+    PASS();
+}
+
+#if defined(CBM_MEM_TEST_API) && CBM_MEM_TEST_API
+TEST(gbuf_merge_keeps_collision_fields_on_property_failure) {
+    const char *properties = "{\"provenance\":\"winning worker definition\"}";
+    _Atomic int64_t shared = 1;
+    cbm_gbuf_t *dst = cbm_gbuf_new_shared_ids("test", "/tmp", &shared);
+    cbm_gbuf_t *src = cbm_gbuf_new_worker("test", "/tmp", &shared);
+    ASSERT_NOT_NULL(dst);
+    ASSERT_NOT_NULL(src);
+    int64_t canonical =
+        cbm_gbuf_upsert_node(dst, "Function", "original", "pkg.f", "z.go", 1, 4, "{}");
+    ASSERT_GT(canonical, 0);
+    ASSERT_GT(cbm_gbuf_upsert_node(src, "Method", "winner", "pkg.f", "a.go", 2, 8, properties), 0);
+
+    cbm_mem_test_fail_alloc_size(CBM_MEM_CLASS_GBUF_STRING, strlen(properties) + 1);
+    int rc = cbm_gbuf_merge(dst, src);
+    bool injected = cbm_mem_test_reset_alloc_failure();
+
+    ASSERT(injected);
+    ASSERT_EQ(rc, -1);
+    const cbm_gbuf_node_t *node = cbm_gbuf_find_by_qn(dst, "pkg.f");
+    ASSERT_NOT_NULL(node);
+    ASSERT_EQ(node->id, canonical);
+    ASSERT_STR_EQ(node->label, "Function");
+    ASSERT_STR_EQ(node->name, "original");
+    ASSERT_STR_EQ(node->file_path, "z.go");
+    ASSERT_EQ(node->start_line, 1);
+    ASSERT_EQ(node->end_line, 4);
+    ASSERT_STR_EQ(node->properties_json, "{}");
+
+    cbm_gbuf_free(src);
+    cbm_gbuf_free(dst);
+    PASS();
+}
+
+TEST(gbuf_merge_reports_node_append_failure) {
+    cbm_gbuf_t *dst = cbm_gbuf_new("test", "/tmp");
+    cbm_gbuf_t *src = cbm_gbuf_new_worker("test", "/tmp", NULL);
+    ASSERT_NOT_NULL(dst);
+    ASSERT_NOT_NULL(src);
+    ASSERT_GT(cbm_gbuf_upsert_node(src, "Function", "f", "pkg.f", "f.go", 1, 4, "{}"), 0);
+
+    cbm_mem_test_fail_next_realloc(CBM_MEM_CLASS_DYN_ARRAY);
+    int rc = cbm_gbuf_merge(dst, src);
+    bool injected = cbm_mem_test_reset_realloc_failure();
+    int nodes = cbm_gbuf_node_count(dst);
+    cbm_gbuf_free(src);
+    cbm_gbuf_free(dst);
+
+    ASSERT(injected);
+    ASSERT_EQ(rc, -1);
+    ASSERT_EQ(nodes, 0);
+    PASS();
+}
+
+TEST(gbuf_merge_reports_edge_append_failure) {
+    _Atomic int64_t shared = 1;
+    cbm_gbuf_t *dst = cbm_gbuf_new_shared_ids("test", "/tmp", &shared);
+    cbm_gbuf_t *src = cbm_gbuf_new_worker("test", "/tmp", &shared);
+    ASSERT_NOT_NULL(dst);
+    ASSERT_NOT_NULL(src);
+    int64_t from = cbm_gbuf_upsert_node(dst, "Function", "f", "pkg.f", "f.go", 1, 4, "{}");
+    int64_t to = cbm_gbuf_upsert_node(dst, "Function", "g", "pkg.g", "f.go", 6, 8, "{}");
+    ASSERT_GT(from, 0);
+    ASSERT_GT(to, 0);
+    ASSERT_GT(cbm_gbuf_insert_edge(src, from, to, "CALLS", "{}"), 0);
+
+    cbm_mem_test_fail_next_realloc(CBM_MEM_CLASS_DYN_ARRAY);
+    int rc = cbm_gbuf_merge(dst, src);
+    bool injected = cbm_mem_test_reset_realloc_failure();
+    int edges = cbm_gbuf_edge_count(dst);
+    cbm_gbuf_free(src);
+    cbm_gbuf_free(dst);
+
+    ASSERT(injected);
+    ASSERT_EQ(rc, -1);
+    ASSERT_EQ(edges, 0);
+    PASS();
+}
+
+TEST(gbuf_merge_reports_edge_payload_failure) {
+    static const char payload[] = "{\"edge_payload\":42}";
+    for (int replace = 0; replace <= 1; replace++) {
+        _Atomic int64_t shared = 1;
+        cbm_gbuf_t *dst = cbm_gbuf_new_shared_ids("test", "/tmp", &shared);
+        cbm_gbuf_t *src = cbm_gbuf_new_worker("test", "/tmp", &shared);
+        ASSERT_NOT_NULL(dst);
+        ASSERT_NOT_NULL(src);
+        int64_t from = cbm_gbuf_upsert_node(dst, "Function", "f", "pkg.f", "f.go", 1, 4, "{}");
+        int64_t to = cbm_gbuf_upsert_node(dst, "Function", "g", "pkg.g", "f.go", 6, 8, "{}");
+        ASSERT_GT(from, 0);
+        ASSERT_GT(to, 0);
+        if (replace) {
+            ASSERT_GT(cbm_gbuf_insert_edge(dst, from, to, "CALLS", "{}"), 0);
+        }
+        ASSERT_GT(cbm_gbuf_insert_edge(src, from, to, "CALLS", payload), 0);
+
+        cbm_mem_test_fail_alloc_size(CBM_MEM_CLASS_GBUF_STRING, sizeof(payload));
+        int rc = cbm_gbuf_merge(dst, src);
+        bool injected = cbm_mem_test_reset_alloc_failure();
+
+        const cbm_gbuf_edge_t **edges = NULL;
+        int count = 0;
+        cbm_gbuf_find_edges_by_source_type(dst, from, "CALLS", &edges, &count);
+        bool preserved = !replace || (count == 1 && edges[0]->properties_json &&
+                                      strcmp(edges[0]->properties_json, "{}") == 0);
+        int total_edges = cbm_gbuf_edge_count(dst);
+        cbm_gbuf_free(src);
+        cbm_gbuf_free(dst);
+
+        ASSERT(injected);
+        ASSERT_EQ(rc, -1);
+        ASSERT_EQ(total_edges, replace);
+        ASSERT_EQ(count, replace);
+        ASSERT(preserved);
+    }
+    PASS();
+}
+
+TEST(gbuf_merge_keeps_worker_edge_after_payload_failure) {
+    static const char payload[] = "{\"edge_payload\":42}";
+    _Atomic int64_t shared = 1;
+    cbm_gbuf_t *dst = cbm_gbuf_new_shared_ids("test", "/tmp", &shared);
+    cbm_gbuf_t *src = cbm_gbuf_new_worker("test", "/tmp", &shared);
+    ASSERT_NOT_NULL(dst);
+    ASSERT_NOT_NULL(src);
+    int64_t from = cbm_gbuf_upsert_node(dst, "Function", "f", "pkg.f", "f.go", 1, 4, "{}");
+    int64_t to = cbm_gbuf_upsert_node(dst, "Function", "g", "pkg.g", "f.go", 6, 8, "{}");
+    ASSERT_GT(from, 0);
+    ASSERT_GT(to, 0);
+
+    cbm_mem_test_fail_alloc_size(CBM_MEM_CLASS_GBUF_STRING, sizeof(payload));
+    int64_t edge = cbm_gbuf_insert_edge(src, from, to, "USAGE", payload);
+    bool injected = cbm_mem_test_reset_alloc_failure();
+    int rc = cbm_gbuf_merge(dst, src);
+
+    const cbm_gbuf_edge_t **edges = NULL;
+    int count = 0;
+    cbm_gbuf_find_edges_by_source_type(dst, from, "USAGE", &edges, &count);
+    bool default_payload = count == 1 && edges[0]->properties_json &&
+                           strcmp(edges[0]->properties_json, "{}") == 0;
+    cbm_gbuf_free(src);
+    cbm_gbuf_free(dst);
+
+    ASSERT(injected);
+    ASSERT_GT(edge, 0);
+    ASSERT_EQ(rc, 0);
+    ASSERT(default_payload);
+    PASS();
+}
+#endif
+
 TEST(gbuf_merge_populated_src_into_empty_dst) {
     cbm_gbuf_t *dst = cbm_gbuf_new("test", "/tmp");
     cbm_gbuf_t *src = cbm_gbuf_new("test", "/tmp");
@@ -1688,6 +1885,14 @@ SUITE(graph_buffer) {
     /* Merge tests */
     RUN_TEST(gbuf_merge_overlapping_qns);
     RUN_TEST(gbuf_merge_edge_dedup);
+    RUN_TEST(gbuf_worker_merge_keeps_canonical_ids_and_edge_order);
+#if defined(CBM_MEM_TEST_API) && CBM_MEM_TEST_API
+    RUN_TEST(gbuf_merge_keeps_collision_fields_on_property_failure);
+    RUN_TEST(gbuf_merge_reports_node_append_failure);
+    RUN_TEST(gbuf_merge_reports_edge_append_failure);
+    RUN_TEST(gbuf_merge_reports_edge_payload_failure);
+    RUN_TEST(gbuf_merge_keeps_worker_edge_after_payload_failure);
+#endif
     RUN_TEST(gbuf_merge_empty_src_into_populated_dst);
     RUN_TEST(gbuf_merge_populated_src_into_empty_dst);
     RUN_TEST(gbuf_merge_null_args);

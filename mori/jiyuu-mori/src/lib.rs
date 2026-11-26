@@ -21,6 +21,8 @@ mod explicit_override;
 #[cfg(any(feature = "native-engine-abi", test))]
 mod ffi_output;
 #[cfg(feature = "native-engine-abi")]
+mod graph_buffer_merge;
+#[cfg(feature = "native-engine-abi")]
 mod jvm_doc_links;
 #[cfg(feature = "native-engine-abi")]
 mod kubernetes;
@@ -124,6 +126,13 @@ fn rusqlite_uses_the_c_backend_sqlite() {
 mod discovery_spike;
 
 #[cfg(feature = "native-engine-abi")]
+mod abi_rows;
+
+#[cfg(feature = "native-engine-abi")]
+#[path = "discovery_spike/results.rs"]
+mod discover_results;
+
+#[cfg(feature = "native-engine-abi")]
 #[path = "discovery_spike/native.rs"]
 mod discover_walk;
 
@@ -133,7 +142,7 @@ mod staged_graph;
 #[cfg(all(feature = "c-backend", not(test), unix))]
 pub use staged_graph::native::register as mori_register_staged_graph_writer;
 
-#[cfg(all(feature = "c-backend", test))]
+#[cfg(feature = "native-engine-abi")]
 mod index_manifest;
 
 #[cfg(feature = "c-backend")]

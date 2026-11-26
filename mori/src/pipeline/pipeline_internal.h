@@ -1799,14 +1799,10 @@ int cbm_pipeline_build_semantic_manifest(const cbm_pipeline_t *p, const char *pr
                                          const cbm_userconfig_t *userconfig, cbm_file_hash_t **out,
                                          int *out_count);
 void cbm_pipeline_free_semantic_manifest(cbm_file_hash_t *manifest, int count);
+void cbm_pipeline_mark_semantic_manifest_written(const cbm_file_hash_t *manifest, size_t count);
 bool cbm_pipeline_semantic_manifests_equal(const cbm_file_hash_t *left, int left_count,
                                            const cbm_file_hash_t *right, int right_count);
 
-/* Select the semantic manifest comparison for an existing generation's
- * no-op check. Install only before pipeline workers start. */
-typedef bool (*cbm_noop_manifest_equal_fn)(const cbm_file_hash_t *stored, int stored_count,
-                                           const cbm_file_hash_t *baseline, int baseline_count);
-void cbm_pipeline_set_noop_manifest_equal(cbm_noop_manifest_equal_fn implementation);
 /* Re-run discovery and hash its exact semantic inputs. Used at the publication
  * boundary so late additions/deletions cannot escape a frozen file list. */
 int cbm_pipeline_build_fresh_semantic_manifest(cbm_pipeline_t *p, const char *project,
