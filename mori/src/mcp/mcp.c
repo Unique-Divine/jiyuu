@@ -40,10 +40,6 @@ enum {
     MCP_COMPARE_MAX_SCAN_LIMIT = 10000000,
     MCP_COMPARE_SET_BYTE_BUDGET = 512 * 1024,
     MCP_QUERY_MAX_VISIBLE_ROWS = 99998,
-    /* search_code `context`: lines of surrounding source per hit, the same
-     * ceiling as `source_max_lines`. Clamped at the handler and again where
-     * the window is computed, so the arithmetic never overflows. */
-    MCP_SEARCH_CONTEXT_MAX_LINES = 200,
     /* max_output_tokens is model-neutral sizing guidance, not a tokenizer
      * promise. The actual cross-platform contract is this deterministic UTF-8
      * byte ceiling, applied only at whole semantic-unit boundaries. */
@@ -92,6 +88,7 @@ enum {
 #include "foundation/sha256.h"
 #include "mcp/index_supervisor.h"
 #include "mcp/compact_out.h"
+#include "mcp/search_code_abi.h"
 #include "foundation/str_util.h"
 #include "foundation/workspace.h"
 #include "foundation/dump_verify.h"
@@ -3142,11 +3139,6 @@ static void project_record_clear(mcp_project_record_t *record) {
     free(record->db_file);
     free(record->branch);
     memset(record, 0, sizeof(*record));
-}
-
-/* strcmp that orders NULL like "". */
-static int nullable_strcmp(const char *a, const char *b) {
-    return strcmp(a ? a : "", b ? b : "");
 }
 
 typedef enum {
@@ -15416,57 +15408,6 @@ static char *handle_get_code_snippet(cbm_mcp_server_t *srv, const char *args) {
 
 /* ── search_code v2: graph-augmented code search ─────────────── */
 
-/* Intermediate grep match */
-typedef struct {
-    char *file;
-    int line;
-    char content[CBM_SZ_1K];
-    size_t content_start_byte;
-    size_t content_returned_bytes;
-    size_t content_total_bytes;
-    size_t match_start_byte;
-    size_t match_end_byte;
-    bool match_known;
-    bool content_truncated;
-} grep_match_t;
-
-/* Deduped result: one per containing graph node */
-typedef struct {
-    int64_t node_id; /* 0 = raw match (no containing node) */
-    char node_name[CBM_SZ_256];
-    char *qualified_name;
-    char label[CBM_SZ_64];
-    char *file;
-    int start_line;
-    int end_line;
-    int in_degree;
-    int out_degree;
-    int score;
-    int *match_lines;
-    int match_count;        /* exact total across the complete grep stream */
-    int match_stored_count; /* bounded evidence retained for rendering */
-    int match_capacity;
-} search_result_t;
-
-typedef struct {
-    uint64_t scope_ms;
-    uint64_t scan_ms;
-    uint64_t enrich_ms;
-    uint64_t elapsed_ms;
-    bool include_phase_timings;
-    bool hint_path_filter; /* a search with a '/' file_pattern returned no matches */
-} search_metrics_t;
-
-#ifdef CBM_ENABLE_TEST_SEAMS
-/* Test seams render synthetic rows without a live scan. */
-static const search_metrics_t zero_metrics = {0};
-#endif
-
-typedef struct {
-    char *name;
-    int count;
-} search_dir_count_t;
-
 static bool set_search_result_identity(search_result_t *result, const cbm_node_t *node);
 static bool append_search_match_line(search_result_t *result, int line);
 
@@ -15492,67 +15433,12 @@ static void free_search_results(search_result_t *results, int count) {
     free(results);
 }
 
-static void free_search_dirs(search_dir_count_t *directories, int count) {
-    if (!directories) {
-        return;
-    }
-    for (int i = 0; i < count; i++) {
-        free(directories[i].name);
-    }
-    free(directories);
-}
-
-/* Score a result for ranking: project source first, vendored last, tests lowest */
-enum { SCORE_FUNC = 10, SCORE_ROUTE = 15, SCORE_VENDORED = -50, SCORE_TEST = -5 };
 enum { MAX_LINE_SPAN = 999999 };
 
 static const cbm_mcp_search_code_attribution_t *search_code_attribution;
 
 void cbm_mcp_set_search_code_attribution(const cbm_mcp_search_code_attribution_t *reader) {
     search_code_attribution = reader;
-}
-
-static int compute_search_score(const search_result_t *r) {
-    int score = r->in_degree;
-    if (strcmp(r->label, "Function") == 0 || strcmp(r->label, "Method") == 0) {
-        score += SCORE_FUNC;
-    }
-    if (strcmp(r->label, "Route") == 0) {
-        score += SCORE_ROUTE;
-    }
-    if (strstr(r->file, "vendored/") || strstr(r->file, "vendor/") ||
-        strstr(r->file, "node_modules/")) {
-        score += SCORE_VENDORED;
-    }
-    /* Penalize test files */
-    if (strstr(r->file, "test") || strstr(r->file, "spec") || strstr(r->file, "_test.")) {
-        score += SCORE_TEST;
-    }
-    return score;
-}
-
-static int search_result_cmp(const void *a, const void *b) {
-    const search_result_t *ra = (const search_result_t *)a;
-    const search_result_t *rb = (const search_result_t *)b;
-    int score_order = rb->score - ra->score; /* descending */
-    if (score_order != 0) {
-        return score_order;
-    }
-    int qn_order = nullable_strcmp(ra->qualified_name, rb->qualified_name);
-    if (qn_order != 0) {
-        return qn_order;
-    }
-    int file_order = nullable_strcmp(ra->file, rb->file);
-    if (file_order != 0) {
-        return file_order;
-    }
-    if (ra->start_line != rb->start_line) {
-        return ra->start_line < rb->start_line ? -1 : 1;
-    }
-    if (ra->end_line != rb->end_line) {
-        return ra->end_line < rb->end_line ? -1 : 1;
-    }
-    return 0;
 }
 
 static cbm_mcp_search_code_degrees_fn search_code_degrees_reader;
@@ -15574,11 +15460,6 @@ static bool search_code_read_degrees(cbm_store_t *store, const int64_t *ids, int
     return cbm_store_batch_count_degrees(store, ids, count, "CALLS", in_degrees, out_degrees) ==
            CBM_STORE_OK;
 }
-
-#define SEARCH_CODE_PATH_HINT                                                            \
-    "no results; a file_pattern with '/' must match the whole repo-relative path (e.g. " \
-    "src/**/*.c); to scope by folder you can also use path_filter (regex on the "        \
-    "repo-relative path, e.g. ^src/cli/)"
 
 /* A file_pattern containing '/' is matched against the whole repo-relative path, like
  * search_graph's file_pattern: '*' and '**' match any run of characters including '/', a
@@ -15775,896 +15656,6 @@ void cbm_search_code_build_grep_cmd(char *cmd, size_t cmd_sz, bool use_regex, bo
 #endif
 }
 
-/* Build deduplicated file list from search results + raw matches. */
-static yyjson_mut_val *build_dedup_files_array(yyjson_mut_doc *doc, search_result_t *sr,
-                                               int result_start, int output_count,
-                                               grep_match_t *raw, int raw_start, int raw_count) {
-    (void)raw_start;
-    yyjson_mut_val *files_arr = yyjson_mut_arr(doc);
-    size_t seen_capacity = (size_t)output_count + (size_t)raw_count;
-    const char **seen_files = seen_capacity > 0 ? calloc(seen_capacity, sizeof(*seen_files)) : NULL;
-    if (!files_arr || (seen_capacity > 0 && !seen_files)) {
-        free(seen_files);
-        return NULL;
-    }
-    int seen_count = 0;
-    for (int fi = 0; fi < output_count; fi++) {
-        int result_index = result_start + fi;
-        bool dup = false;
-        for (int j = 0; j < seen_count; j++) {
-            if (strcmp(seen_files[j], sr[result_index].file) == 0) {
-                dup = true;
-                break;
-            }
-        }
-        if (!dup) {
-            seen_files[seen_count++] = sr[result_index].file;
-            yyjson_mut_arr_add_str(doc, files_arr, sr[result_index].file);
-        }
-    }
-    for (int fi = 0; fi < raw_count; fi++) {
-        /* `raw` contains only the requested page. raw_start is the global
-         * offset used for continuation metadata, not an array index. */
-        int raw_index = fi;
-        bool dup = false;
-        for (int j = 0; j < seen_count; j++) {
-            if (strcmp(seen_files[j], raw[raw_index].file) == 0) {
-                dup = true;
-                break;
-            }
-        }
-        if (!dup) {
-            seen_files[seen_count++] = raw[raw_index].file;
-            yyjson_mut_arr_add_str(doc, files_arr, raw[raw_index].file);
-        }
-    }
-    free(seen_files);
-    return files_arr;
-}
-
-/* Attach source or context lines to a search result JSON item. */
-static void attach_result_source(yyjson_mut_doc *doc, yyjson_mut_val *item, search_result_t *r,
-                                 int mode, int context_lines, int source_max_lines,
-                                 const char *root_path, root_containment_t *containment) {
-    enum { MODE_FULL = 1 };
-    if (r->start_line <= 0 || r->end_line <= 0) {
-        return;
-    }
-    size_t root_length = strlen(root_path);
-    size_t file_length = strlen(r->file);
-    if (root_length > SIZE_MAX - file_length - 2U) {
-        return;
-    }
-    char *abs_path = malloc(root_length + file_length + 2U);
-    if (!abs_path) {
-        return;
-    }
-    memcpy(abs_path, root_path, root_length);
-    abs_path[root_length] = '/';
-    memcpy(abs_path + root_length + 1U, r->file, file_length + 1U);
-
-    /* Containment: a search result whose indexed path resolves outside the
-     * project root (a `..` segment, or a symlink/junction that discovery
-     * followed) must not be read back into the response. Same guard the
-     * snippet path already uses. */
-    if (!root_containment_check(containment, abs_path)) {
-        free(abs_path);
-        return;
-    }
-
-    if (mode == MODE_FULL) {
-        /* Cap each hit's source at a match-anchored window: uncapped
-         * whole-symbol dumps ran to 5.7KB × N hits (142KB responses). The
-         * complete symbol stays one get_code_snippet call away;
-         * source_start/source_truncated make the cut explicit. */
-        enum { SC_FULL_LEAD = 5 };
-        if (source_max_lines <= 0) {
-            yyjson_mut_obj_add_bool(doc, item, "source_omitted", true);
-            free(abs_path);
-            return;
-        }
-        int s = r->start_line;
-        int e = r->end_line;
-        bool truncated = false;
-        if (e - s + 1 > source_max_lines) {
-            if (r->match_count > 0 && r->match_lines[0] - SC_FULL_LEAD > s) {
-                s = r->match_lines[0] - SC_FULL_LEAD;
-            }
-            e = s + source_max_lines - 1;
-            if (e > r->end_line) {
-                e = r->end_line;
-            }
-            truncated = true;
-        }
-        char *source = read_file_lines(abs_path, s, e);
-        if (source) {
-            char *safe_source = sanitize_utf8_lossy(source);
-            if (safe_source) {
-                yyjson_mut_obj_add_strcpy(doc, item, "source", safe_source);
-                free(safe_source);
-            }
-            free(source);
-            if (truncated) {
-                yyjson_mut_obj_add_int(doc, item, "source_start", s);
-                yyjson_mut_obj_add_bool(doc, item, "source_truncated", true);
-            }
-        }
-    } else if (context_lines > 0 && r->match_count > 0) {
-        /* Bounded here as well as at the handler: the window must stay
-         * match ± MCP_SEARCH_CONTEXT_MAX_LINES for any caller, and the
-         * arithmetic must not overflow for any value. */
-        int ctx_lines = context_lines > MCP_SEARCH_CONTEXT_MAX_LINES ? MCP_SEARCH_CONTEXT_MAX_LINES
-                                                                     : context_lines;
-        int first_match = r->match_lines[0];
-        int last_match = r->match_lines[r->match_count - SKIP_ONE];
-        int ctx_start = first_match > ctx_lines ? first_match - ctx_lines : SKIP_ONE;
-        int ctx_end = last_match > INT_MAX - ctx_lines ? INT_MAX : last_match + ctx_lines;
-        char *ctx = read_file_lines(abs_path, ctx_start, ctx_end);
-        if (ctx) {
-            char *safe_context = sanitize_utf8_lossy(ctx);
-            if (safe_context) {
-                yyjson_mut_obj_add_strcpy(doc, item, "context", safe_context);
-                free(safe_context);
-            }
-            yyjson_mut_obj_add_int(doc, item, "context_start", ctx_start);
-            free(ctx);
-        }
-    }
-    free(abs_path);
-}
-
-/* Aggregate hits by top-level directory. Directory keys are allocation-backed:
- * truncating them used to merge distinct directories that shared their first
- * 127 bytes, making the diagnostic count look exact when it was not. */
-static bool aggregate_search_dirs(search_result_t *sr, int sr_count,
-                                  search_dir_count_t **directories_out, int *count_out) {
-    *directories_out = NULL;
-    *count_out = 0;
-    if (sr_count <= 0) {
-        return true;
-    }
-    search_dir_count_t *directories = calloc((size_t)sr_count, sizeof(*directories));
-    if (!directories) {
-        return false;
-    }
-    int dir_n = 0;
-    for (int di = 0; di < sr_count; di++) {
-        const char *file = sr[di].file ? sr[di].file : "";
-        const char *slash = strchr(file, '/');
-        size_t directory_length = slash ? (size_t)(slash - file + SKIP_ONE) : strlen(file);
-        int found = CBM_NOT_FOUND;
-        for (int d = 0; d < dir_n; d++) {
-            if (strlen(directories[d].name) == directory_length &&
-                memcmp(directories[d].name, file, directory_length) == 0) {
-                found = d;
-                break;
-            }
-        }
-        if (found >= 0) {
-            directories[found].count++;
-        } else {
-            directories[dir_n].name = cbm_strndup(file, directory_length);
-            if (!directories[dir_n].name) {
-                free_search_dirs(directories, dir_n);
-                return false;
-            }
-            directories[dir_n].count = SKIP_ONE;
-            dir_n++;
-        }
-    }
-    *directories_out = directories;
-    *count_out = dir_n;
-    return true;
-}
-
-static bool raw_content_has_next(const grep_match_t *match) {
-    return match->content_start_byte + match->content_returned_bytes < match->content_total_bytes;
-}
-
-static bool raw_match_fully_returned(const grep_match_t *match) {
-    if (!match->match_known) {
-        return false;
-    }
-    size_t content_end = match->content_start_byte + match->content_returned_bytes;
-    return match->content_start_byte <= match->match_start_byte &&
-           content_end >= match->match_end_byte;
-}
-
-static int search_match_lines_shown(const search_result_t *result, int match_limit) {
-    return result->match_stored_count < match_limit ? result->match_stored_count : match_limit;
-}
-
-static char *search_match_lines_text(const search_result_t *result, int match_limit) {
-    int shown = search_match_lines_shown(result, match_limit);
-    size_t capacity = (size_t)shown * 16U + 1U;
-    char *text = malloc(capacity);
-    if (!text) {
-        return NULL;
-    }
-    size_t used = 0;
-    text[0] = '\0';
-    for (int i = 0; i < shown; i++) {
-        int written = snprintf(text + used, capacity - used, "%s%d", i > 0 ? ";" : "",
-                               result->match_lines[i]);
-        if (written < 0 || (size_t)written >= capacity - used) {
-            free(text);
-            return NULL;
-        }
-        used += (size_t)written;
-    }
-    return text;
-}
-
-/* TOON emission for compact-mode search results: one row per hit
- * (qn/label/file/lines/matches/degrees — `node` dropped, it duplicates the
- * qn's last segment), a raw[] table for uncorrelated matches, a dirs[]
- * distribution table, and the summary scalars. */
-static char *assemble_search_output_toon(search_result_t *sr, int sr_count, grep_match_t *raw,
-                                         int raw_count, int raw_content_truncated, int gm_count,
-                                         int result_start, int result_limit, int output_count,
-                                         int raw_start, int raw_output, int directory_start,
-                                         int directory_output, int raw_limit, int directory_limit,
-                                         int match_limit, bool scan_saturated,
-                                         bool warn_literal_pipe, const search_metrics_t *metrics,
-                                         bool budget_hit, int source_lines_returned) {
-    enum { SEARCH_SLOW_MS = 5000 };
-    cbm_sb_t sb;
-    cbm_sb_init(&sb);
-
-    static const char *const cols[] = {"qn",      "label",           "file", "lines",
-                                       "matches", "matches_omitted", "in",   "out"};
-    typedef struct {
-        char lines[CBM_SZ_32];
-        char *matches;
-        char matches_omitted[CBM_SZ_32];
-        char inbound[CBM_SZ_32];
-        char outbound[CBM_SZ_32];
-    } search_tree_row_t;
-    search_tree_row_t *rendered =
-        output_count > 0 ? calloc((size_t)output_count, sizeof(*rendered)) : NULL;
-    const char **cells =
-        output_count > 0 ? calloc((size_t)output_count * 8U, sizeof(*cells)) : NULL;
-    if (output_count > 0 && (!rendered || !cells)) {
-        free(cells);
-        free(rendered);
-        cbm_sb_free(&sb);
-        return NULL;
-    }
-    for (int ri = 0; ri < output_count; ri++) {
-        search_result_t *r = &sr[result_start + ri];
-        if (r->start_line > 0) {
-            snprintf(rendered[ri].lines, sizeof(rendered[ri].lines), "%d-%d", r->start_line,
-                     r->end_line > r->start_line ? r->end_line : r->start_line);
-        }
-        rendered[ri].matches = search_match_lines_text(r, match_limit);
-        if (!rendered[ri].matches) {
-            for (int j = 0; j < ri; j++) {
-                free(rendered[j].matches);
-            }
-            free(cells);
-            free(rendered);
-            cbm_sb_free(&sb);
-            return NULL;
-        }
-        snprintf(rendered[ri].matches_omitted, sizeof(rendered[ri].matches_omitted), "%d",
-                 r->match_count - search_match_lines_shown(r, match_limit));
-        snprintf(rendered[ri].inbound, sizeof(rendered[ri].inbound), "%d", r->in_degree);
-        snprintf(rendered[ri].outbound, sizeof(rendered[ri].outbound), "%d", r->out_degree);
-        size_t base = (size_t)ri * 8U;
-        cells[base] = r->qualified_name;
-        cells[base + 1] = r->label;
-        cells[base + 2] = r->file;
-        cells[base + 3] = rendered[ri].lines;
-        cells[base + 4] = rendered[ri].matches;
-        cells[base + 5] = rendered[ri].matches_omitted;
-        cells[base + 6] = rendered[ri].inbound;
-        cells[base + 7] = rendered[ri].outbound;
-    }
-    if (output_count > 0 && rendered && cells) {
-        static const bool string_cols[] = {true, true, true, true, true, false, false, false};
-        static const bool prefix_cols[] = {true, false, true, false, false, false, false, false};
-        cbm_tree_table_rows_profiled(&sb, "results", output_count, cols, 8, cells, string_cols,
-                                     prefix_cols);
-    } else {
-        cbm_tree_table_header(&sb, "results", 0, cols, 8);
-    }
-    for (int ri = 0; ri < output_count; ri++) {
-        free(rendered[ri].matches);
-    }
-    free(cells);
-    free(rendered);
-
-    if (raw_output > 0) {
-        static const char *const rcols[] = {"file",
-                                            "line",
-                                            "content",
-                                            "content_start_byte",
-                                            "content_returned_bytes",
-                                            "content_total_bytes",
-                                            "match_start_byte",
-                                            "match_end_byte",
-                                            "content_has_more",
-                                            "content_next_offset",
-                                            "match_fully_returned"};
-        enum { RAW_COLS = 11, RAW_TEXT_FIELDS = 9 };
-        const char **raw_cells = calloc((size_t)raw_output * RAW_COLS, sizeof(*raw_cells));
-        char (*raw_text)[RAW_TEXT_FIELDS][CBM_SZ_32] =
-            calloc((size_t)raw_output, sizeof(*raw_text));
-        if (!raw_cells || !raw_text) {
-            free(raw_text);
-            free(raw_cells);
-            cbm_sb_free(&sb);
-            return NULL;
-        }
-        for (int ri = 0; ri < raw_output; ri++) {
-            int raw_index = ri;
-            grep_match_t *r = &raw[raw_index];
-            snprintf(raw_text[ri][0], sizeof(raw_text[ri][0]), "%d", r->line);
-            snprintf(raw_text[ri][1], sizeof(raw_text[ri][1]), "%zu", r->content_start_byte);
-            snprintf(raw_text[ri][2], sizeof(raw_text[ri][2]), "%zu", r->content_returned_bytes);
-            snprintf(raw_text[ri][3], sizeof(raw_text[ri][3]), "%zu", r->content_total_bytes);
-            if (r->match_known) {
-                snprintf(raw_text[ri][4], sizeof(raw_text[ri][4]), "%zu", r->match_start_byte);
-                snprintf(raw_text[ri][5], sizeof(raw_text[ri][5]), "%zu", r->match_end_byte);
-            }
-            snprintf(raw_text[ri][6], sizeof(raw_text[ri][6]), "%s",
-                     raw_content_has_next(r) ? "true" : "false");
-            if (raw_content_has_next(r)) {
-                snprintf(raw_text[ri][7], sizeof(raw_text[ri][7]), "%zu",
-                         r->content_start_byte + r->content_returned_bytes);
-            }
-            snprintf(raw_text[ri][8], sizeof(raw_text[ri][8]), "%s",
-                     raw_match_fully_returned(r) ? "true" : "false");
-            size_t base = (size_t)ri * RAW_COLS;
-            raw_cells[base] = r->file;
-            raw_cells[base + 1U] = raw_text[ri][0];
-            raw_cells[base + 2U] = r->content;
-            for (size_t field = 1; field < RAW_TEXT_FIELDS; field++) {
-                raw_cells[base + field + 2U] = raw_text[ri][field];
-            }
-        }
-        static const bool raw_string_cols[] = {true,  false, true,  false, false, false,
-                                               false, false, false, false, false};
-        static const bool raw_prefix_cols[] = {true,  false, false, false, false, false,
-                                               false, false, false, false, false};
-        cbm_tree_table_rows_profiled(&sb, "raw", raw_output, rcols, RAW_COLS, raw_cells,
-                                     raw_string_cols, raw_prefix_cols);
-        free(raw_text);
-        free(raw_cells);
-    }
-
-    search_dir_count_t *directories = NULL;
-    int dir_n = 0;
-    if (!aggregate_search_dirs(sr, sr_count, &directories, &dir_n)) {
-        cbm_sb_free(&sb);
-        return NULL;
-    }
-    if (directory_start > dir_n) {
-        directory_start = dir_n;
-    }
-    if (directory_output > dir_n - directory_start) {
-        directory_output = dir_n - directory_start;
-    }
-    if (directory_output > 0) {
-        static const char *const dcols[] = {"dir", "hits"};
-        const char **dir_cells = calloc((size_t)directory_output * 2U, sizeof(*dir_cells));
-        char (*count_text)[CBM_SZ_32] = calloc((size_t)directory_output, sizeof(*count_text));
-        if (!dir_cells || !count_text) {
-            free(count_text);
-            free(dir_cells);
-            free_search_dirs(directories, dir_n);
-            cbm_sb_free(&sb);
-            return NULL;
-        }
-        for (int d = 0; d < directory_output; d++) {
-            int directory_index = directory_start + d;
-            snprintf(count_text[d], sizeof(count_text[d]), "%d",
-                     directories[directory_index].count);
-            dir_cells[(size_t)d * 2U] = directories[directory_index].name;
-            dir_cells[(size_t)d * 2U + 1U] = count_text[d];
-        }
-        static const bool dir_string_cols[] = {true, false};
-        static const bool dir_prefix_cols[] = {true, false};
-        cbm_tree_table_rows_profiled(&sb, "directories", directory_output, dcols, 2, dir_cells,
-                                     dir_string_cols, dir_prefix_cols);
-        free(count_text);
-        free(dir_cells);
-    }
-    free_search_dirs(directories, dir_n);
-
-    cbm_tree_scalar_int(&sb, "total_grep_matches", gm_count);
-    cbm_tree_scalar_int(&sb, "total_results", sr_count);
-    cbm_tree_scalar_int(&sb, "raw_match_count", raw_count);
-    cbm_tree_scalar_str(&sb, "total_relation", scan_saturated ? "gte" : "eq");
-    cbm_tree_scalar_int(&sb, "result_offset", result_start);
-    cbm_tree_scalar_int(&sb, "results_returned", output_count);
-    bool has_more = result_start + output_count < sr_count;
-    cbm_tree_scalar_bool(&sb, "has_more", has_more);
-    if (has_more && output_count > 0) {
-        cbm_tree_scalar_int(&sb, "next_offset", result_start + output_count);
-    } else if (has_more) {
-        cbm_tree_scalar_bool(&sb,
-                             result_limit == 0 ? "result_continuation_requires_positive_limit"
-                                               : "result_continuation_requires_higher_budget",
-                             true);
-    }
-    cbm_tree_scalar_int(&sb, "raw_returned", raw_output);
-    bool raw_has_more = raw_start + raw_output < raw_count;
-    cbm_tree_scalar_bool(&sb, "raw_has_more", raw_has_more);
-    if (raw_has_more && raw_output > 0) {
-        cbm_tree_scalar_int(&sb, "raw_next_offset", raw_start + raw_output);
-    } else if (raw_has_more) {
-        cbm_tree_scalar_bool(&sb,
-                             raw_limit == 0 ? "raw_continuation_requires_positive_limit"
-                                            : "raw_continuation_requires_higher_budget",
-                             true);
-    }
-    if (raw_content_truncated > 0) {
-        cbm_tree_scalar_int(&sb, "raw_content_truncated", raw_content_truncated);
-    }
-    cbm_tree_scalar_int(&sb, "directories_total", dir_n);
-    cbm_tree_scalar_int(&sb, "directories_returned", directory_output);
-    bool directories_has_more = directory_start + directory_output < dir_n;
-    cbm_tree_scalar_bool(&sb, "directories_has_more", directories_has_more);
-    if (directories_has_more && directory_output > 0) {
-        cbm_tree_scalar_int(&sb, "directory_next_offset", directory_start + directory_output);
-    } else if (directories_has_more) {
-        cbm_tree_scalar_bool(&sb,
-                             directory_limit == 0 ? "directory_continuation_requires_positive_limit"
-                                                  : "directory_continuation_requires_higher_budget",
-                             true);
-    }
-    if (scan_saturated) {
-        cbm_tree_scalar_bool(&sb, "scan_saturated", true);
-    }
-    cbm_tree_scalar_bool(&sb, "truncated",
-                         has_more || raw_has_more || directories_has_more || scan_saturated ||
-                             budget_hit);
-    if (budget_hit) {
-        cbm_tree_scalar_str(&sb, "truncation_reason", "output_budget");
-    }
-    if (source_lines_returned >= 0) {
-        cbm_tree_scalar_int(&sb, "source_max_lines_returned", source_lines_returned);
-    }
-    if (metrics->include_phase_timings) {
-        cbm_tree_scalar_int(&sb, "scope_ms", (long long)metrics->scope_ms);
-        cbm_tree_scalar_int(&sb, "scan_ms", (long long)metrics->scan_ms);
-        cbm_tree_scalar_int(&sb, "enrich_ms", (long long)metrics->enrich_ms);
-    }
-    cbm_tree_scalar_int(&sb, "elapsed_ms", (long long)metrics->elapsed_ms);
-    if (warn_literal_pipe) {
-        cbm_tree_scalar_str(&sb, "warning",
-                            "pattern contains '|' but regex=false, so it is matched literally "
-                            "(not as alternation). Pass regex=true for 'foo|bar' to mean "
-                            "'foo OR bar'.");
-    }
-    if (metrics->hint_path_filter) {
-        cbm_tree_scalar_str(&sb, "hint", SEARCH_CODE_PATH_HINT);
-    }
-    if (metrics->elapsed_ms >= SEARCH_SLOW_MS) {
-        cbm_tree_scalar_str(&sb, "warning_slow",
-                            "search was slow; narrow file_pattern/path_filter or use a more "
-                            "specific pattern");
-    }
-    return cbm_sb_finish(&sb);
-}
-
-/* Phase 4: assemble JSON output from search results */
-static char *assemble_search_output(
-    search_result_t *sr, int sr_count, grep_match_t *raw, int raw_count, int raw_content_truncated,
-    int gm_count, int result_start, int result_limit, int output_count, int raw_start,
-    int raw_output, int directory_start, int directory_output, int raw_limit, int directory_limit,
-    int match_limit, int mode, int context_lines, int source_max_lines, const char *root_path,
-    bool scan_saturated, bool warn_literal_pipe, const search_metrics_t *metrics, bool budget_hit,
-    root_containment_t *containment) {
-    enum { MODE_COMPACT = 0, MODE_FULL = 1, MODE_FILES = 2, SEARCH_SLOW_MS = 5000 };
-
-    yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
-    yyjson_mut_val *root_obj = yyjson_mut_obj(doc);
-    yyjson_mut_doc_set_root(doc, root_obj);
-
-    if (mode == MODE_FILES) {
-        yyjson_mut_val *files = build_dedup_files_array(doc, sr, result_start, output_count, raw,
-                                                        raw_start, raw_output);
-        if (!files) {
-            yyjson_mut_doc_free(doc);
-            return NULL;
-        }
-        yyjson_mut_obj_add_val(doc, root_obj, "files", files);
-    } else {
-        /* json-stringified tree: cols + column-ordered row arrays. FULL mode
-         * appends a per-row object cell with the (guarded, windowed) source;
-         * context requests append the corresponding context object. */
-        bool attach_context = context_lines > 0 && mode != MODE_FULL;
-        yyjson_mut_val *jcols = yyjson_mut_arr(doc);
-        static const char *const sc_cols[] = {"qn",      "label",           "file", "lines",
-                                              "matches", "matches_omitted", "in",   "out"};
-        for (size_t ci = 0; ci < sizeof(sc_cols) / sizeof(sc_cols[0]); ci++) {
-            yyjson_mut_arr_add_str(doc, jcols, sc_cols[ci]);
-        }
-        if (mode == MODE_FULL || attach_context) {
-            yyjson_mut_arr_add_str(doc, jcols, mode == MODE_FULL ? "source" : "context");
-        }
-        yyjson_mut_obj_add_val(doc, root_obj, "cols", jcols);
-
-        yyjson_mut_val *results_arr = yyjson_mut_arr(doc);
-        for (int ri = 0; ri < output_count; ri++) {
-            search_result_t *r = &sr[result_start + ri];
-            char lines[CBM_SZ_32];
-            if (r->start_line > 0) {
-                snprintf(lines, sizeof(lines), "%d-%d", r->start_line,
-                         r->end_line > r->start_line ? r->end_line : r->start_line);
-            } else {
-                lines[0] = '\0';
-            }
-            yyjson_mut_val *row = yyjson_mut_arr(doc);
-            yyjson_mut_arr_add_strcpy(doc, row, r->qualified_name);
-            yyjson_mut_arr_add_strcpy(doc, row, r->label);
-            yyjson_mut_arr_add_strcpy(doc, row, r->file);
-            yyjson_mut_arr_add_strcpy(doc, row, lines);
-            yyjson_mut_val *ml = yyjson_mut_arr(doc);
-            int matches_shown = search_match_lines_shown(r, match_limit);
-            for (int j = 0; j < matches_shown; j++) {
-                yyjson_mut_arr_add_int(doc, ml, r->match_lines[j]);
-            }
-            yyjson_mut_arr_add_val(row, ml);
-            yyjson_mut_arr_add_int(doc, row, r->match_count - matches_shown);
-            yyjson_mut_arr_add_int(doc, row, r->in_degree);
-            yyjson_mut_arr_add_int(doc, row, r->out_degree);
-            if (mode == MODE_FULL || attach_context) {
-                yyjson_mut_val *src = yyjson_mut_obj(doc);
-                attach_result_source(doc, src, r, mode, context_lines, source_max_lines, root_path,
-                                     containment);
-                yyjson_mut_arr_add_val(row, src);
-            }
-            yyjson_mut_arr_add_val(results_arr, row);
-        }
-        yyjson_mut_obj_add_val(doc, root_obj, "rows", results_arr);
-
-        yyjson_mut_val *raw_obj = yyjson_mut_obj(doc);
-        yyjson_mut_val *rcols = yyjson_mut_arr(doc);
-        yyjson_mut_arr_add_str(doc, rcols, "file");
-        yyjson_mut_arr_add_str(doc, rcols, "line");
-        yyjson_mut_arr_add_str(doc, rcols, "content");
-        yyjson_mut_arr_add_str(doc, rcols, "content_start_byte");
-        yyjson_mut_arr_add_str(doc, rcols, "content_returned_bytes");
-        yyjson_mut_arr_add_str(doc, rcols, "content_total_bytes");
-        yyjson_mut_arr_add_str(doc, rcols, "match_start_byte");
-        yyjson_mut_arr_add_str(doc, rcols, "match_end_byte");
-        yyjson_mut_arr_add_str(doc, rcols, "content_has_more");
-        yyjson_mut_arr_add_str(doc, rcols, "content_next_offset");
-        yyjson_mut_arr_add_str(doc, rcols, "match_fully_returned");
-        yyjson_mut_obj_add_val(doc, raw_obj, "cols", rcols);
-        yyjson_mut_val *raw_arr = yyjson_mut_arr(doc);
-        for (int ri = 0; ri < raw_output; ri++) {
-            int raw_index = ri;
-            yyjson_mut_val *row = yyjson_mut_arr(doc);
-            yyjson_mut_arr_add_str(doc, row, raw[raw_index].file);
-            yyjson_mut_arr_add_int(doc, row, raw[raw_index].line);
-            yyjson_mut_arr_add_str(doc, row, raw[raw_index].content);
-            yyjson_mut_arr_add_uint(doc, row, raw[raw_index].content_start_byte);
-            yyjson_mut_arr_add_uint(doc, row, raw[raw_index].content_returned_bytes);
-            yyjson_mut_arr_add_uint(doc, row, raw[raw_index].content_total_bytes);
-            if (raw[raw_index].match_known) {
-                yyjson_mut_arr_add_uint(doc, row, raw[raw_index].match_start_byte);
-                yyjson_mut_arr_add_uint(doc, row, raw[raw_index].match_end_byte);
-            } else {
-                yyjson_mut_arr_add_null(doc, row);
-                yyjson_mut_arr_add_null(doc, row);
-            }
-            yyjson_mut_arr_add_bool(doc, row, raw_content_has_next(&raw[raw_index]));
-            if (raw_content_has_next(&raw[raw_index])) {
-                yyjson_mut_arr_add_uint(doc, row,
-                                        raw[raw_index].content_start_byte +
-                                            raw[raw_index].content_returned_bytes);
-            } else {
-                yyjson_mut_arr_add_null(doc, row);
-            }
-            yyjson_mut_arr_add_bool(doc, row, raw_match_fully_returned(&raw[raw_index]));
-            yyjson_mut_arr_add_val(raw_arr, row);
-        }
-        yyjson_mut_obj_add_val(doc, raw_obj, "rows", raw_arr);
-        yyjson_mut_obj_add_val(doc, root_obj, "raw_matches", raw_obj);
-    }
-
-    search_dir_count_t *directories = NULL;
-    int dir_total = 0;
-    if (!aggregate_search_dirs(sr, sr_count, &directories, &dir_total)) {
-        yyjson_mut_doc_free(doc);
-        return NULL;
-    }
-    if (directory_start > dir_total) {
-        directory_start = dir_total;
-    }
-    if (directory_output > dir_total - directory_start) {
-        directory_output = dir_total - directory_start;
-    }
-    yyjson_mut_val *directory_object = yyjson_mut_obj(doc);
-    for (int d = 0; d < directory_output; d++) {
-        int directory_index = directory_start + d;
-        yyjson_mut_val *key = yyjson_mut_strcpy(doc, directories[directory_index].name);
-        yyjson_mut_val *value = yyjson_mut_int(doc, directories[directory_index].count);
-        yyjson_mut_obj_add(directory_object, key, value);
-    }
-    yyjson_mut_obj_add_val(doc, root_obj, "directories", directory_object);
-    free_search_dirs(directories, dir_total);
-
-    /* Summary stats */
-    yyjson_mut_obj_add_int(doc, root_obj, "total_grep_matches", gm_count);
-    yyjson_mut_obj_add_int(doc, root_obj, "total_results", sr_count);
-    yyjson_mut_obj_add_int(doc, root_obj, "raw_match_count", raw_count);
-    yyjson_mut_obj_add_str(doc, root_obj, "total_relation", scan_saturated ? "gte" : "eq");
-    yyjson_mut_obj_add_int(doc, root_obj, "result_offset", result_start);
-    yyjson_mut_obj_add_int(doc, root_obj, "results_returned", output_count);
-    bool has_more = result_start + output_count < sr_count;
-    yyjson_mut_obj_add_bool(doc, root_obj, "has_more", has_more);
-    if (has_more && output_count > 0) {
-        yyjson_mut_obj_add_int(doc, root_obj, "next_offset", result_start + output_count);
-    } else if (has_more) {
-        yyjson_mut_obj_add_bool(doc, root_obj,
-                                result_limit == 0 ? "result_continuation_requires_positive_limit"
-                                                  : "result_continuation_requires_higher_budget",
-                                true);
-    }
-    yyjson_mut_obj_add_int(doc, root_obj, "raw_returned", raw_output);
-    bool raw_has_more = raw_start + raw_output < raw_count;
-    yyjson_mut_obj_add_bool(doc, root_obj, "raw_has_more", raw_has_more);
-    if (raw_has_more && raw_output > 0) {
-        yyjson_mut_obj_add_int(doc, root_obj, "raw_next_offset", raw_start + raw_output);
-    } else if (raw_has_more) {
-        yyjson_mut_obj_add_bool(doc, root_obj,
-                                raw_limit == 0 ? "raw_continuation_requires_positive_limit"
-                                               : "raw_continuation_requires_higher_budget",
-                                true);
-    }
-    if (raw_content_truncated > 0) {
-        yyjson_mut_obj_add_int(doc, root_obj, "raw_content_truncated", raw_content_truncated);
-    }
-    yyjson_mut_obj_add_int(doc, root_obj, "directories_total", dir_total);
-    yyjson_mut_obj_add_int(doc, root_obj, "directories_returned", directory_output);
-    bool directories_has_more = directory_start + directory_output < dir_total;
-    yyjson_mut_obj_add_bool(doc, root_obj, "directories_has_more", directories_has_more);
-    if (directories_has_more && directory_output > 0) {
-        yyjson_mut_obj_add_int(doc, root_obj, "directory_next_offset",
-                               directory_start + directory_output);
-    } else if (directories_has_more) {
-        yyjson_mut_obj_add_bool(doc, root_obj,
-                                directory_limit == 0
-                                    ? "directory_continuation_requires_positive_limit"
-                                    : "directory_continuation_requires_higher_budget",
-                                true);
-    }
-    if (scan_saturated) {
-        yyjson_mut_obj_add_bool(doc, root_obj, "scan_saturated", true);
-    }
-    yyjson_mut_obj_add_bool(doc, root_obj, "truncated",
-                            has_more || raw_has_more || directories_has_more || scan_saturated ||
-                                budget_hit);
-    if (budget_hit) {
-        yyjson_mut_obj_add_str(doc, root_obj, "truncation_reason", "output_budget");
-    }
-    if (mode == MODE_FULL) {
-        yyjson_mut_obj_add_int(doc, root_obj, "source_max_lines_returned", source_max_lines);
-    }
-    if (metrics->include_phase_timings) {
-        yyjson_mut_obj_add_uint(doc, root_obj, "scope_ms", metrics->scope_ms);
-        yyjson_mut_obj_add_uint(doc, root_obj, "scan_ms", metrics->scan_ms);
-        yyjson_mut_obj_add_uint(doc, root_obj, "enrich_ms", metrics->enrich_ms);
-    }
-    yyjson_mut_obj_add_uint(doc, root_obj, "elapsed_ms", metrics->elapsed_ms);
-    if (sr_count > 0 && gm_count > 0) {
-        char ratio[CBM_SZ_32];
-        snprintf(ratio, sizeof(ratio), "%.1fx", (double)gm_count / (double)(sr_count + raw_count));
-        yyjson_mut_obj_add_strcpy(doc, root_obj, "dedup_ratio", ratio);
-    }
-
-    /* Warnings: surface common foot-guns instead of leaving them silent. */
-    yyjson_mut_val *warnings = yyjson_mut_arr(doc);
-    if (warn_literal_pipe) {
-        yyjson_mut_arr_add_strcpy(
-            doc, warnings,
-            "pattern contains '|' but regex=false, so it is matched literally (not as "
-            "alternation). Pass regex=true for 'foo|bar' to mean 'foo OR bar'.");
-    }
-    if (metrics->elapsed_ms >= SEARCH_SLOW_MS) {
-        char slow[CBM_SZ_128];
-        snprintf(slow, sizeof(slow),
-                 "search took %dms (>%ds); narrow file_pattern/path_filter or use a more "
-                 "specific pattern",
-                 (int)metrics->elapsed_ms, SEARCH_SLOW_MS / 1000);
-        yyjson_mut_arr_add_strcpy(doc, warnings, slow);
-        char ems[CBM_SZ_32];
-        snprintf(ems, sizeof(ems), "%d", (int)metrics->elapsed_ms);
-        cbm_log_warn("search.slow", "elapsed_ms", ems); /* visibility in logs */
-    }
-    if (yyjson_mut_arr_size(warnings) > 0) {
-        yyjson_mut_obj_add_val(doc, root_obj, "warnings", warnings);
-    }
-    if (metrics->hint_path_filter) {
-        yyjson_mut_obj_add_str(doc, root_obj, "hint", SEARCH_CODE_PATH_HINT);
-    }
-
-    char *json = yy_doc_to_str(doc);
-    if (json) {
-        char *safe_json = sanitize_utf8_lossy(json);
-        if (safe_json) {
-            free(json);
-            json = safe_json;
-        }
-    }
-    yyjson_mut_doc_free(doc);
-
-    return json;
-}
-
-/* Render the same search response model in either direct JSON or the lean tree
- * form. Compact search has a purpose-built table renderer so repeated paths
- * and qualified-name prefixes can use the response-local directory. Full and
- * files mode first build the canonical JSON model, then project it to tree. */
-static char *render_search_payload(
-    search_result_t *sr, int sr_count, grep_match_t *raw, int raw_count, int raw_content_truncated,
-    int gm_count, int result_start, int result_limit, int output_count, int raw_start,
-    int raw_output, int directory_start, int directory_output, int raw_limit, int directory_limit,
-    int match_limit, int mode, int context_lines, int source_max_lines, const char *root_path,
-    bool scan_saturated, bool warn_literal_pipe, const search_metrics_t *metrics, bool budget_hit,
-    bool json_format, root_containment_t *request_containment) {
-    if (mode == 0 && !json_format) {
-        return assemble_search_output_toon(sr, sr_count, raw, raw_count, raw_content_truncated,
-                                           gm_count, result_start, result_limit, output_count,
-                                           raw_start, raw_output, directory_start, directory_output,
-                                           raw_limit, directory_limit, match_limit, scan_saturated,
-                                           warn_literal_pipe, metrics, budget_hit, -1);
-    }
-
-    /* A caller that renders once passes NULL; search_code passes the
-     * containment it keeps for the whole request (see root_containment_t). */
-    root_containment_t local_containment;
-    root_containment_t *containment = request_containment;
-    if (!containment) {
-        root_containment_init(&local_containment, root_path);
-        containment = &local_containment;
-    }
-    char *json = assemble_search_output(
-        sr, sr_count, raw, raw_count, raw_content_truncated, gm_count, result_start, result_limit,
-        output_count, raw_start, raw_output, directory_start, directory_output, raw_limit,
-        directory_limit, match_limit, mode, context_lines, source_max_lines, root_path,
-        scan_saturated, warn_literal_pipe, metrics, budget_hit, containment);
-    if (!request_containment) {
-        root_containment_free(&local_containment);
-    }
-    if (!json || json_format) {
-        return json;
-    }
-    char *tree = cbm_json_to_tree(json);
-    free(json);
-    return tree;
-}
-
-#ifdef CBM_ENABLE_TEST_SEAMS
-char *cbm_mcp_render_search_rows_for_testing(const char *const *qualified_names,
-                                             const char *const *file_paths, int row_count,
-                                             bool json_format) {
-    if (!qualified_names || !file_paths || row_count < 0) {
-        return NULL;
-    }
-    search_result_t *results = row_count > 0 ? calloc((size_t)row_count, sizeof(*results)) : NULL;
-    if (row_count > 0 && !results) {
-        return NULL;
-    }
-    int initialized = 0;
-    for (int i = 0; i < row_count; i++) {
-        cbm_node_t node = {.id = i + SKIP_ONE,
-                           .label = "Function",
-                           .name = "synthetic",
-                           .qualified_name = qualified_names[i],
-                           .file_path = file_paths[i],
-                           .start_line = SKIP_ONE,
-                           .end_line = SKIP_ONE};
-        if (!set_search_result_identity(&results[i], &node)) {
-            free_search_results(results, initialized);
-            return NULL;
-        }
-        if (!append_search_match_line(&results[i], SKIP_ONE)) {
-            free_search_results(results, initialized + 1);
-            return NULL;
-        }
-        initialized++;
-    }
-    char *payload =
-        render_search_payload(results, row_count, NULL, 0, 0, row_count, 0, row_count, row_count, 0,
-                              0, 0, row_count, 0, row_count > 0 ? 1 : 0, row_count > 0 ? 1 : 0, 0,
-                              0, 0, "", false, false, &zero_metrics, false, json_format, NULL);
-    free_search_results(results, initialized);
-    return payload;
-}
-#endif
-
-/* A pathological single qualified name, path, or source line can be larger
- * than the caller's entire budget. Never byte-slice it: return a small,
- * truthful floor that tells the caller how to request the omitted rows. */
-static char *search_budget_floor(int sr_count, int raw_count, int gm_count, int result_start,
-                                 int result_limit, int raw_start, int raw_limit,
-                                 int directory_start, int directory_limit, int directory_total,
-                                 bool scan_saturated, bool json_format, int max_output_tokens) {
-    (void)gm_count;
-    (void)max_output_tokens;
-    bool result_has_more = result_start < sr_count;
-    bool raw_has_more = raw_start < raw_count;
-    bool directories_has_more = directory_start < directory_total;
-    if (!json_format) {
-        cbm_sb_t sb;
-        cbm_sb_init(&sb);
-        cbm_tree_scalar_int(&sb, "total_results", sr_count);
-        cbm_tree_scalar_int(&sb, "raw_match_count", raw_count);
-        cbm_tree_scalar_int(&sb, "result_offset", result_start);
-        cbm_tree_scalar_int(&sb, "results_returned", 0);
-        cbm_tree_scalar_bool(&sb, "has_more", result_has_more);
-        if (result_has_more) {
-            cbm_tree_scalar_bool(&sb,
-                                 result_limit == 0 ? "result_continuation_requires_positive_limit"
-                                                   : "result_continuation_requires_higher_budget",
-                                 true);
-        }
-        cbm_tree_scalar_int(&sb, "raw_offset", raw_start);
-        cbm_tree_scalar_int(&sb, "raw_returned", 0);
-        cbm_tree_scalar_bool(&sb, "raw_has_more", raw_has_more);
-        if (raw_has_more && raw_limit == 0) {
-            cbm_tree_scalar_bool(&sb, "raw_continuation_requires_positive_limit", true);
-        }
-        cbm_tree_scalar_int(&sb, "directories_total", directory_total);
-        cbm_tree_scalar_int(&sb, "directory_offset", directory_start);
-        cbm_tree_scalar_int(&sb, "directories_returned", 0);
-        cbm_tree_scalar_bool(&sb, "directories_has_more", directories_has_more);
-        if (directories_has_more && directory_limit == 0) {
-            cbm_tree_scalar_bool(&sb, "directory_continuation_requires_positive_limit", true);
-        }
-        if (scan_saturated) {
-            cbm_tree_scalar_bool(&sb, "scan_saturated", true);
-        }
-        cbm_tree_scalar_bool(&sb, "truncated", true);
-        cbm_tree_scalar_str(&sb, "truncation_reason", "output_budget");
-        return cbm_sb_finish(&sb);
-    }
-
-    yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
-    yyjson_mut_val *root = yyjson_mut_obj(doc);
-    yyjson_mut_doc_set_root(doc, root);
-    yyjson_mut_obj_add_int(doc, root, "total_results", sr_count);
-    yyjson_mut_obj_add_int(doc, root, "raw_match_count", raw_count);
-    yyjson_mut_obj_add_int(doc, root, "result_offset", result_start);
-    yyjson_mut_obj_add_int(doc, root, "results_returned", 0);
-    yyjson_mut_obj_add_bool(doc, root, "has_more", result_has_more);
-    if (result_has_more) {
-        yyjson_mut_obj_add_bool(doc, root,
-                                result_limit == 0 ? "result_continuation_requires_positive_limit"
-                                                  : "result_continuation_requires_higher_budget",
-                                true);
-    }
-    yyjson_mut_obj_add_int(doc, root, "raw_offset", raw_start);
-    yyjson_mut_obj_add_int(doc, root, "raw_returned", 0);
-    yyjson_mut_obj_add_bool(doc, root, "raw_has_more", raw_has_more);
-    if (raw_has_more && raw_limit == 0) {
-        yyjson_mut_obj_add_bool(doc, root, "raw_continuation_requires_positive_limit", true);
-    }
-    yyjson_mut_obj_add_int(doc, root, "directories_total", directory_total);
-    yyjson_mut_obj_add_int(doc, root, "directory_offset", directory_start);
-    yyjson_mut_obj_add_int(doc, root, "directories_returned", 0);
-    yyjson_mut_obj_add_bool(doc, root, "directories_has_more", directories_has_more);
-    if (directories_has_more && directory_limit == 0) {
-        yyjson_mut_obj_add_bool(doc, root, "directory_continuation_requires_positive_limit", true);
-    }
-    if (scan_saturated) {
-        yyjson_mut_obj_add_bool(doc, root, "scan_saturated", true);
-    }
-    yyjson_mut_obj_add_bool(doc, root, "truncated", true);
-    yyjson_mut_obj_add_str(doc, root, "truncation_reason", "output_budget");
-    char *json = yy_doc_to_str(doc);
-    yyjson_mut_doc_free(doc);
-    return json;
-}
-
-/* Read grep output from fp, parse file:line:content format, apply path filter,
- * and return a dynamically-allocated grep_match_t array. */
 /* Strip root path prefix from a file path. */
 static const char *strip_root_prefix(const char *path, const char *root, size_t root_len) {
     if (strncmp(path, root, root_len) != 0) {
@@ -16797,20 +15788,6 @@ static void search_raw_preview(grep_match_t *match, const char *content,
     match->content_truncated = start > 0 || end < total;
 }
 
-#ifdef CBM_ENABLE_TEST_SEAMS
-char *cbm_mcp_render_raw_preview_for_testing(const char *content, bool content_offset_set,
-                                             size_t content_offset, bool json_format) {
-    if (!content) {
-        return NULL;
-    }
-    grep_match_t raw = {.file = "fixture.raw", .line = 7};
-    search_raw_preview(&raw, content, content_offset_set, content_offset, false, 0, 0);
-    return render_search_payload(NULL, 0, &raw, 1, raw.content_truncated ? 1 : 0, 1, 0, 0, 0, 0, 1,
-                                 0, 0, 1, 0, 0, 0, 0, 0, "", false, false, &zero_metrics, false,
-                                 json_format, NULL);
-}
-#endif
-
 /* Find the tightest node containing a line in a file. Returns index or -1. */
 static int find_tightest_node(cbm_node_t *nodes, int count, int line) {
     int best = CBM_NOT_FOUND;
@@ -16845,7 +15822,6 @@ static bool set_search_result_identity(search_result_t *result, const cbm_node_t
         return false;
     }
     result->node_id = node->id;
-    snprintf(result->node_name, sizeof(result->node_name), "%s", node->name ? node->name : "");
     snprintf(result->label, sizeof(result->label), "%s", node->label ? node->label : "");
     result->start_line = node->start_line;
     result->end_line = node->end_line;
@@ -16858,6 +15834,7 @@ static bool append_search_match_line(search_result_t *result, int line) {
         return false;
     }
     result->match_count++;
+    result->last_match_line = line;
     if (result->match_stored_count >= SEARCH_MATCH_LINES_RETAINED) {
         return true;
     }
@@ -17376,20 +16353,6 @@ static bool write_scoped_filelist(cbm_mcp_server_t *srv, const char *project, co
     return ok;
 }
 
-/* Parse search mode string (0=compact, 1=full, 2=files). */
-static int parse_search_mode(const char *mode_str) {
-    if (!mode_str) {
-        return 0;
-    }
-    if (strcmp(mode_str, "full") == 0) {
-        return SKIP_ONE;
-    }
-    if (strcmp(mode_str, "files") == 0) {
-        return MCP_RETURN_2;
-    }
-    return 0;
-}
-
 /* Validate shell-safe arguments for search. */
 /* Search/grep paths and globs are ALWAYS single-quoted (POSIX sh) or
  * double-/single-quoted (Windows cmd/PowerShell) on the command line, which
@@ -17434,16 +16397,6 @@ static bool validate_windows_cmd_interpolation_arg(const char *s) {
 #else
     return s != NULL;
 #endif
-}
-
-static bool validate_search_args(const char *root_path, const char *file_pattern) {
-    if (!validate_search_path_arg(root_path)) {
-        return false;
-    }
-    if (file_pattern && !validate_search_path_arg(file_pattern)) {
-        return false;
-    }
-    return true;
 }
 
 /* Private scratch for one search_code scan: the grep -f pattern file and the
@@ -17936,18 +16889,6 @@ static bool search_scratch_open(search_scratch_t *scratch, const char *parent,
     return true;
 }
 
-/* Compile a path filter regex. Returns true when *re holds the compiled filter.
- * An absent or empty filter compiles nothing and reports CBM_REG_OK in *rc; a
- * filter the regex wrapper refuses or cannot compile reports its error there. */
-static bool compile_path_filter(const char *filter, cbm_regex_t *re, int *rc) {
-    *rc = CBM_REG_OK;
-    if (!filter || !filter[0]) {
-        return false;
-    }
-    *rc = cbm_regcomp(re, filter, CBM_REG_EXTENDED | CBM_REG_NOSUB);
-    return *rc == CBM_REG_OK;
-}
-
 static mcp_scan_cause_t mcp_run_shell_command_cancellable_bounded(
     cbm_mcp_server_t *srv, const char *command, char output_path[CBM_SZ_2K], size_t output_limit,
     uint64_t deadline_ms, bool deadline_enabled, bool deadline_latched, bool exit_one_is_no_match,
@@ -17975,279 +16916,22 @@ static mcp_scan_cause_t mcp_run_search_scan_argv(cbm_mcp_server_t *srv, bool use
                                                  cbm_proc_result_t *result_out);
 #endif
 
-static char *search_code_timeout_result(void) {
-    static const char message[] = "search_code scan exceeded its execution deadline";
-    static const char fallback[] =
-        "{\"content\":[{\"type\":\"text\",\"text\":\"search_code scan exceeded its execution "
-        "deadline\"}],\"structuredContent\":{\"code\":\"request_timeout\",\"message\":\"search_"
-        "code "
-        "scan exceeded its execution deadline\"},\"isError\":true}";
-    yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
-    if (!doc) {
-        return heap_strdup(fallback);
-    }
-    yyjson_mut_val *root = yyjson_mut_obj(doc);
-    yyjson_mut_doc_set_root(doc, root);
-    yyjson_mut_val *content = yyjson_mut_arr(doc);
-    yyjson_mut_val *item = yyjson_mut_obj(doc);
-    yyjson_mut_obj_add_str(doc, item, "type", "text");
-    yyjson_mut_obj_add_str(doc, item, "text", message);
-    yyjson_mut_arr_add_val(content, item);
-    yyjson_mut_obj_add_val(doc, root, "content", content);
-    yyjson_mut_val *structured = yyjson_mut_obj(doc);
-    yyjson_mut_obj_add_str(doc, structured, "code", "request_timeout");
-    yyjson_mut_obj_add_str(doc, structured, "message", message);
-    yyjson_mut_obj_add_val(doc, root, "structuredContent", structured);
-    yyjson_mut_obj_add_bool(doc, root, "isError", true);
-    char *result = yy_doc_to_str(doc);
-    yyjson_mut_doc_free(doc);
-    return result ? result : heap_strdup(fallback);
-}
+typedef struct {
+    cbm_mcp_server_t *server;
+    root_containment_t containment;
+    bool containment_initialized;
+} search_native_context_t;
 
-static char *search_code_scan_error(search_scratch_t *scratch, const char *output_path,
-                                    bool has_path_filter, cbm_regex_t *path_regex, char *root_path,
-                                    char *pattern, char *project, char *file_pattern,
-                                    mcp_scan_cause_t cause, const char *message) {
-    if (output_path && output_path[0]) {
-        (void)cbm_unlink(output_path);
-    }
-    search_scratch_close(scratch);
-    if (has_path_filter) {
-        cbm_regfree(path_regex);
-    }
-    free(root_path);
-    free(pattern);
-    free(project);
-    free(file_pattern);
-    if (cause == MCP_SCAN_DEADLINE) {
-        return search_code_timeout_result();
-    }
-    return cbm_mcp_text_result(message, true);
-}
-
-static char *handle_search_code(cbm_mcp_server_t *srv, const char *args) {
-    char *pattern = cbm_mcp_get_string_arg(args, "pattern");
-    char *project = get_project_arg(args);
-    char *file_pattern = cbm_mcp_get_string_arg(args, "file_pattern");
-    char *path_filter = cbm_mcp_get_string_arg(args, "path_filter");
-    char *mode_str = cbm_mcp_get_string_arg(args, "mode");
-    int legacy_limit = cbm_mcp_get_int_arg(args, "limit", MCP_DEFAULT_LIMIT);
-    /* #1511: a negative limit flowed straight into the result cap and came back
-     * as the reported count ("results: -5"), which reads to an agent as a real
-     * answer rather than a rejected argument. The schema now declares
-     * minimum:1, but a schema is a request to the client, never a guarantee to
-     * the server — clamp here too. */
-    if (legacy_limit < 1) {
-        legacy_limit = MCP_DEFAULT_LIMIT;
-    }
-    int result_limit = cbm_mcp_get_int_arg(args, "result_limit", legacy_limit);
-    int result_offset = cbm_mcp_get_int_arg(args, "result_offset", 0);
-    int context_lines = cbm_mcp_get_int_arg(args, "context", 0);
-    if (context_lines < 0) {
-        context_lines = 0;
-    } else if (context_lines > MCP_SEARCH_CONTEXT_MAX_LINES) {
-        context_lines = MCP_SEARCH_CONTEXT_MAX_LINES;
-    }
-    bool use_regex = cbm_mcp_get_bool_arg(args, "regex");
-    uint64_t search_t0 = cbm_now_ms();
-    search_metrics_t metrics = {0};
-    metrics.include_phase_timings = cbm_mcp_get_bool_arg(args, "debug");
-    /* In literal (non-regex) mode a '|' is matched as a byte, not alternation —
-     * a common silent 0-match trap; flagged in the result warnings (#282). */
-    bool pat_has_pipe = pattern && strchr(pattern, '|') != NULL;
-
-    int mode = parse_search_mode(mode_str);
-    free(mode_str);
-
-    if (result_limit < 1) {
-        result_limit = MCP_DEFAULT_LIMIT;
-    } else if (result_limit > 500) {
-        result_limit = 500;
-    }
-    if (result_offset < 0) {
-        result_offset = 0;
-    }
-    int raw_limit = cbm_mcp_get_int_arg(args, "raw_limit", 5);
-    if (raw_limit < 0) {
-        raw_limit = 0;
-    } else if (raw_limit > 100) {
-        raw_limit = 100;
-    }
-    int raw_offset = cbm_mcp_get_int_arg(args, "raw_offset", 0);
-    if (raw_offset < 0) {
-        raw_offset = 0;
-    }
-    int raw_content_offset_arg = cbm_mcp_get_int_arg(args, "raw_content_offset", 0);
-    if (raw_content_offset_arg < 0) {
-        raw_content_offset_arg = 0;
-    }
-    bool raw_content_offset_set = false;
-    yyjson_doc *search_args_doc = args ? yyjson_read(args, strlen(args), 0) : NULL;
-    yyjson_val *search_args_root = search_args_doc ? yyjson_doc_get_root(search_args_doc) : NULL;
-    yyjson_val *raw_content_offset_val =
-        search_args_root && yyjson_is_obj(search_args_root)
-            ? yyjson_obj_get(search_args_root, "raw_content_offset")
-            : NULL;
-    raw_content_offset_set = raw_content_offset_val && yyjson_is_int(raw_content_offset_val);
-    yyjson_doc_free(search_args_doc);
-    int directory_limit = cbm_mcp_get_int_arg(args, "directory_limit", 20);
-    if (directory_limit < 0) {
-        directory_limit = 0;
-    } else if (directory_limit > 64) {
-        directory_limit = 64;
-    }
-    int directory_offset = cbm_mcp_get_int_arg(args, "directory_offset", 0);
-    if (directory_offset < 0) {
-        directory_offset = 0;
-    }
-    int match_limit = cbm_mcp_get_int_arg(args, "match_limit", 8);
-    if (match_limit < 1) {
-        match_limit = 1;
-    } else if (match_limit > 500) {
-        match_limit = 500;
-    }
-    int source_max_lines = cbm_mcp_get_int_arg(args, "source_max_lines", 20);
-    if (source_max_lines < 1) {
-        source_max_lines = 1;
-    } else if (source_max_lines > 200) {
-        source_max_lines = 200;
-    }
-    /* Full source is an explicit detail request and gets a larger default;
-     * compact/files stay lean. Every mode still has an exact serialized-byte
-     * ceiling, and callers can raise it deliberately. */
-    int max_output_tokens =
-        cbm_mcp_get_int_arg(args, "max_output_tokens", mode == 1 ? 12000 : 3200);
-    if (max_output_tokens < 128) {
-        max_output_tokens = 128;
-    } else if (max_output_tokens > 1000000) {
-        max_output_tokens = 1000000;
-    }
-    size_t byte_budget = (size_t)max_output_tokens * (size_t)MCP_OUTPUT_BYTES_PER_TOKEN_ESTIMATE;
-
-    cbm_regex_t path_regex;
-    int path_filter_rc = CBM_REG_OK; /* reported with the regex probe below */
-    bool has_path_filter = compile_path_filter(path_filter, &path_regex, &path_filter_rc);
-    free(path_filter);
-    path_filter = NULL;
-
-    if (!pattern) {
-        if (has_path_filter) {
-            cbm_regfree(&path_regex);
-        }
-        free(project);
-        free(file_pattern);
-        return cbm_mcp_text_result("pattern is required", true);
-    }
-
-    /* Project is required */
-    if (!project) {
-        if (has_path_filter) {
-            cbm_regfree(&path_regex);
-        }
-        free(pattern);
-        free(file_pattern);
-        char *_err = build_project_list_error(srv, "project is required");
-        char *_res = cbm_mcp_text_result(_err, true);
-        free(_err);
-        return _res;
-    }
-
-    char *root_path = get_project_root(srv, project);
-    if (!root_path) {
-        if (has_path_filter) {
-            cbm_regfree(&path_regex);
-        }
-        free(pattern);
-        free(project);
-        free(file_pattern);
-        char *_err = build_project_list_error(srv, "project not found or not indexed");
-        char *_res = cbm_mcp_text_result(_err, true);
-        free(_err);
-        return _res;
-    }
-
-    if (!validate_search_args(root_path, file_pattern)) {
-        if (has_path_filter) {
-            cbm_regfree(&path_regex);
-        }
-        free(root_path);
-        free(pattern);
-        free(project);
-        free(file_pattern);
-        return cbm_mcp_text_result("path or file_pattern contains invalid characters", true);
-    }
-
-    /* issue #283: when regex=true, a syntactically invalid pattern (e.g. an
-     * unclosed group) makes the underlying grep fail, which the handler would
-     * otherwise report as an empty result set — indistinguishable from a
-     * legitimate no-match. Validate the user's regex up front and return an
-     * explicit error so callers can tell "broken pattern" from "no matches".
-     * A path_filter the regex wrapper refused or could not compile is reported
-     * the same way instead of silently searching unfiltered. */
-    const char *regex_error = NULL;
-    if (path_filter_rc != CBM_REG_OK) {
-        regex_error = path_filter_rc == CBM_REG_ETOOBIG
-                          ? "path_filter: " CBM_REG_ETOOBIG_REASON
-                          : "invalid path_filter regex: check for unbalanced (), [], or {}";
-    } else if (use_regex) {
-        cbm_regex_t probe;
-        int probe_rc = cbm_regcomp(&probe, pattern, CBM_REG_EXTENDED | CBM_REG_NOSUB);
-        if (probe_rc != CBM_REG_OK) {
-            regex_error =
-                probe_rc == CBM_REG_ETOOBIG
-                    ? CBM_REG_ETOOBIG_REASON " (regex=true)"
-                    : "invalid regex pattern (regex=true): check for unbalanced (), [], or {}";
-        } else {
-            cbm_regfree(&probe);
-        }
-    }
-    if (regex_error) {
-        if (has_path_filter) {
-            cbm_regfree(&path_regex);
-        }
-        free(root_path);
-        free(pattern);
-        free(project);
-        free(file_pattern);
-        return cbm_mcp_text_result(regex_error, true);
-    }
-
-    /* ── Phase 0.5: Multi-word → regex conversion ───────────── */
-    /* If pattern contains whitespace and is not already a regex, convert to a
-     * regex that matches all words in order: "foo bar baz" → "foo.*bar.*baz".
-     * This avoids requiring the exact phrase as a contiguous substring. */
-    if (!use_regex && strchr(pattern, ' ')) {
-        size_t plen = strlen(pattern);
-        /* Worst case: every char is a space → ".*" between each char */
-        char *regex_pat = malloc(plen * 3 + 1);
-        if (regex_pat) {
-            char *dst = regex_pat;
-            const char *src = pattern;
-            bool in_space = false;
-            while (*src) {
-                if (*src == ' ' || *src == '\t') {
-                    if (!in_space) {
-                        *dst++ = '.';
-                        *dst++ = '*';
-                        in_space = true;
-                    }
-                } else {
-                    /* Escape regex metacharacters from user input */
-                    if (strchr("\\^$.|?*+()[]{}", *src)) {
-                        *dst++ = '\\';
-                    }
-                    *dst++ = *src;
-                    in_space = false;
-                }
-                src++;
-            }
-            *dst = '\0';
-            free(pattern);
-            pattern = regex_pat;
-            use_regex = true;
-        }
-    }
-
+static void search_gather(void *context, const search_gather_args_t *args, search_gathered_t *out) {
+    cbm_mcp_server_t *srv = ((search_native_context_t *)context)->server;
+    const char *project = args->project;
+    const char *root_path = args->root;
+    const char *pattern = args->pattern;
+    const char *file_pattern = args->file_pattern;
+    bool use_regex = args->use_regex;
+    cbm_regex_t *path_regex = args->path_regex;
+    bool has_path_filter = path_regex != NULL;
+    *out = (search_gathered_t){0};
     /* ── Phase 1: Grep scan ──────────────────────────────────── */
     uint64_t scan_budget_ms = srv->search_scan_timeout_override_set
                                   ? srv->search_scan_timeout_override_ms
@@ -18266,20 +16950,10 @@ static char *handle_search_code(cbm_mcp_server_t *srv, const char *args) {
         char errmsg[CBM_SZ_256];
         snprintf(errmsg, sizeof(errmsg), "search failed: cannot create temp file (%s)",
                  strerror(errno));
-        if (has_path_filter) {
-            cbm_regfree(&path_regex);
-        }
-        free(root_path);
-        free(pattern);
-        free(project);
-        free(file_pattern);
-        if (scan_cancelled) {
-            return cbm_mcp_text_result("search_code cancelled for this request", true);
-        }
-        if (scan_timed_out) {
-            return search_code_timeout_result();
-        }
-        return cbm_mcp_text_result(errmsg, true);
+        out->timed_out = !scan_cancelled && scan_timed_out;
+        snprintf(out->error, sizeof(out->error), "%s",
+                 scan_cancelled ? "search_code cancelled for this request" : errmsg);
+        return;
     }
     scan_deadline_latched = cbm_now_ms() >= scan_deadline_ms;
     bool scan_cancellation_latched = mcp_request_cancelled(srv);
@@ -18293,11 +16967,10 @@ static char *handle_search_code(cbm_mcp_server_t *srv, const char *args) {
     bool scoped = false;
     int scoped_written = 0;
 
-    uint64_t scope_t0 = metrics.include_phase_timings ? cbm_now_ms() : 0;
+    uint64_t scope_t0 = args->debug ? cbm_now_ms() : 0;
     if (!scan_cancellation_latched && !scan_deadline_latched) {
         scoped = write_scoped_filelist(srv, project, root_path, scratch.filelist, file_pattern,
-                                       has_path_filter, has_path_filter ? &path_regex : NULL,
-                                       &scoped_written);
+                                       has_path_filter, path_regex, &scoped_written);
     }
     /* Close before grep runs: this is what flushes the records the helper wrote
      * through the descriptor. Clearing the field hands ownership to
@@ -18306,8 +16979,8 @@ static char *handle_search_code(cbm_mcp_server_t *srv, const char *args) {
     scratch.filelist = NULL;
     scan_cancellation_latched = scan_cancellation_latched || mcp_request_cancelled(srv);
     scan_deadline_latched = scan_deadline_latched || cbm_now_ms() >= scan_deadline_ms;
-    if (metrics.include_phase_timings) {
-        metrics.scope_ms = cbm_now_ms() - scope_t0;
+    if (args->debug) {
+        out->scope_ms = cbm_now_ms() - scope_t0;
     }
 
     /* Consume and classify the complete stream. Only graph identities, bounded
@@ -18322,9 +16995,8 @@ static char *handle_search_code(cbm_mcp_server_t *srv, const char *args) {
     int raw_content_truncated = 0;
     grep_match_t *raw = NULL;
     int gm_count = 0;
-    bool scan_saturated = false;
     bool scan_ok = sr != NULL;
-    uint64_t scan_t0 = metrics.include_phase_timings ? cbm_now_ms() : 0;
+    uint64_t scan_t0 = args->debug ? cbm_now_ms() : 0;
     if (scoped && scoped_written == 0 && !scan_cancellation_latched && !scan_deadline_latched) {
         /* The path_filter (or POSIX file_pattern) excluded every indexed file — nothing to scan.
          * Skip the grep subprocess: xargs on an empty filelist is
@@ -18418,42 +17090,42 @@ static char *handle_search_code(cbm_mcp_server_t *srv, const char *args) {
         }
         if (scan_cause != MCP_SCAN_SUCCESS) {
             free_search_results(sr, sr_count);
-            return search_code_scan_error(&scratch, output_path, has_path_filter, &path_regex,
-                                          root_path, pattern, project, file_pattern, scan_cause,
-                                          scan_message);
+            if (output_path[0]) {
+                (void)cbm_unlink(output_path);
+            }
+            search_scratch_close(&scratch);
+            out->timed_out = scan_cause == MCP_SCAN_DEADLINE;
+            if (scan_message) {
+                snprintf(out->error, sizeof(out->error), "%s", scan_message);
+            }
+            return;
         }
         scan_ok = scan_and_classify_grep_matches(
-            fp, root_path, strlen(root_path), has_path_filter, &path_regex, pattern, use_regex,
-            raw_content_offset_set, (size_t)raw_content_offset_arg, store, project, &sr, &sr_count,
-            &sr_cap, &raw, raw_offset, raw_limit, &raw_count, &raw_stored_count, &raw_cap,
-            &raw_content_truncated, &gm_count);
+            fp, root_path, strlen(root_path), has_path_filter, path_regex, pattern, use_regex,
+            args->raw_content_offset_set, args->raw_content_offset, store, project, &sr, &sr_count,
+            &sr_cap, &raw, args->raw_offset, args->raw_limit, &raw_count, &raw_stored_count,
+            &raw_cap, &raw_content_truncated, &gm_count);
         (void)fclose(fp);
         (void)cbm_unlink(output_path);
         /* Both scratch files and the private directory go here — unlike the old
          * code, the file list is removed even when the scan was not scoped. */
         search_scratch_close(&scratch);
     }
-    if (metrics.include_phase_timings) {
-        metrics.scan_ms = cbm_now_ms() - scan_t0;
+    if (args->debug) {
+        out->scan_ms = cbm_now_ms() - scan_t0;
     }
 
     if (!scan_ok) {
         search_scratch_close(&scratch);
         free_search_results(sr, sr_count);
         free_grep_matches(raw, raw_stored_count);
-        free(root_path);
-        free(pattern);
-        free(project);
-        free(file_pattern);
-        if (has_path_filter) {
-            cbm_regfree(&path_regex);
-        }
-        return cbm_mcp_text_result("search failed before the complete result set was scanned",
-                                   true);
+        snprintf(out->error, sizeof(out->error),
+                 "search failed before the complete result set was scanned");
+        return;
     }
 
-    /* ── Phase 2+3: degree expansion + global graph ranking ─── */
-    uint64_t enrich_t0 = metrics.include_phase_timings ? cbm_now_ms() : 0;
+    /* Collect call degrees before handing the result identities to Rust. */
+    uint64_t enrich_t0 = args->debug ? cbm_now_ms() : 0;
     /* Phase 3: batch degree query — ONE query for all results instead of 2×N */
     if (store && sr_count > 0) {
         int64_t *ids = malloc(sr_count * sizeof(int64_t));
@@ -18465,14 +17137,8 @@ static char *handle_search_code(cbm_mcp_server_t *srv, const char *args) {
             free(out_degs);
             free_search_results(sr, sr_count);
             free_grep_matches(raw, raw_stored_count);
-            free(root_path);
-            free(pattern);
-            free(project);
-            free(file_pattern);
-            if (has_path_filter) {
-                cbm_regfree(&path_regex);
-            }
-            return cbm_mcp_text_result("out of memory", true);
+            snprintf(out->error, sizeof(out->error), "out of memory");
+            return;
         }
         for (int j = 0; j < sr_count; j++) {
             ids[j] = sr[j].node_id;
@@ -18488,182 +17154,184 @@ static char *handle_search_code(cbm_mcp_server_t *srv, const char *args) {
         free(out_degs);
     }
 
-    /* Compute scores and sort */
-    for (int j = 0; j < sr_count; j++) {
-        sr[j].score = compute_search_score(&sr[j]);
+    if (args->debug) {
+        out->enrich_ms = cbm_now_ms() - enrich_t0;
     }
-    if (sr_count > SKIP_ONE) {
-        qsort(sr, sr_count, sizeof(search_result_t), search_result_cmp);
-    }
-    if (metrics.include_phase_timings) {
-        metrics.enrich_ms = cbm_now_ms() - enrich_t0;
-    }
-    metrics.elapsed_ms = cbm_now_ms() - search_t0;
+    out->results = sr;
+    out->result_count = sr_count;
+    out->raw = raw;
+    out->raw_count = raw_count;
+    out->raw_stored_count = raw_stored_count;
+    out->raw_content_truncated = raw_content_truncated;
+    out->grep_count = gm_count;
+}
 
-    /* ── Phase 4: Context assembly (extracted helper) ─────────── */
+static void search_gather_release(search_gathered_t *data) {
+    free_search_results(data->results, data->result_count);
+    free_grep_matches(data->raw, data->raw_stored_count);
+}
 
-    /* Compact mode defaults to the lean tree. format:"json" preserves the
-     * released machine shape ({cols, rows}; full adds a per-row source cell;
-     * files is a plain list). */
-    char *sc_format = cbm_mcp_get_string_arg(args, "format");
-    bool sc_legacy_json = sc_format && strcmp(sc_format, "json") == 0;
-    free(sc_format);
+static char *search_native_project(const char *selector) {
+    return resolve_project_tail(normalize_project_arg(heap_strdup(selector)));
+}
 
-    int result_start = result_offset < sr_count ? result_offset : sr_count;
-    int output_count = sr_count - result_start;
-    if (output_count > result_limit) {
-        output_count = result_limit;
-    }
-    int raw_start = raw_offset < raw_count ? raw_offset : raw_count;
-    int raw_output = raw_stored_count;
-    search_dir_count_t *directories = NULL;
-    int dir_total = 0;
-    if (!aggregate_search_dirs(sr, sr_count, &directories, &dir_total)) {
-        free_search_results(sr, sr_count);
-        free_grep_matches(raw, raw_stored_count);
-        free(root_path);
-        free(pattern);
-        free(project);
-        free(file_pattern);
-        if (has_path_filter) {
-            cbm_regfree(&path_regex);
-        }
-        return cbm_mcp_text_result("out of memory", true);
-    }
-    free_search_dirs(directories, dir_total);
-    int directory_start = directory_offset < dir_total ? directory_offset : dir_total;
-    int directory_output = dir_total - directory_start;
-    if (directory_output > directory_limit) {
-        directory_output = directory_limit;
-    }
-    bool warn_literal_pipe = pat_has_pipe && !use_regex;
-    metrics.hint_path_filter = file_pattern && strchr(file_pattern, '/') && gm_count == 0;
-    /* Every render below re-checks each result's file against the root; one
-     * containment for the request keeps that to one resolution per file. */
-    root_containment_t request_containment;
-    root_containment_init(&request_containment, root_path);
-    char *payload = render_search_payload(
-        sr, sr_count, raw, raw_count, raw_content_truncated, gm_count, result_start, result_limit,
-        output_count, raw_start, raw_output, directory_start, directory_output, raw_limit,
-        directory_limit, match_limit, mode, context_lines, source_max_lines, root_path,
-        scan_saturated, warn_literal_pipe, &metrics, false, sc_legacy_json, &request_containment);
+static char *search_native_root(void *context, const char *project) {
+    return get_project_root(((search_native_context_t *)context)->server, project);
+}
 
-    if (payload && strlen(payload) > byte_budget) {
-        free(payload);
-        payload = render_search_payload(
-            sr, sr_count, raw, raw_count, raw_content_truncated, gm_count, result_start,
-            result_limit, output_count, raw_start, raw_output, directory_start, directory_output,
-            raw_limit, directory_limit, match_limit, mode, context_lines, source_max_lines,
-            root_path, scan_saturated, warn_literal_pipe, &metrics, true, sc_legacy_json,
-            &request_containment);
-    }
+static char *search_native_project_error(void *context, const char *message) {
+    char *detail = build_project_list_error(((search_native_context_t *)context)->server, message);
+    char *result = cbm_mcp_text_result(detail, true);
+    free(detail);
+    return result;
+}
 
-    /* Preserve ranked graph answers. Unclassified raw grep rows and directory
-     * diagnostics yield first, at whole-row boundaries. */
-    while (payload && strlen(payload) > byte_budget && raw_output > 0) {
-        raw_output--;
-        free(payload);
-        payload = render_search_payload(
-            sr, sr_count, raw, raw_count, raw_content_truncated, gm_count, result_start,
-            result_limit, output_count, raw_start, raw_output, directory_start, directory_output,
-            raw_limit, directory_limit, match_limit, mode, context_lines, source_max_lines,
-            root_path, scan_saturated, warn_literal_pipe, &metrics, true, sc_legacy_json,
-            &request_containment);
+static void *search_regex_open(const char *pattern, int *status) {
+    cbm_regex_t *regex = malloc(sizeof(*regex));
+    if (!regex) {
+        *status = -1;
+        return NULL;
     }
-    while (payload && strlen(payload) > byte_budget && directory_output > 0) {
-        directory_output--;
-        free(payload);
-        payload = render_search_payload(
-            sr, sr_count, raw, raw_count, raw_content_truncated, gm_count, result_start,
-            result_limit, output_count, raw_start, raw_output, directory_start, directory_output,
-            raw_limit, directory_limit, match_limit, mode, context_lines, source_max_lines,
-            root_path, scan_saturated, warn_literal_pipe, &metrics, true, sc_legacy_json,
-            &request_containment);
+    *status = cbm_regcomp(regex, pattern, CBM_REG_EXTENDED | CBM_REG_NOSUB);
+    if (*status != CBM_REG_OK) {
+        free(regex);
+        return NULL;
     }
+    return regex;
+}
 
-    /* Full source is the next detail tier. Find the largest whole-line window
-     * that fits while retaining every ranked result identity. */
-    if (payload && strlen(payload) > byte_budget && mode == 1 && source_max_lines > 0) {
-        int low = 0;
-        int high = source_max_lines - 1;
-        int best_lines = -1;
-        char *best_payload = NULL;
-        while (low <= high) {
-            int middle = low + (high - low) / 2;
-            char *candidate = render_search_payload(
-                sr, sr_count, raw, raw_count, raw_content_truncated, gm_count, result_start,
-                result_limit, output_count, raw_start, raw_output, directory_start,
-                directory_output, raw_limit, directory_limit, match_limit, mode, context_lines,
-                middle, root_path, scan_saturated, warn_literal_pipe, &metrics, true,
-                sc_legacy_json, &request_containment);
-            if (candidate && strlen(candidate) <= byte_budget) {
-                free(best_payload);
-                best_payload = candidate;
-                best_lines = middle;
-                low = middle + 1;
-            } else {
-                free(candidate);
-                high = middle - 1;
-            }
-        }
-        free(payload);
-        if (best_payload) {
-            payload = best_payload;
-            source_max_lines = best_lines;
-        } else {
-            source_max_lines = 0;
-            payload = render_search_payload(
-                sr, sr_count, raw, raw_count, raw_content_truncated, gm_count, result_start,
-                result_limit, output_count, raw_start, raw_output, directory_start,
-                directory_output, raw_limit, directory_limit, match_limit, mode, context_lines,
-                source_max_lines, root_path, scan_saturated, warn_literal_pipe, &metrics, true,
-                sc_legacy_json, &request_containment);
-        }
-    }
+static void search_regex_close(void *regex) {
+    cbm_regfree(regex);
+    free(regex);
+}
 
-    /* If identities themselves exceed the ceiling, find the largest fitting
-     * row prefix. Check every smaller prefix in descending order: response-local
-     * prefix factoring can activate at a threshold, so encoded size is not
-     * guaranteed to be monotonic in the row count. */
-    if (payload && strlen(payload) > byte_budget && output_count > 0) {
-        char *best_payload = NULL;
-        for (int candidate_rows = output_count - 1; candidate_rows >= 0; candidate_rows--) {
-            char *candidate = render_search_payload(
-                sr, sr_count, raw, raw_count, raw_content_truncated, gm_count, result_start,
-                result_limit, candidate_rows, raw_start, raw_output, directory_start,
-                directory_output, raw_limit, directory_limit, match_limit, mode, context_lines,
-                source_max_lines, root_path, scan_saturated, warn_literal_pipe, &metrics, true,
-                sc_legacy_json, &request_containment);
-            if (candidate && strlen(candidate) <= byte_budget) {
-                best_payload = candidate;
-                break;
-            }
-            free(candidate);
-        }
-        free(payload);
-        payload = best_payload;
+static char *search_native_source(void *context, const char *root, const char *file, int start,
+                                  int end) {
+    search_native_context_t *native = context;
+    if (!native->containment_initialized) {
+        root_containment_init(&native->containment, root);
+        native->containment_initialized = true;
     }
+    size_t root_len = strlen(root);
+    size_t file_len = strlen(file);
+    if (root_len > SIZE_MAX - file_len - 2U) {
+        return NULL;
+    }
+    char *path = malloc(root_len + file_len + 2U);
+    if (!path) {
+        return NULL;
+    }
+    memcpy(path, root, root_len);
+    path[root_len] = '/';
+    memcpy(path + root_len + 1U, file, file_len + 1U);
+    char *source = NULL;
+    if (root_containment_check(&native->containment, path)) {
+        source = start == 0 ? heap_strdup("") : read_file_lines(path, start, end);
+    }
+    free(path);
+    if (!source) {
+        return NULL;
+    }
+    char *clean = sanitize_utf8_lossy(source);
+    free(source);
+    return clean;
+}
 
-    if (!payload || strlen(payload) > byte_budget) {
-        free(payload);
-        payload = search_budget_floor(sr_count, raw_count, gm_count, result_start, result_limit,
-                                      raw_start, raw_limit, directory_start, directory_limit,
-                                      dir_total, scan_saturated, sc_legacy_json, max_output_tokens);
+static char *search_tree_table(const char *key, int rows, const char *const *cols, int width,
+                               const char *const *cells, const bool *strings,
+                               const bool *prefixes) {
+    cbm_sb_t output;
+    cbm_sb_init(&output);
+    if (rows > 0) {
+        cbm_tree_table_rows_profiled(&output, key, rows, cols, width, cells, strings, prefixes);
+    } else {
+        cbm_tree_table_header(&output, key, 0, cols, width);
     }
-    root_containment_free(&request_containment);
-    char *result = cbm_mcp_text_result(payload ? payload : "out of memory", payload == NULL);
-    free(payload);
-    free_search_results(sr, sr_count);
-    free_grep_matches(raw, raw_stored_count);
-    free(root_path);
-    free(pattern);
-    free(project);
-    free(file_pattern);
-    if (has_path_filter) {
-        cbm_regfree(&path_regex);
+    return cbm_sb_finish(&output);
+}
+
+static void search_native_free(char *str) {
+    free(str);
+}
+
+static void search_log_slow(uint64_t elapsed_ms) {
+    char elapsed[CBM_SZ_32];
+    snprintf(elapsed, sizeof(elapsed), "%d", (int)elapsed_ms);
+    cbm_log_warn("search.slow", "elapsed_ms", elapsed);
+}
+
+static const search_native_ops_t search_native_ops = {
+    .project = search_native_project,
+    .root = search_native_root,
+    .project_error = search_native_project_error,
+    .regex_open = search_regex_open,
+    .regex_close = search_regex_close,
+    .gather = search_gather,
+    .release = search_gather_release,
+    .source = search_native_source,
+    .text_result = cbm_mcp_text_result,
+    .copy = heap_strdup,
+    .free_string = search_native_free,
+    .json_tree = cbm_json_to_tree,
+    .tree_table = search_tree_table,
+    .now_ms = cbm_now_ms,
+    .log_slow = search_log_slow,
+};
+
+static char *handle_search_code(cbm_mcp_server_t *srv, const char *args) {
+    search_native_context_t context = {.server = srv};
+    char *result = mori_search_code(&context, args, &search_native_ops);
+    if (context.containment_initialized) {
+        root_containment_free(&context.containment);
     }
     return result;
 }
+
+#ifdef CBM_SEARCH_CODE_TEST_FIXTURES
+char *cbm_mcp_render_search_rows_for_testing(const char *const *qualified_names,
+                                             const char *const *file_paths, int row_count,
+                                             bool json_format) {
+    if (!qualified_names || !file_paths || row_count < 0) {
+        return NULL;
+    }
+    search_result_t *results = row_count > 0 ? calloc((size_t)row_count, sizeof(*results)) : NULL;
+    if (row_count > 0 && !results) {
+        return NULL;
+    }
+    int line = 1;
+    for (int i = 0; i < row_count; i++) {
+        results[i] = (search_result_t){.qualified_name =
+                                           (char *)(qualified_names[i] ? qualified_names[i] : ""),
+                                       .file = (char *)(file_paths[i] ? file_paths[i] : ""),
+                                       .label = "Function",
+                                       .start_line = 1,
+                                       .end_line = 1,
+                                       .match_lines = &line,
+                                       .match_count = 1,
+                                       .match_stored_count = 1};
+    }
+    search_gathered_t data = {
+        .results = results, .result_count = row_count, .grep_count = row_count};
+    char *payload = mori_search_code_render_fixture(&data, json_format, &search_native_ops);
+    free(results);
+    return payload;
+}
+
+char *cbm_mcp_render_raw_preview_for_testing(const char *content, bool content_offset_set,
+                                             size_t content_offset, bool json_format) {
+    if (!content) {
+        return NULL;
+    }
+    grep_match_t raw = {.file = "fixture.raw", .line = 7};
+    search_raw_preview(&raw, content, content_offset_set, content_offset, false, 0, 0);
+    search_gathered_t data = {.raw = &raw,
+                              .raw_count = 1,
+                              .raw_stored_count = 1,
+                              .raw_content_truncated = raw.content_truncated ? 1 : 0,
+                              .grep_count = 1};
+    return mori_search_code_render_fixture(&data, json_format, &search_native_ops);
+}
+#endif
 
 /* ── detect_changes ───────────────────────────────────────────── */
 

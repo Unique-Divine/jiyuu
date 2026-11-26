@@ -40,6 +40,8 @@ mod pdf_doc_links;
 mod rust_doc_cargo;
 #[cfg(feature = "native-engine-abi")]
 mod rust_doc_path;
+#[cfg(feature = "native-engine-abi")]
+mod search_code_request;
 #[cfg(any(feature = "native-engine-abi", test))]
 mod semantic_candidates;
 #[cfg(feature = "native-engine-abi")]

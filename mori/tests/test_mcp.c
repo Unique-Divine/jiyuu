@@ -14217,6 +14217,25 @@ TEST(search_code_match_locations_are_explicitly_bounded_and_expandable) {
     free(inner);
     free(response);
 
+    response = cbm_mcp_handle_tool(
+        srv, "search_code",
+        "{\"pattern\":\"MATCH_LOCATION\",\"project\":\"search-match-locations\","
+        "\"context\":1,\"max_output_tokens\":10000,\"format\":\"json\"}");
+    inner = extract_text_content(response);
+    ASSERT_NOT_NULL(inner);
+    doc = yyjson_read(inner, strlen(inner), 0);
+    ASSERT_NOT_NULL(doc);
+    root = yyjson_doc_get_root(doc);
+    row = yyjson_arr_get(yyjson_obj_get(root, "rows"), 0);
+    yyjson_val *context = yyjson_arr_get(row, 8);
+    const char *context_text = yyjson_get_str(yyjson_obj_get(context, "context"));
+    ASSERT_NOT_NULL(context_text);
+    ASSERT_NOT_NULL(strstr(context_text, "MATCH_LOCATION_601"));
+    ASSERT_EQ(yyjson_get_int(yyjson_obj_get(context, "context_start")), 1);
+    yyjson_doc_free(doc);
+    free(inner);
+    free(response);
+
     cbm_mcp_server_free(srv);
     cbm_unlink(source_path);
     cbm_rmdir(tmp);
