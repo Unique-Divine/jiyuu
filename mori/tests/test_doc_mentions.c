@@ -3327,6 +3327,14 @@ TEST(doc_mentions_msbuild_conditions) {
         {"'$(Yes)' == 'on'", 'T'},  /* booleans compare as booleans */
         {"'$(One)' == '1.0'", 'T'}, /* numbers as numbers */
         {"'$(One)' == '2'", 'F'},
+        {"'-.0' == '+0'", 'T'},
+        {"'+001.0200' == '1.02'", 'T'},
+        {"'1000000000000000' == '1000000000000001'", 'U'},
+        {"'1e0' == '1'", 'U'},
+        {"'0x10' == '16'", 'U'},
+        {"'$(MSBuildThisFileFullPath)' == '$(MSBuildProjectFullPath)'", 'T'},
+        {"'$(MSBuildThisFileFullPath)' == ''", 'F'},
+        {"'$(MSBuildThisFileFullPath)' == 'P.csproj'", 'U'},
         /* `and` binds tighter than `or`, parentheses group */
         {"'e' == 'e' or 'a' == 'b' and 'c' == 'd'", 'T'},
         {"('e' == 'e' or 'a' == 'b') and 'c' == 'd'", 'F'},
@@ -3344,14 +3352,18 @@ TEST(doc_mentions_msbuild_conditions) {
         {"'@(Compile)' == ''", 'U'},
         {"Exists('x.props')", 'U'},
         {"'a' == 'b' and Exists('x.props')", 'F'},
+        {"TRUE Or Exists(Nested(')'))", 'T'},
         {"'$(One)' > '0'", 'U'},
         /* white space a property's element was written with */
         {"'$(Spaced)' == 'x'", 'U'},
         {"'$(Spaced)' == 'y'", 'F'},
+        {"' yes '", 'U'},
         /* no condition this reader can parse */
         {"'a' == ", 'U'},
         {"('a' == 'a'", 'U'},
         {"'a' == 'a' 'b'", 'U'},
+        {"true or (false and )", 'U'},
+        {"true or_else false", 'U'},
     };
     for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
         cbm_msb_result_t r;
@@ -3369,6 +3381,22 @@ TEST(doc_mentions_msbuild_conditions) {
                    consistent ? "" : " (open and the count disagree)");
             FAIL("condition");
         }
+    }
+    for (int depth = 32; depth <= 33; depth++) {
+        char cond[33 + 4 + 33 + 1];
+        memset(cond, '(', (size_t)depth);
+        memcpy(cond + depth, "true", 4);
+        memset(cond + depth + 4, ')', (size_t)depth);
+        cond[2 * depth + 4] = '\0';
+        cbm_msb_result_t r;
+        ASSERT_TRUE(dm_cond_using(cond, &r));
+        bool applied = dm_has_using(&r, 'n', "Under.Condition");
+        bool open = r.open;
+        int unevaluable = r.unevaluable;
+        cbm_msb_result_free(&r);
+        ASSERT_EQ(applied, depth == 32);
+        ASSERT_EQ(open, depth == 33);
+        ASSERT_EQ(unevaluable, depth == 33 ? 1 : 0);
     }
     PASS();
 }

@@ -497,10 +497,14 @@ typedef struct {
     bool clipped;
 } cbm_mcp_snippet_window_t;
 
-typedef cbm_mcp_snippet_window_t (*cbm_mcp_snippet_window_planner_fn)(
-    const cbm_mcp_snippet_window_request_t *request);
-/* Register before request threads start. */
-void cbm_mcp_set_snippet_window_planner(cbm_mcp_snippet_window_planner_fn planner);
+cbm_mcp_snippet_window_t mori_snippet_plan(const cbm_mcp_snippet_window_request_t *request);
+/* The source functions return NULL or a UTF-8 string owned by Rust. */
+char *mori_snippet_captured_source(const cbm_mcp_snippet_window_t *window, bool source_drift,
+                                  const uint8_t *bytes, size_t len);
+char *mori_snippet_source_text(const char *source);
+void mori_snippet_free_source(char *source);
+int mori_snippet_source_line_count(const char *source);
+size_t mori_snippet_source_prefix_len(const uint8_t *source, size_t len, int lines);
 
 typedef bool (*cbm_mcp_ingest_trace_normalizer_fn)(const char *const *hops, size_t hop_count,
                                                    int64_t *count);

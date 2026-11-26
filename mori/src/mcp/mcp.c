@@ -27,7 +27,6 @@ enum {
     MCP_BFS_LIMIT = 100,            /* default per-direction trace budget (limit param raises) */
     MCP_BFS_LIMIT_MAX = 5000,       /* hard ceiling for the limit param (context-bomb guard) */
     MCP_DEFAULT_IMPACT_LIMIT = 200, /* detect_changes per-symbol rows; rollup stays complete */
-    MCP_SNIPPET_MAX_LINES = 500,    /* get_code_snippet line cap (whole-file Module guard) */
     MCP_N_DEFAULTS_2 = 2,
     MCP_URI_PREFIX = 7,      /* strlen("file://") */
     MCP_CONTENT_PREFIX = 15, /* strlen("Content-Length:") */
@@ -76,6 +75,7 @@ enum {
 #include "watcher/watcher.h"
 #include "foundation/mem.h"
 #include "foundation/mem_core.h"
+#include "foundation/sanitized.h"
 #include "foundation/hash_table.h"
 #include "foundation/dyn_array.h"
 #include "foundation/json_writer.h"
@@ -132,9 +132,6 @@ enum {
 #include <stdatomic.h>
 
 /* ── Constants ────────────────────────────────────────────────── */
-
-/* Default snippet fallback line count */
-#define SNIPPET_DEFAULT_LINES 50
 
 /* Idle store eviction: close cached project store after this many seconds
  * of inactivity to free SQLite memory during idle periods. */
@@ -7476,46 +7473,6 @@ static bool mcp_read_file_bytes(const char *abs_path, cbm_sb_t *bytes) {
     return valid;
 }
 
-/* Lines [start, end] of an in-memory file, with read_file_lines' semantics
- * (text-mode line endings, NULL when the range is empty). */
-static char *mcp_slice_lines(cbm_sb_t *bytes, int start, int end) {
-    size_t begin = bytes->len;
-    size_t stop = bytes->len;
-    int lineno = 1;
-    for (size_t i = 0; i < bytes->len; i++) {
-        if (lineno >= start && begin == bytes->len) {
-            begin = i;
-        }
-        if (bytes->buf[i] == '\n') {
-            if (lineno >= end) {
-                stop = i + 1;
-                break;
-            }
-            lineno++;
-        }
-    }
-    if (begin >= stop) {
-        return NULL;
-    }
-    char saved = bytes->buf[stop];
-    bytes->buf[stop] = '\0';
-    char *slice = heap_strdup(bytes->buf + begin);
-    bytes->buf[stop] = saved;
-#ifdef _WIN32
-    /* read_file_lines opens in text mode. */
-    if (slice) {
-        char *out = slice;
-        for (const char *in = slice; *in; in++) {
-            if (!(in[0] == '\r' && in[1] == '\n')) {
-                *out++ = *in;
-            }
-        }
-        *out = '\0';
-    }
-#endif
-    return slice;
-}
-
 /* A path is current when its bytes were verified to be the indexed bytes,
  * whatever its recorded metadata says. A metadata match whose content could not
  * be verified is not: it is the verdict the hash check exists to replace. */
@@ -14739,36 +14696,43 @@ static char *snippet_pdf_text(const cbm_node_t *node) {
     }
     yyjson_val *ds = yyjson_obj_get(yyjson_doc_get_root(pd), "docstring");
     const char *text = yyjson_is_str(ds) ? yyjson_get_str(ds) : NULL;
-    char *out = NULL;
-    if (text && text[0]) {
-        /* the same builder read_file_lines returns its text from */
-        cbm_sb_t sb;
-        cbm_sb_init(&sb);
-        cbm_sb_append_n(&sb, text, strlen(text));
-        out = cbm_sb_finish(&sb);
-    }
+    char *out = text && text[0] ? mori_snippet_source_text(text) : NULL;
     yyjson_doc_free(pd);
     return out;
 }
 
-/* #2585: when captured is non-NULL the lines come from those already-read
- * bytes instead of a fresh read of the file. */
-static char *resolve_snippet_source(const char *root_path, const char *file_path, int start,
-                                    int end, cbm_sb_t *captured, char **out_abs_path) {
+/* The same captured bytes supply both the freshness verdict and the snippet.
+ * Only an uncaptured, contained path may be reopened. */
+static char *resolve_snippet_source(const char *root_path, const char *file_path,
+                                    const cbm_mcp_snippet_window_t *window, bool source_drift,
+                                    const cbm_sb_t *captured, char **out_abs_path) {
     *out_abs_path = NULL;
     if (!root_path || !file_path) {
         return NULL;
     }
-    size_t apsz = strlen(root_path) + strlen(file_path) + MCP_SEPARATOR;
-    char *abs_path = malloc(apsz);
-    snprintf(abs_path, apsz, "%s/%s", root_path, file_path);
-
-    *out_abs_path = abs_path;
-    if (cbm_path_within_root(root_path, abs_path)) {
-        return captured ? mcp_slice_lines(captured, start, end)
-                        : read_file_lines(abs_path, start, end);
+    if (!source_drift) {
+        size_t apsz = strlen(root_path) + strlen(file_path) + MCP_SEPARATOR;
+        char *abs_path = malloc(apsz);
+        if (!abs_path) {
+            return NULL;
+        }
+        snprintf(abs_path, apsz, "%s/%s", root_path, file_path);
+        *out_abs_path = abs_path;
+        if (!cbm_path_within_root(root_path, abs_path)) {
+            return NULL;
+        }
     }
-    return NULL;
+    if (captured) {
+        return mori_snippet_captured_source(window, source_drift,
+                                           (const uint8_t *)captured->buf, captured->len);
+    }
+    if (source_drift) {
+        return NULL;
+    }
+    char *raw = read_file_lines(*out_abs_path, window->start, window->end);
+    char *text = mori_snippet_source_text(raw);
+    free(raw);
+    return text;
 }
 
 static bool utf8_is_cont(unsigned char c) {
@@ -14942,60 +14906,18 @@ static char *snippet_render_payload(yyjson_mut_doc *doc, const char *args) {
     return tree;
 }
 
-static int snippet_source_line_count(const char *source) {
-    if (!source || !source[0]) {
-        return 0;
-    }
-    int lines = 1;
-    for (const char *p = source; *p; p++) {
-        if (*p == '\n' && p[1] != '\0') {
-            lines++;
-        }
-    }
-    return lines;
-}
-
-/* Copy at most `line_limit` complete physical lines. A single over-budget
- * line therefore yields no source instead of a corrupt byte prefix. */
-static char *snippet_source_line_prefix(const char *source, int line_limit) {
-    if (!source || line_limit <= 0) {
-        return NULL;
-    }
-    const char *end = source;
-    int lines = 0;
-    while (*end && lines < line_limit) {
-        const char *newline = strchr(end, '\n');
-        if (!newline) {
-            end += strlen(end);
-            break;
-        }
-        end = newline + 1;
-        lines++;
-    }
-    size_t len = (size_t)(end - source);
-    char *copy = malloc(len + 1U);
-    if (!copy) {
-        return NULL;
-    }
-    memcpy(copy, source, len);
-    copy[len] = '\0';
-    return copy;
-}
-
 static void snippet_set_source_prefix(yyjson_mut_doc *doc, yyjson_mut_val *root,
-                                      const char *whole_source, int line_count, int start,
-                                      int original_end) {
+                                      const char *source, size_t source_len, int line_count,
+                                      int start, int original_end) {
     (void)yyjson_mut_obj_remove_key(root, "source");
     (void)yyjson_mut_obj_remove_key(root, "source_omitted");
     (void)yyjson_mut_obj_remove_key(root, "next_start_line");
     (void)yyjson_mut_obj_remove_key(root, "continuation_requires_higher_budget");
     (void)yyjson_mut_obj_remove_key(root, "continuation");
     if (line_count > 0) {
-        char *prefix = snippet_source_line_prefix(whole_source, line_count);
-        if (prefix) {
-            yyjson_mut_obj_add_strcpy(doc, root, "source", prefix);
-            free(prefix);
-        } else {
+        size_t prefix_len =
+            mori_snippet_source_prefix_len((const uint8_t *)source, source_len, line_count);
+        if (!yyjson_mut_obj_add_strncpy(doc, root, "source", source, prefix_len)) {
             yyjson_mut_obj_add_bool(doc, root, "source_omitted", true);
             line_count = 0;
         }
@@ -15196,60 +15118,6 @@ static void file_doc_candidates_tree(cbm_sb_t *sb, cbm_store_t *store, const cha
     yyjson_mut_doc_free(doc);
 }
 
-static cbm_mcp_snippet_window_planner_fn snippet_window_planner;
-
-void cbm_mcp_set_snippet_window_planner(cbm_mcp_snippet_window_planner_fn planner) {
-    snippet_window_planner = planner;
-}
-
-static cbm_mcp_snippet_window_t snippet_window(const cbm_mcp_snippet_window_request_t *request) {
-    if (snippet_window_planner) {
-        cbm_mcp_snippet_window_t window = snippet_window_planner(request);
-        cbm_log_debug("get_code_snippet.window", "backend", "rust");
-        return window;
-    }
-    int original_start = request->node_start > 0 ? request->node_start : SKIP_ONE;
-    /* A one-line node has a valid end equal to its start. */
-    int original_end = request->node_end;
-    if (original_end < original_start) {
-        original_end = original_start > INT_MAX - SNIPPET_DEFAULT_LINES
-                           ? INT_MAX
-                           : original_start + SNIPPET_DEFAULT_LINES;
-    }
-    bool outline = request->explicit_outline ||
-                   (!request->explicit_full && request->container &&
-                    original_end - original_start >= 200);
-    int start = request->requested_start;
-    if (outline || start < original_start || start > original_end) {
-        start = original_start;
-    }
-    int end = original_end;
-    int max_lines = request->max_lines;
-    if (max_lines <= 0 || max_lines > MCP_SNIPPET_MAX_LINES) {
-        max_lines = MCP_SNIPPET_MAX_LINES;
-    }
-    /* Cap whole-file reads. Compare the span before adding to avoid overflowing
-     * the line number. */
-    if (!outline && end - start >= max_lines) {
-        end = start + (max_lines - 1);
-    }
-    int max_output_tokens = request->max_output_tokens;
-    if (max_output_tokens < 0) {
-        max_output_tokens = 0;
-    } else if (max_output_tokens > 0 && max_output_tokens < 128) {
-        max_output_tokens = 128;
-    } else if (max_output_tokens > 1000000) {
-        max_output_tokens = 1000000;
-    }
-    return (cbm_mcp_snippet_window_t){.original_start = original_start,
-                                      .original_end = original_end,
-                                      .start = start,
-                                      .end = end,
-                                      .max_output_tokens = max_output_tokens,
-                                      .outline = outline,
-                                      .clipped = end < original_end};
-}
-
 static char *build_snippet_response(cbm_mcp_server_t *srv, cbm_node_t *node,
                                     const char *match_method, bool include_neighbors,
                                     cbm_node_t *alternatives, int alt_count, const char *args) {
@@ -15270,7 +15138,9 @@ static char *build_snippet_response(cbm_mcp_server_t *srv, cbm_node_t *node,
                       strcmp(node->label, "Class") == 0 || strcmp(node->label, "Interface") == 0),
     };
     free(source_mode);
-    cbm_mcp_snippet_window_t window = snippet_window(&request);
+    cbm_mcp_snippet_window_t window = mori_snippet_plan(&request);
+    CBM_MSAN_WRITTEN(&window, sizeof(window));
+    cbm_log_debug("get_code_snippet.window", "backend", "rust");
     int original_start = window.original_start;
     int original_end = window.original_end;
     int start = window.start;
@@ -15305,15 +15175,11 @@ static char *build_snippet_response(cbm_mcp_server_t *srv, cbm_node_t *node,
     }
     char *abs_path = NULL;
     char *source = NULL;
-    if (outline || source_drift) {
-        source = NULL;
-    } else if (snippet_is_pdf(node->file_path)) {
-        source = snippet_pdf_text(node); /* never the file's bytes */
-    } else {
-        /* Without captured bytes (not tracked, unreadable) the file is read
-         * here, and the snippet is never content-verified. */
-        source = resolve_snippet_source(root_path, node->file_path, start, end,
-                                        captured_ok ? &captured : NULL, &abs_path);
+    if (!outline) {
+        source = snippet_is_pdf(node->file_path)
+                     ? snippet_pdf_text(node)
+                     : resolve_snippet_source(root_path, node->file_path, &window, source_drift,
+                                               captured_ok ? &captured : NULL, &abs_path);
     }
     cbm_sb_free(&captured);
 
@@ -15414,18 +15280,13 @@ static char *build_snippet_response(cbm_mcp_server_t *srv, cbm_node_t *node,
         outline_members_total = eligible;
         outline_members_returned = emitted;
         cbm_store_free_nodes(members, member_count);
-    } else if (source) {
+    } else {
         yyjson_mut_obj_add_str(doc, root_obj, "source_mode", "full");
-        char *safe_source = sanitize_utf8_lossy(source);
-        if (safe_source) {
-            yyjson_mut_obj_add_strcpy(doc, root_obj, "source", safe_source);
-            free(safe_source);
+        if (source) {
+            yyjson_mut_obj_add_strcpy(doc, root_obj, "source", source);
         } else {
             yyjson_mut_obj_add_str(doc, root_obj, "source", "(source not available)");
         }
-    } else {
-        yyjson_mut_obj_add_str(doc, root_obj, "source_mode", "full");
-        yyjson_mut_obj_add_str(doc, root_obj, "source", "(source not available)");
     }
 
     /* match_method — omitted for exact matches */
@@ -15513,15 +15374,15 @@ static char *build_snippet_response(cbm_mcp_server_t *srv, cbm_node_t *node,
     }
 
     if (bounded_default && payload && strlen(payload) > snippet_byte_budget && !outline && source) {
-        char *safe_whole_source = sanitize_utf8_lossy(source);
-        int available_lines = snippet_source_line_count(safe_whole_source);
+        size_t source_len = strlen(source);
+        int available_lines = mori_snippet_source_line_count(source);
         int low = 0;
         int high = available_lines;
         int best_lines = -1;
         char *best_payload = NULL;
         while (low <= high) {
             int middle = low + (high - low) / 2;
-            snippet_set_source_prefix(doc, root_obj, safe_whole_source, middle, start,
+            snippet_set_source_prefix(doc, root_obj, source, source_len, middle, start,
                                       original_end);
             char *candidate = snippet_render_payload(doc, args);
             if (candidate && strlen(candidate) <= snippet_byte_budget) {
@@ -15536,14 +15397,13 @@ static char *build_snippet_response(cbm_mcp_server_t *srv, cbm_node_t *node,
         }
         free(payload);
         if (best_payload) {
-            snippet_set_source_prefix(doc, root_obj, safe_whole_source, best_lines, start,
+            snippet_set_source_prefix(doc, root_obj, source, source_len, best_lines, start,
                                       original_end);
             payload = best_payload;
         } else {
-            snippet_set_source_prefix(doc, root_obj, safe_whole_source, 0, start, original_end);
+            snippet_set_source_prefix(doc, root_obj, source, source_len, 0, start, original_end);
             payload = snippet_render_payload(doc, args);
         }
-        free(safe_whole_source);
     }
 
     /* Large outlines/neighbor/alternative metadata still obey the default
@@ -15565,7 +15425,7 @@ static char *build_snippet_response(cbm_mcp_server_t *srv, cbm_node_t *node,
     free(nb_callees);
     free(root_path);
     free(abs_path);
-    free(source);
+    mori_snippet_free_source(source);
 
     char *result = cbm_mcp_text_result(payload ? payload : "out of memory", payload == NULL);
     free(payload);
