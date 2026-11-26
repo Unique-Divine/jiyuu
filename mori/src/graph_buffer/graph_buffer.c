@@ -2332,13 +2332,23 @@ typedef int64_t (*gb_merge_node_fn)(cbm_gbuf_t *, const cbm_gbuf_t *,
                                     const cbm_gbuf_node_t *);
 typedef int64_t (*gb_merge_edge_fn)(cbm_gbuf_t *, int64_t, int64_t, const char *,
                                     const char *);
+typedef void (*gb_merge_account_fn)(size_t, bool);
 
 extern bool mori_gbuf_source_wins(const cbm_gbuf_node_t *existing, int existing_rank,
                                  const cbm_gbuf_node_t *source, int source_rank);
 extern int mori_gbuf_merge_rows(cbm_gbuf_t *dst, const cbm_gbuf_t *src,
                                cbm_gbuf_node_t *const *nodes, int node_count,
                                cbm_gbuf_edge_t *const *edges, int edge_count,
-                               gb_merge_node_fn merge_node, gb_merge_edge_fn insert_edge);
+                               gb_merge_node_fn merge_node, gb_merge_edge_fn insert_edge,
+                               gb_merge_account_fn account_remap);
+
+static void merge_account_remap(size_t bytes, bool add) {
+    if (add) {
+        cbm_mem_class_add_external(CBM_MEM_CLASS_GBUF_INDEX, bytes);
+    } else {
+        cbm_mem_class_remove_external(CBM_MEM_CLASS_GBUF_INDEX, bytes);
+    }
+}
 
 /* Apply the winning definition using the destination buffer's allocator and indexes. */
 static void merge_update_existing(cbm_gbuf_t *dst, cbm_gbuf_node_t *existing,
@@ -2461,7 +2471,7 @@ int cbm_gbuf_merge(cbm_gbuf_t *dst, cbm_gbuf_t *src) {
     }
     return mori_gbuf_merge_rows(dst, src, src->nodes.items, src->nodes.count,
                                src->edges.items, src->edges.count, merge_node,
-                               cbm_gbuf_insert_edge);
+                               cbm_gbuf_insert_edge, merge_account_remap);
 }
 
 /* ── Dump / Flush ────────────────────────────────────────────────── */
