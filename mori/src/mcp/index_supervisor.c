@@ -598,6 +598,12 @@ struct cbm_index_worker_handle {
     cbm_index_worker_result_t result;
 };
 
+static void worker_handle_free(cbm_index_worker_handle_t *handle) {
+    mori_index_supervision_free(handle->supervision);
+    free(handle->result.response);
+    free(handle);
+}
+
 #ifdef CBM_ENABLE_TEST_SEAMS
 const char *cbm_index_worker_publish_fence_path_for_testing(
     const cbm_index_worker_handle_t *handle) {
@@ -1046,7 +1052,7 @@ static int worker_start_internal(const char *args_json, size_t memory_budget_byt
     }
     handle->supervision = mori_index_supervision_new();
     if (!handle->supervision) {
-        free(handle);
+        worker_handle_free(handle);
         return -1;
     }
     atomic_init(&handle->terminal, false);
@@ -1062,8 +1068,7 @@ static int worker_start_internal(const char *args_json, size_t memory_budget_byt
                       "errno", error_text);
         (void)cbm_unlink(handle->response_path);
         (void)cbm_unlink(handle->log_path);
-        mori_index_supervision_free(handle->supervision);
-        free(handle);
+        worker_handle_free(handle);
         return -1;
     }
 
@@ -1117,8 +1122,7 @@ static int worker_start_internal(const char *args_json, size_t memory_budget_byt
         (void)cbm_unlink(handle->response_path);
         (void)cbm_unlink(handle->log_path);
         worker_publish_fence_remove(handle);
-        mori_index_supervision_free(handle->supervision);
-        free(handle);
+        worker_handle_free(handle);
         cbm_log_error("index.supervisor.spawn_failed", "action", "fail_closed");
         return -1;
     }
@@ -1284,10 +1288,7 @@ void cbm_index_worker_destroy(cbm_index_worker_handle_t *handle) {
         return;
     }
     cbm_subprocess_destroy(handle->process);
-    mori_index_supervision_free(handle->supervision);
-    free(handle->result.response);
-    handle->result.response = NULL;
-    free(handle);
+    worker_handle_free(handle);
 }
 
 static int worker_spawn_internal(const char *args_json,
