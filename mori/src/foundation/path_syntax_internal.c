@@ -14,13 +14,16 @@ bool cbm_repo_rel_join(const char *dir, const char *v, char *out, size_t sz) {
     bool anchored = v[0] == '\x01';
     const char *rel = anchored ? v + SKIP_ONE : v;
     char buf[CBM_SZ_2K];
-    if (anchored) {
-        snprintf(buf, sizeof(buf), "%s", rel);
-    } else {
-        snprintf(buf, sizeof(buf), "%s%s%s", dir, dir[0] ? "/" : "", rel);
+    if (!sz) {
+        return false;
+    }
+    out[0] = '\0';
+    int written = anchored ? snprintf(buf, sizeof(buf), "%s", rel)
+                           : snprintf(buf, sizeof(buf), "%s%s%s", dir, dir[0] ? "/" : "", rel);
+    if (written < 0 || (size_t)written >= sizeof(buf)) {
+        return false;
     }
     size_t n = 0;
-    out[0] = '\0';
     for (const char *p = buf; *p;) {
         while (*p == '/') {
             p++;
