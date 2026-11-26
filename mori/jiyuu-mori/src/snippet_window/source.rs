@@ -5,7 +5,7 @@ use std::alloc::{Layout, alloc, dealloc};
 use std::ffi::{CStr, c_char, c_int};
 use std::{ptr, slice};
 
-fn physical_lines(bytes: &[u8]) -> impl Iterator<Item = &[u8]> {
+pub(super) fn physical_lines(bytes: &[u8]) -> impl Iterator<Item = &[u8]> {
     bytes.split_inclusive(|&byte| byte == b'\n')
 }
 
@@ -147,44 +147,6 @@ pub(crate) unsafe extern "C" fn mori_snippet_free_source(source: *mut c_char) {
     }
 }
 
-/// Count physical lines, including a final line without a newline.
-///
-/// # Safety
-/// A non-null source must be a readable C string for this call.
-#[unsafe(no_mangle)]
-pub(crate) unsafe extern "C" fn mori_snippet_source_line_count(
-    source: *const c_char,
-) -> c_int {
-    if source.is_null() {
-        return 0;
-    }
-    // SAFETY: The caller borrows a terminated string for this call.
-    let bytes = unsafe { CStr::from_ptr(source) }.to_bytes();
-    c_int::try_from(physical_lines(bytes).count()).unwrap_or(c_int::MAX)
-}
-
-/// Return the byte length of a prefix of complete physical lines.
-///
-/// # Safety
-/// If len is nonzero, source must point to that many readable bytes in one
-/// allocation (at most isize::MAX bytes), excluding the terminating NUL.
-#[unsafe(no_mangle)]
-pub(crate) unsafe extern "C" fn mori_snippet_source_prefix_len(
-    source: *const u8,
-    len: usize,
-    lines: c_int,
-) -> usize {
-    if len == 0 || lines <= 0 {
-        return 0;
-    }
-    // SAFETY: A nonempty input remains readable for the duration of the call.
-    let bytes = unsafe { slice::from_raw_parts(source, len) };
-    physical_lines(bytes)
-        .take(lines as usize)
-        .map(<[u8]>::len)
-        .sum()
-}
-
 #[cfg(test)]
 mod tests {
     use super::super::{Request, plan};
@@ -272,19 +234,14 @@ mod tests {
 
     #[test]
     fn output_budget_prefixes_keep_complete_lines() {
-        let source = c"\xe2\x82\nlast";
-        // SAFETY: All inputs are live NUL-terminated strings.
-        unsafe {
-            let safe = mori_snippet_source_text(source.as_ptr());
-            assert_eq!(mori_snippet_source_line_count(safe), 2);
-            assert_eq!(mori_snippet_source_line_count(c"".as_ptr()), 0);
-            assert_eq!(mori_snippet_source_line_count(c"\n".as_ptr()), 1);
-            let len = CStr::from_ptr(safe).to_bytes().len();
-            let prefix_len = mori_snippet_source_prefix_len(safe.cast(), len, 1);
-            let text = take_source(safe).unwrap();
-            assert_eq!(&text[..prefix_len], "\u{fffd}\u{fffd}\n");
-            assert_eq!(&text[prefix_len..], "last");
-        }
+        let safe =
+            take_source(copy_source_text(b"\xe2\x82\nlast", false)).unwrap();
+        let mut lines = physical_lines(safe.as_bytes());
+        assert_eq!(lines.next(), Some("\u{fffd}\u{fffd}\n".as_bytes()));
+        assert_eq!(lines.next(), Some(b"last".as_slice()));
+        assert_eq!(lines.next(), None);
+        assert_eq!(physical_lines(b"").count(), 0);
+        assert_eq!(physical_lines(b"\n").count(), 1);
     }
 
     #[test]
