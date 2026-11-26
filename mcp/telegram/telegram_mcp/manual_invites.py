@@ -27,6 +27,16 @@ async def invite(
     user: types.User,
     history: int,
 ) -> str:
+    async with owner.mutation_lock:
+        return await invite_locked(owner, chat, user, history)
+
+
+async def invite_locked(
+    owner: PoolTransport,
+    chat: types.Channel | types.Chat,
+    user: types.User,
+    history: int,
+) -> str:
     if chat.title == TITLE or not user.id or str(user.id) == owner.account:
         return "target_unavailable"
     chat_id = utils.get_peer_id(chat)
@@ -76,7 +86,7 @@ async def invite(
             owner.journal.refuse_manual(row)
             return "privacy_restricted"
         except Exception as error:
-            blocked = owner.journal.wait(method, "invite", error)
+            blocked = owner.journal.wait(method, "invite", error, origin="manual")
             if blocked is not None:
                 owner.journal.refuse_manual(row)
                 return "hold"

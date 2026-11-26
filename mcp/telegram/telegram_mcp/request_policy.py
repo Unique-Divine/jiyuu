@@ -47,9 +47,24 @@ from typing import (
     Union,
 )
 
-from telethon import TelegramClient, errors
+from telethon import TelegramClient, errors, functions
+
+from telegram_mcp import call_history
+from telegram_mcp.call_history import record_failure
 
 CLIENT_FLOOD_SLEEP_THRESHOLD = 10
+RPC_NAMES = {
+    functions.messages.GetDialogsRequest: "messages.getDialogs",
+    functions.messages.AddChatUserRequest: "messages.addChatUser",
+    functions.channels.CreateChannelRequest: "channels.createChannel",
+    functions.channels.InviteToChannelRequest: "channels.inviteToChannel",
+    functions.channels.GetFullChannelRequest: "channels.getFullChannel",
+    functions.channels.GetParticipantRequest: "channels.getParticipant",
+    functions.channels.EditAdminRequest: "channels.editAdmin",
+    functions.channels.TogglePreHistoryHiddenRequest: "channels.togglePreHistoryHidden",
+    functions.channels.EditPhotoRequest: "channels.editPhoto",
+    functions.users.GetUsersRequest: "users.getUsers",
+}
 
 LimitKind = Literal["flood_wait", "slow_mode", "premium_flood_wait"]
 LimitSource = Literal["telegram", "cooldown"]
@@ -80,6 +95,43 @@ class PolicyTelegramClient(TelegramClient):
     request, so a context variable scopes the override to that task without
     affecting concurrent tool calls on the same client.
     """
+
+    async def __call__(self, request, ordered=False, flood_sleep_threshold=None):
+        history = call_history.current()
+        parent = call_history.current_request_id()
+        method = RPC_NAMES.get(type(request))
+        if history is None or parent is None or method is None:
+            return await super().__call__(request, ordered, flood_sleep_threshold)
+        trace = history.call(
+            "rpc", method, parent_id=parent, account_id=getattr(self, "_self_id", None)
+        )
+        trace.dispatch()
+        try:
+            result = await super().__call__(request, ordered, flood_sleep_threshold)
+        except asyncio.CancelledError:
+            trace.finish("cancelled")
+            raise
+        except (
+            errors.FloodWaitError,
+            errors.FloodPremiumWaitError,
+            errors.PeerFloodError,
+        ) as error:
+            code = {
+                errors.FloodWaitError: "flood_wait",
+                errors.FloodPremiumWaitError: "flood_premium_wait",
+                errors.PeerFloodError: "peer_flood",
+            }.get(type(error), "flood_wait")
+            trace.finish("flood", code=code, wait_s=getattr(error, "seconds", None))
+            raise
+        except TimeoutError:
+            trace.finish("timeout", code="timeout")
+            raise
+        except Exception:
+            trace.finish("error")
+            raise
+        else:
+            trace.finish("ok")
+            return result
 
     @property
     def _request_retries(self) -> int:
@@ -242,7 +294,15 @@ class RequestTimedOut(Exception):
 
 def format_request_error(error: Union[RequestLimited, RequestTimedOut]) -> str:
     """Return the JSON tool result for a typed request failure."""
-    detail = error.limit if isinstance(error, RequestLimited) else error.timeout
+    if isinstance(error, RequestLimited):
+        detail = error.limit
+        if detail.source == "cooldown":
+            record_failure("retry", "cooldown", detail.wait_seconds)
+        else:
+            record_failure("flood", detail.kind, detail.wait_seconds)
+    else:
+        detail = error.timeout
+        record_failure("timeout", "timeout")
     return json.dumps(detail.to_payload(), ensure_ascii=False)
 
 

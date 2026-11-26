@@ -14,6 +14,7 @@ import sys
 from time import monotonic
 import traceback
 from typing import Any
+from uuid import UUID, uuid4
 
 from telethon import TelegramClient, errors, functions, hints, types, utils
 from telethon.requestiter import RequestIter
@@ -51,6 +52,7 @@ DIALOG_SCAN_LIMIT = 12000
 DIALOG_PAGE_SPACING_SECONDS = 3
 CAPACITY_READ_SECONDS = 480
 CAPACITY_MAX_WAIT_SECONDS = 240
+INVENTORY_RETRY_MS = 15_000
 DAY_MS = 86_400_000
 ADD_GAP_MS = 1_200_000
 
@@ -182,6 +184,26 @@ class Journal:
                     source TEXT NOT NULL, method TEXT NOT NULL, wait_s INTEGER NOT NULL,
                     PRIMARY KEY (account,grp)
                 );
+                CREATE TABLE IF NOT EXISTS pool_trial_v1 (
+                    account TEXT PRIMARY KEY, trial_id TEXT NOT NULL,
+                    generation INTEGER NOT NULL, state TEXT NOT NULL,
+                    cap INTEGER NOT NULL, activate_ms INTEGER NOT NULL,
+                    expires_ms INTEGER NOT NULL, attempt_limit INTEGER NOT NULL,
+                    next_resume_ms INTEGER
+                );
+                CREATE TABLE IF NOT EXISTS pool_trial_stop_v1 (
+                    account TEXT PRIMARY KEY, trial_id TEXT NOT NULL,
+                    generation INTEGER NOT NULL, until_ms INTEGER NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS pool_rpc_event_v1 (
+                    sequence INTEGER PRIMARY KEY, id TEXT UNIQUE NOT NULL,
+                    account TEXT NOT NULL, trial_id TEXT, generation INTEGER,
+                    occurred_ms INTEGER NOT NULL, method TEXT NOT NULL,
+                    origin TEXT NOT NULL, outcome TEXT NOT NULL, wait_s INTEGER,
+                    hold_until_ms INTEGER, fill_id TEXT, action_id TEXT
+                );
+                CREATE INDEX IF NOT EXISTS pool_rpc_trial_events
+                    ON pool_rpc_event_v1(account, trial_id, sequence);
             """
             )
 
@@ -199,6 +221,157 @@ class Journal:
             (now // DAY_MS * DAY_MS, self.account, self.account),
         ).fetchone()
 
+    def configure_trial(self, trial: object) -> None:
+        if trial is None:
+            with self.connect() as db:
+                db.execute("DELETE FROM pool_trial_v1 WHERE account=?", (self.account,))
+                db.commit()
+            return
+        if not isinstance(trial, dict):
+            raise BrokerError("invalid_request")
+        try:
+            trial_id = str(UUID(trial["id"]))
+            state = trial["state"]
+            next_resume = trial.get("nextResumeAtMs")
+            generation, cap, activate, expires, attempt_limit = (
+                trial[key]
+                for key in ("generation", "cap", "activateAtMs", "expiresAtMs", "attemptLimit")
+            )
+            if (
+                state not in ("scheduled", "running", "paused", "ended")
+                or any(
+                    type(value) is not int
+                    for value in (generation, cap, activate, expires, attempt_limit)
+                )
+                or not 0 <= generation < 2**31
+                or cap not in (32, 16, 8, 4)
+                or not 0 < activate < expires < 2**53
+                or not 0 < attempt_limit <= 120
+                or (
+                    next_resume is not None
+                    and (type(next_resume) is not int or not 0 < next_resume < 2**53)
+                )
+            ):
+                raise ValueError
+        except (KeyError, TypeError, AttributeError, ValueError):
+            raise BrokerError("invalid_request") from None
+        with self.connect() as db:
+            db.execute(
+                """INSERT INTO pool_trial_v1 VALUES (?,?,?,?,?,?,?,?,?)
+                   ON CONFLICT(account) DO UPDATE SET trial_id=excluded.trial_id,
+                     generation=excluded.generation, state=excluded.state, cap=excluded.cap,
+                     activate_ms=excluded.activate_ms, expires_ms=excluded.expires_ms,
+                     attempt_limit=excluded.attempt_limit,
+                     next_resume_ms=CASE
+                         WHEN pool_trial_v1.trial_id=excluded.trial_id
+                          AND pool_trial_v1.generation=excluded.generation
+                         THEN NULLIF(MAX(COALESCE(pool_trial_v1.next_resume_ms,0),
+                                         COALESCE(excluded.next_resume_ms,0)),0)
+                         ELSE excluded.next_resume_ms END
+                   WHERE pool_trial_v1.trial_id != excluded.trial_id
+                      OR pool_trial_v1.generation < excluded.generation
+                      OR (pool_trial_v1.generation = excluded.generation
+                          AND pool_trial_v1.state != 'ended'
+                          AND (pool_trial_v1.state != 'paused' OR excluded.state IN ('paused','ended')))
+                      OR (pool_trial_v1.trial_id=excluded.trial_id
+                          AND pool_trial_v1.generation=excluded.generation
+                          AND pool_trial_v1.state='ended' AND excluded.state='ended')""",
+                (
+                    self.account,
+                    trial_id,
+                    generation,
+                    state,
+                    cap,
+                    activate,
+                    expires,
+                    attempt_limit,
+                    next_resume,
+                ),
+            )
+            db.commit()
+
+    def trial_events(self, trial: str, after: int) -> list[dict[str, Any]]:
+        with self.connect() as db:
+            db.row_factory = sqlite3.Row
+            rows = db.execute(
+                """SELECT sequence, id, generation, occurred_ms AS occurredAtMs,
+                          method, origin AS source, outcome, wait_s AS waitS,
+                          hold_until_ms AS holdUntilMs, fill_id AS fillId, action_id AS actionId
+                   FROM pool_rpc_event_v1 WHERE account=? AND trial_id=? AND sequence>?
+                   ORDER BY sequence LIMIT 32""",
+                (self.account, trial, after),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def _trial_gate(
+        self, db: sqlite3.Connection, now: int, *, manual: bool = False
+    ) -> tuple[dict[str, Any] | None, int | None]:
+        trial = db.execute(
+            """SELECT trial_id,generation,state,cap,activate_ms,expires_ms,attempt_limit,next_resume_ms
+               FROM pool_trial_v1 WHERE account=?""",
+            (self.account,),
+        ).fetchone()
+        stop = db.execute(
+            "SELECT trial_id,generation,until_ms FROM pool_trial_stop_v1 WHERE account=?",
+            (self.account,),
+        ).fetchone()
+        if stop and (
+            now < stop[2]
+            or (trial and trial[2] != "ended" and trial[0] == stop[0] and trial[1] <= stop[1])
+        ):
+            return retry("trial_flood_stop", max(now + INVENTORY_RETRY_MS, stop[2])), None
+        if trial and trial[7] is not None and now < trial[7]:
+            return retry("trial_flood_stop", trial[7]), None
+        if trial is None or trial[2] == "ended":
+            return None, None
+        trial_id, _, state, cap, activate, expires, attempt_limit, _ = trial
+        if manual or state not in ("scheduled", "running") or not activate <= now < expires:
+            return retry("trial_not_running", max(now + INVENTORY_RETRY_MS, activate)), None
+        attempts = db.execute(
+            """SELECT count(*) FROM pool_rpc_event_v1
+               WHERE account=? AND trial_id=? AND origin='managed'
+               AND method='channels.inviteToChannel' AND fill_id IS NOT NULL AND outcome!='reserved'""",
+            (self.account, trial_id),
+        ).fetchone()[0]
+        if attempts >= attempt_limit:
+            return retry("trial_attempt_limit"), None
+        return None, cap
+
+    def manual_trial_blocked(self) -> bool:
+        with self.connect() as db:
+            return self._trial_gate(db, now_ms(), manual=True)[0] is not None
+
+    def trial_attempt(self, action: Action, method: str) -> str | None:
+        now = now_ms()
+        with self.connect() as db:
+            trial = db.execute(
+                """SELECT trial_id,generation FROM pool_trial_v1
+                   WHERE account=? AND state IN ('scheduled','running')
+                     AND activate_ms<=? AND ?<expires_ms""",
+                (self.account, now, now),
+            ).fetchone()
+            if trial is None:
+                return None
+            event_id = str(uuid4())
+            db.execute(
+                """INSERT INTO pool_rpc_event_v1
+                   (id,account,trial_id,generation,occurred_ms,method,origin,outcome,fill_id,action_id)
+                   VALUES (?,?,?,?,?,?,'managed','uncertain',?,?)""",
+                (event_id, self.account, *trial, now_ms(), method, action.fill, action.action),
+            )
+            db.commit()
+            return event_id
+
+    def finish_trial_attempt(self, event_id: str | None, outcome: str) -> None:
+        if event_id is not None:
+            with self.connect() as db:
+                db.execute(
+                    """UPDATE pool_rpc_event_v1 SET outcome=?
+                       WHERE account=? AND id=? AND outcome='uncertain'""",
+                    (outcome, self.account, event_id),
+                )
+                db.commit()
+
     def _add_block(self, db: sqlite3.Connection, now: int, cap: int) -> dict[str, Any] | None:
         daily, latest = self._usage(db, now)
         if daily >= cap:
@@ -215,6 +388,9 @@ class Journal:
             now = now_ms()
             if now >= expires:
                 return None, "budget_unavailable"
+            trial_block, _ = self._trial_gate(db, now, manual=True)
+            if trial_block is not None:
+                return None, trial_block["errorCode"]
             if db.execute(
                 "SELECT 1 FROM manual_invite_v1 WHERE account=? AND chat=? AND target=? AND outcome='uncertain'",
                 (self.account, chat, target),
@@ -282,7 +458,10 @@ class Journal:
             if blocked is not None:
                 return retry("hold", blocked)
             if action.step in ("create", "add_bot"):
-                block = self._add_block(db, now, action.cap)
+                trial_block, trial_cap = self._trial_gate(db, now)
+                if trial_block is not None:
+                    return trial_block
+                block = self._add_block(db, now, min(action.cap, trial_cap or action.cap))
                 if block is not None:
                     return block
             if not reserve:
@@ -304,7 +483,15 @@ class Journal:
             ).fetchone()
         return None if row is None else row[0]
 
-    def wait(self, method: str, group: str, error: Exception) -> dict[str, Any] | None:
+    def wait(
+        self,
+        method: str,
+        group: str,
+        error: Exception,
+        *,
+        origin: str = "required_read",
+        event_id: str | None = None,
+    ) -> dict[str, Any] | None:
         match error:
             case errors.FloodWaitError() | errors.FloodPremiumWaitError():
                 seconds = max(1, error.seconds)
@@ -318,8 +505,10 @@ class Journal:
                 source = "peer_flood"
             case _:
                 return None
-        until = now_ms() + (seconds + 30) * 1000
+        now = now_ms()
+        until = now + (seconds + 30) * 1000
         with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
             db.execute(
                 """INSERT INTO hold_v1 VALUES (?,?,?,?,?,?)
                    ON CONFLICT(account,grp) DO UPDATE SET until_ms=excluded.until_ms,
@@ -327,8 +516,53 @@ class Journal:
                    WHERE hold_v1.until_ms < excluded.until_ms""",
                 (self.account, group, until, source, method, seconds),
             )
+            trial = db.execute(
+                """SELECT trial_id,generation FROM pool_trial_v1
+                   WHERE account=? AND state IN ('scheduled','running')
+                     AND activate_ms<=? AND ?<expires_ms""",
+                (self.account, now, now),
+            ).fetchone()
+            if event_id is not None:
+                db.execute(
+                    """UPDATE pool_rpc_event_v1 SET outcome=?,wait_s=?,hold_until_ms=?,occurred_ms=?
+                       WHERE account=? AND id=?""",
+                    (source, seconds, until, now, self.account, event_id),
+                )
+            else:
+                trial_id, generation = trial or (None, None)
+                db.execute(
+                    """INSERT INTO pool_rpc_event_v1
+                       (id,account,trial_id,generation,occurred_ms,method,origin,outcome,wait_s,hold_until_ms)
+                       VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                    (
+                        str(uuid4()),
+                        self.account,
+                        trial_id,
+                        generation,
+                        now,
+                        method,
+                        origin,
+                        source,
+                        seconds,
+                        until,
+                    ),
+                )
+            if trial is not None:
+                stop_until = max(until, (now // DAY_MS + 1) * DAY_MS)
+                db.execute(
+                    """INSERT INTO pool_trial_stop_v1 VALUES (?,?,?,?)
+                       ON CONFLICT(account) DO UPDATE SET trial_id=excluded.trial_id,
+                         generation=excluded.generation, until_ms=MAX(until_ms,excluded.until_ms)""",
+                    (self.account, *trial, stop_until),
+                )
             db.commit()
         return retry("hold", until)
+
+
+@dataclass(frozen=True)
+class DialogInventory:
+    groups: int
+    pool_rooms: tuple[types.Channel, ...]
 
 
 class PoolTransport:
@@ -346,14 +580,27 @@ class PoolTransport:
         self.journal = Journal(state, account)
         self.photo = photo
         self.latest_budget: tuple[int, int] | None = None
-        self.capacity_observation: tuple[float, int] | None = None
-        self.capacity_scan: asyncio.Task[int] | None = None
+        self.mutation_lock = asyncio.Lock()
+        self.inventory_observation: tuple[float, DialogInventory] | None = None
+        self.inventory_scan: asyncio.Task[DialogInventory] | None = None
+        self.inventory_scan_failed = False
 
     async def identity(self) -> bool:
         with raise_flood_waits():
             user = await self.client.get_me()
         validate_identity(user, int(self.account))
         return bool(getattr(user, "premium", False))
+
+    def record_read_wait(self, error: Exception) -> dict[str, Any] | None:
+        request = getattr(error, "request", None)
+        methods = {
+            functions.channels.GetFullChannelRequest: "channels.getFullChannel",
+            functions.channels.GetParticipantRequest: "channels.getParticipant",
+            functions.messages.GetDialogsRequest: "messages.getDialogs",
+            functions.users.GetUsersRequest: "users.getUsers",
+        }
+        method = methods.get(type(request), "unknown")
+        return self.journal.wait(method, f"method:{method}", error)
 
     async def dialogs(self, limit: int, *, wait_for_capacity: bool = False):
         method = "messages.getDialogs"
@@ -389,64 +636,124 @@ class PoolTransport:
             limit -= 1
             yield dialog
 
-    async def count(self) -> int:
-        count = 0
+    async def scan_inventory(self) -> DialogInventory:
+        groups = 0
+        pool_rooms = []
         with raise_flood_waits():
             async for dialog in self.dialogs(DIALOG_SCAN_LIMIT, wait_for_capacity=True):
-                # Telegram's creation limit uses joined channels and supergroups.
-                if isinstance(dialog.entity, types.Channel) and not dialog.entity.left:
-                    count += 1
-        return count
+                entity = dialog.entity
+                if isinstance(entity, types.Channel) and not entity.left:
+                    groups += 1
+                    if entity.creator and entity.title == TITLE:
+                        pool_rooms.append(entity)
+        return DialogInventory(groups, tuple(pool_rooms))
 
-    async def group_count_for_create(self) -> int:
-        if self.journal.held("method:messages.getDialogs") is not None:
-            raise BrokerError("account_held")
-        return await self.read_capacity()
-
-    async def read_capacity(self) -> int:
-        if self.capacity_observation is not None:
-            observed, groups = self.capacity_observation
+    def cached_inventory(self) -> DialogInventory | None:
+        if self.inventory_observation is not None:
+            observed, inventory = self.inventory_observation
             if monotonic() - observed <= CAPACITY_OBSERVATION_SECONDS:
-                return groups
-        if self.capacity_scan is None:
-            self.capacity_scan = asyncio.create_task(self.record_capacity())
-        scan = self.capacity_scan
-        try:
-            # A health request can time out before a read-only scan finishes.
-            # Keep its cursor so the next request does not start another scan.
-            return await asyncio.shield(scan)
-        finally:
-            if self.capacity_scan is scan and scan.done():
-                self.capacity_scan = None
+                return inventory
+        return None
 
-    async def record_capacity(self) -> int:
-        groups = await asyncio.wait_for(self.count(), CAPACITY_READ_SECONDS)
-        self.capacity_observation = (monotonic(), groups)
-        return groups
+    def start_inventory_scan(self) -> asyncio.Task[DialogInventory]:
+        if self.inventory_scan is None:
+            self.inventory_scan = asyncio.create_task(self.record_inventory())
+            self.inventory_scan.add_done_callback(self.finish_inventory_scan)
+        return self.inventory_scan
+
+    def finish_inventory_scan(self, scan: asyncio.Task[DialogInventory]) -> None:
+        if self.inventory_scan is scan:
+            self.inventory_scan = None
+        if not scan.cancelled() and (error := scan.exception()) is not None:
+            self.inventory_scan_failed = True
+            detail = error.code if isinstance(error, BrokerError) else type(error).__name__
+            print(f"Chat pool inventory scan failed ({detail})", file=sys.stderr)
+
+    def invalidate_inventory(self) -> None:
+        self.inventory_observation = None
+        self.inventory_scan_failed = False
+        if self.inventory_scan is not None:
+            self.inventory_scan.cancel()
+            self.inventory_scan = None
+
+    async def read_inventory(self) -> DialogInventory:
+        if (inventory := self.cached_inventory()) is not None:
+            return inventory
+        # A timed-out health check does not discard the in-progress scan.
+        return await asyncio.shield(self.start_inventory_scan())
+
+    def inventory_for_action(
+        self, *, consume_failure: bool = True
+    ) -> DialogInventory | dict[str, Any]:
+        if (hold := self.journal.held("method:messages.getDialogs")) is not None:
+            return retry("hold", hold)
+        if (inventory := self.cached_inventory()) is not None:
+            self.inventory_scan_failed = False
+            return inventory
+        if consume_failure and self.inventory_scan_failed:
+            self.inventory_scan_failed = False
+            self.start_inventory_scan()
+            return retry("room_observation_failed")
+        self.start_inventory_scan()
+        return retry("inventory_refresh_pending", now_ms() + INVENTORY_RETRY_MS)
+
+    async def record_inventory(self) -> DialogInventory:
+        inventory = await asyncio.wait_for(self.scan_inventory(), CAPACITY_READ_SECONDS)
+        self.inventory_observation = (monotonic(), inventory)
+        return inventory
 
     async def dispatch(
         self, body: dict[str, Any], peer_connected: PeerConnected | None = None
     ) -> dict[str, Any]:
+        if body["op"] == "trial.configure":
+            if set(body) != {"v", "id", "op", "accountId", "trial"}:
+                raise BrokerError("invalid_request")
+            async with self.mutation_lock:
+                self.journal.configure_trial(body["trial"])
+                if body["trial"] is not None:
+                    self.latest_budget = None
+            return {"configured": True}
+        if body["op"] == "trial.events":
+            if set(body) != {"v", "id", "op", "accountId", "trialId", "after"}:
+                raise BrokerError("invalid_request")
+            after = body["after"]
+            try:
+                trial_id = str(UUID(body["trialId"]))
+                if type(after) is not int or not 0 <= after < 2**63:
+                    raise ValueError
+            except (TypeError, AttributeError, ValueError):
+                raise BrokerError("invalid_request") from None
+            return {"events": self.journal.trial_events(trial_id, after)}
         action = Action.parse(body)
-        if action.expires > now_ms():
-            self.latest_budget = (action.cap, action.expires)
         if body["op"] == "fill.observe":
             return await self.observe(action)
+        if action.expires > now_ms():
+            self.latest_budget = (action.cap, action.expires)
         return await self.execute(action, peer_connected)
 
-    async def snapshot(self) -> dict[str, Any]:
+    async def broker_snapshot(self) -> dict[str, Any]:
+        return await self.snapshot(wait_for_inventory=False)
+
+    async def snapshot(self, *, wait_for_inventory: bool = True) -> dict[str, Any]:
         try:
-            premium = await self.identity()
-            groups = await self.read_capacity()
+            if wait_for_inventory:
+                inventory = await self.read_inventory()
+            else:
+                inventory = self.inventory_for_action(consume_failure=False)
+                if isinstance(inventory, dict):
+                    raise BrokerError(inventory["errorCode"])
+            premium = await asyncio.wait_for(self.identity(), MAX_RPC_SECONDS)
             return {
                 "accountId": self.account,
-                "groupCount": groups,
+                "groupCount": inventory.groups,
                 "telegramPremium": premium,
                 **self.journal.snapshot(now_ms()),
             }
         except BrokerError:
             raise
         except Exception as error:
+            if self.record_read_wait(error) is not None:
+                raise BrokerError("hold") from None
             frame = traceback.extract_tb(error.__traceback__)[-1]
             print(
                 f"Chat pool capacity read failed ({type(error).__name__} at "
@@ -455,10 +762,14 @@ class PoolTransport:
             )
             raise BrokerError("group_count_unavailable") from None
 
-    async def read_room(self, selector: hints.EntityLike, ref: str):
+    async def read_room(self, selector: hints.EntityLike, ref: str, *, strict: bool = False):
         peer = await self.client.get_input_entity(selector)
         if not isinstance(peer, types.InputPeerChannel):
+            if strict:
+                raise BrokerError("room_observation_unavailable")
             return None
+        if strict and isinstance(selector, types.Channel) and peer.channel_id != selector.id:
+            raise BrokerError("room_observation_unavailable")
         channel = types.InputChannel(peer.channel_id, peer.access_hash)
         full = await self.client(functions.channels.GetFullChannelRequest(channel))
         rooms = [
@@ -467,8 +778,14 @@ class PoolTransport:
             if isinstance(chat, types.Channel) and chat.id == peer.channel_id
         ]
         if len(rooms) != 1:
+            if strict:
+                raise BrokerError("room_observation_unavailable")
             return None
         room = rooms[0]
+        exact_ref = (
+            full.full_chat.about.endswith(f"Ref: {ref}")
+            and re.search(r"(?<![\w])Ref: [a-f0-9]{8}$", full.full_chat.about) is not None
+        )
         if (
             not room.creator
             or not room.megagroup
@@ -476,11 +793,10 @@ class PoolTransport:
             or room.broadcast
             or room.title != TITLE
         ):
+            if strict and exact_ref:
+                raise BrokerError("pool_candidate_mismatch")
             return None
-        if (
-            not full.full_chat.about.endswith(f"Ref: {ref}")
-            or re.search(r"(?<![\w])Ref: [a-f0-9]{8}$", full.full_chat.about) is None
-        ):
+        if not exact_ref:
             return None
         return channel, full.full_chat
 
@@ -516,28 +832,35 @@ class PoolTransport:
 
     async def observe(self, action: Action) -> dict[str, Any]:
         try:
-            await self.identity()
+            for method in ("users.getUsers", "channels.getFullChannel"):
+                if (hold := self.journal.held(f"method:{method}")) is not None:
+                    return retry("hold", hold)
+            await asyncio.wait_for(self.identity(), MAX_RPC_SECONDS)
             with raise_flood_waits():
                 return await self._observe(action)
-        except Exception:
-            return retry("room_observation_unavailable")
+        except Exception as error:
+            if (hold := self.record_read_wait(error)) is not None:
+                return hold
+            if isinstance(error, BrokerError) and error.code == "pool_candidate_mismatch":
+                return retry(error.code)
+            detail = error.code if isinstance(error, BrokerError) else type(error).__name__
+            print(f"Chat pool observation failed ({action.step}, {detail})", file=sys.stderr)
+            return retry("room_observation_failed")
 
     async def _observe(self, action: Action) -> dict[str, Any]:
         if action.step == "create":
-            matches = set()
-            async for dialog in self.dialogs(1000):
-                entity = dialog.entity
-                if (
-                    isinstance(entity, types.Channel)
-                    and entity.title == TITLE
-                    and entity.creator
-                    and await self.read_room(entity, action.ref)
-                ):
-                    matches.add(str(utils.get_peer_id(entity)))
+            inventory = self.inventory_for_action()
+            if isinstance(inventory, dict):
+                return inventory
+            matches = await asyncio.wait_for(
+                self.matching_rooms(inventory, action.ref), MAX_RPC_SECONDS
+            )
             if len(matches) > 1:
                 return retry("duplicate_pool_reference")
             if matches:
                 return {"outcome": "succeeded", "chatId": matches.pop()}
+            # A later absence result must use a distinct complete scan.
+            self.invalidate_inventory()
             return {"outcome": "not_found"}
         if action.chat is None:
             return retry("invalid_action_binding")
@@ -566,7 +889,22 @@ class PoolTransport:
             "verifiedAt": timestamp(now_ms()),
         }
 
+    async def matching_rooms(self, inventory: DialogInventory, ref: str) -> set[str]:
+        matches = set()
+        for entity in inventory.pool_rooms:
+            if await self.read_room(entity, ref, strict=True):
+                matches.add(str(utils.get_peer_id(entity)))
+        return matches
+
     async def execute(
+        self,
+        action: Action,
+        peer_connected: PeerConnected | None = None,
+    ) -> dict[str, Any]:
+        async with self.mutation_lock:
+            return await self.execute_locked(action, peer_connected)
+
+    async def execute_locked(
         self,
         action: Action,
         peer_connected: PeerConnected | None = None,
@@ -575,13 +913,16 @@ class PoolTransport:
             return retry("invalid_action_binding")
         dispatched = False
         try:
-            await self.identity()
+            await asyncio.wait_for(self.identity(), MAX_RPC_SECONDS)
             with raise_flood_waits():
                 refusal = self.journal.guard(action, now_ms(), reserve=False)
                 if refusal is not None:
                     return refusal
                 if action.step == "create":
-                    if await self.group_count_for_create() >= action.groups:
+                    inventory = self.inventory_for_action()
+                    if isinstance(inventory, dict):
+                        return inventory
+                    if inventory.groups >= action.groups:
                         return retry("group_limit")
                     request = functions.channels.CreateChannelRequest(
                         TITLE, f"Chat with the Sai team. Ref: {action.ref}", megagroup=True
@@ -633,25 +974,46 @@ class PoolTransport:
                         request = functions.channels.EditPhotoRequest(
                             peer, types.InputChatUploadedPhoto(file=uploaded)
                         )
-                if not await still_connected(peer_connected):
-                    return retry("broker_peer_gone")
-                refusal = self.journal.guard(action, now_ms(), reserve=True)
-                if refusal is not None:
-                    return refusal
-                if not await still_connected(peer_connected):
-                    return retry("broker_peer_gone")
-                dispatched = True
-                if action.step == "create":
-                    self.capacity_observation = None
+                method, group = STEPS[action.step]
+                event_id = None
+
+                async def send():
+                    nonlocal dispatched, event_id
+                    if not await still_connected(peer_connected):
+                        return None, retry("broker_peer_gone")
+                    refusal = self.journal.guard(action, now_ms(), reserve=True)
+                    if refusal is not None:
+                        return None, refusal
+                    if action.step in ("create", "add_bot"):
+                        event_id = self.journal.trial_attempt(action, method)
+                    if now_ms() >= action.expires:
+                        self.journal.finish_trial_attempt(event_id, "reserved")
+                        return None, retry("lease_unavailable")
+                    if action.step == "create":
+                        self.invalidate_inventory()
+                    dispatched = True
+                    return await self.client(request), None
+
+                remaining = (action.expires - now_ms()) / 1000
+                if remaining <= 0:
+                    return retry("lease_unavailable")
                 try:
                     with single_request():
-                        answer = await asyncio.wait_for(
-                            self.client(request),
-                            timeout=min(MAX_RPC_SECONDS, (action.expires - now_ms()) / 1000),
+                        answer, refusal = await asyncio.wait_for(
+                            send(), min(MAX_RPC_SECONDS, remaining)
                         )
                 except Exception as error:
-                    method, group = STEPS[action.step]
-                    return self.journal.wait(method, group, error) or {"outcome": "uncertain"}
+                    if not dispatched:
+                        return retry("room_preflight_unavailable")
+                    return self.journal.wait(
+                        method,
+                        group,
+                        error,
+                        origin="managed" if event_id else "other",
+                        event_id=event_id,
+                    ) or {"outcome": "uncertain"}
+                if refusal is not None:
+                    return refusal
                 if action.step == "create":
                     rooms = [
                         room
@@ -659,12 +1021,15 @@ class PoolTransport:
                         if isinstance(room, types.Channel) and room.title == TITLE and room.creator
                     ]
                     if len(rooms) == 1 and await self.read_room(rooms[0], action.ref):
+                        self.journal.finish_trial_attempt(event_id, "succeeded")
                         return {"outcome": "succeeded", "chatId": str(utils.get_peer_id(rooms[0]))}
                 else:
                     evidence = await self._observe(action)
                     if evidence["outcome"] == "succeeded":
+                        self.journal.finish_trial_attempt(event_id, "succeeded")
                         return evidence
-        except Exception:
+        except Exception as error:
+            self.record_read_wait(error)
             if not dispatched:
                 return retry("room_preflight_unavailable")
         return {"outcome": "uncertain"}

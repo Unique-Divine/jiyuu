@@ -19,7 +19,7 @@ from telegram_mcp.http_service import serve_mcp
 from telegram_mcp.session_store import lock_authorization, validate_identity
 
 from telegram_mcp import runtime as _runtime
-from telegram_mcp import manual_invites, server_info
+from telegram_mcp import call_history, manual_invites, server_info
 from telegram_mcp.runtime import *
 import telegram_mcp.tools  # noqa: F401 - registers MCP tools via decorators
 
@@ -95,7 +95,7 @@ async def _main() -> None:
                     listen(
                         state,
                         Broker(
-                            {key: account.snapshot for key, account in accounts.items()},
+                            {key: account.broker_snapshot for key, account in accounts.items()},
                             {key: account.dispatch for key, account in accounts.items()},
                         ),
                     )
@@ -175,6 +175,12 @@ def main() -> None:
     # Read the latest release in the background; the first tool result after
     # it lands carries a one-line notice if this version is behind.
     server_info.update_notifier().start()
+    shared = (
+        os.environ.get("TELEGRAM_BROKER") == "1" or os.environ.get("TELEGRAM_MCP_SHARED") == "1"
+    )
+    call_history.configure(
+        version=server_info.current_identity().version, transport="http" if shared else "stdio"
+    )
     nest_asyncio.apply()
     asyncio.run(_main())
 
