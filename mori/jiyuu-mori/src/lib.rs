@@ -53,6 +53,8 @@ mod swift_package_map;
 #[cfg(feature = "native-engine-abi")]
 mod terraform;
 #[cfg(feature = "native-engine-abi")]
+mod test_impact_cli;
+#[cfg(feature = "native-engine-abi")]
 mod test_impact_git;
 
 #[cfg(any(feature = "native-engine-abi", test))]

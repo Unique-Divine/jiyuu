@@ -13,6 +13,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use rusqlite::{Connection, OpenFlags};
 
 mod support;
+#[path = "support/test_impact.rs"]
+mod test_impact;
 
 const MORI: &str = env!("CARGO_BIN_EXE_mori");
 
