@@ -191,10 +191,6 @@ class Journal:
                     expires_ms INTEGER NOT NULL, attempt_limit INTEGER NOT NULL,
                     next_resume_ms INTEGER
                 );
-                CREATE TABLE IF NOT EXISTS pool_trial_stop_v1 (
-                    account TEXT PRIMARY KEY, trial_id TEXT NOT NULL,
-                    generation INTEGER NOT NULL, until_ms INTEGER NOT NULL
-                );
                 CREATE TABLE IF NOT EXISTS pool_rpc_event_v1 (
                     sequence INTEGER PRIMARY KEY, id TEXT UNIQUE NOT NULL,
                     account TEXT NOT NULL, trial_id TEXT, generation INTEGER,
@@ -232,7 +228,6 @@ class Journal:
         try:
             trial_id = str(UUID(trial["id"]))
             state = trial["state"]
-            next_resume = trial.get("nextResumeAtMs")
             generation, cap, activate, expires, attempt_limit = (
                 trial[key]
                 for key in ("generation", "cap", "activateAtMs", "expiresAtMs", "attemptLimit")
@@ -247,35 +242,24 @@ class Journal:
                 or cap not in (32, 16, 8, 4)
                 or not 0 < activate < expires < 2**53
                 or not 0 < attempt_limit <= 120
-                or (
-                    next_resume is not None
-                    and (type(next_resume) is not int or not 0 < next_resume < 2**53)
-                )
             ):
                 raise ValueError
         except (KeyError, TypeError, AttributeError, ValueError):
             raise BrokerError("invalid_request") from None
         with self.connect() as db:
             db.execute(
-                """INSERT INTO pool_trial_v1 VALUES (?,?,?,?,?,?,?,?,?)
+                """INSERT INTO pool_trial_v1
+                     (account,trial_id,generation,state,cap,activate_ms,expires_ms,attempt_limit)
+                     VALUES (?,?,?,?,?,?,?,?)
                    ON CONFLICT(account) DO UPDATE SET trial_id=excluded.trial_id,
                      generation=excluded.generation, state=excluded.state, cap=excluded.cap,
                      activate_ms=excluded.activate_ms, expires_ms=excluded.expires_ms,
-                     attempt_limit=excluded.attempt_limit,
-                     next_resume_ms=CASE
-                         WHEN pool_trial_v1.trial_id=excluded.trial_id
-                          AND pool_trial_v1.generation=excluded.generation
-                         THEN NULLIF(MAX(COALESCE(pool_trial_v1.next_resume_ms,0),
-                                         COALESCE(excluded.next_resume_ms,0)),0)
-                         ELSE excluded.next_resume_ms END
+                     attempt_limit=excluded.attempt_limit
                    WHERE pool_trial_v1.trial_id != excluded.trial_id
                       OR pool_trial_v1.generation < excluded.generation
                       OR (pool_trial_v1.generation = excluded.generation
                           AND pool_trial_v1.state != 'ended'
-                          AND (pool_trial_v1.state != 'paused' OR excluded.state IN ('paused','ended')))
-                      OR (pool_trial_v1.trial_id=excluded.trial_id
-                          AND pool_trial_v1.generation=excluded.generation
-                          AND pool_trial_v1.state='ended' AND excluded.state='ended')""",
+                          AND (pool_trial_v1.state != 'paused' OR excluded.state IN ('paused','ended')))""",
                 (
                     self.account,
                     trial_id,
@@ -285,7 +269,6 @@ class Journal:
                     activate,
                     expires,
                     attempt_limit,
-                    next_resume,
                 ),
             )
             db.commit()
@@ -307,24 +290,15 @@ class Journal:
         self, db: sqlite3.Connection, now: int, *, manual: bool = False
     ) -> tuple[dict[str, Any] | None, int | None]:
         trial = db.execute(
-            """SELECT trial_id,generation,state,cap,activate_ms,expires_ms,attempt_limit,next_resume_ms
+            """SELECT trial_id,state,cap,activate_ms,expires_ms,attempt_limit
                FROM pool_trial_v1 WHERE account=?""",
             (self.account,),
         ).fetchone()
-        stop = db.execute(
-            "SELECT trial_id,generation,until_ms FROM pool_trial_stop_v1 WHERE account=?",
-            (self.account,),
-        ).fetchone()
-        if stop and (
-            now < stop[2]
-            or (trial and trial[2] != "ended" and trial[0] == stop[0] and trial[1] <= stop[1])
-        ):
-            return retry("trial_flood_stop", max(now + INVENTORY_RETRY_MS, stop[2])), None
-        if trial and trial[7] is not None and now < trial[7]:
-            return retry("trial_flood_stop", trial[7]), None
-        if trial is None or trial[2] == "ended":
+        # Legacy trial stop rows encoded the old UTC-day wait. Scoped holds
+        # in hold_v1 still gate their operations, including after a restart.
+        if trial is None or trial[1] == "ended":
             return None, None
-        trial_id, _, state, cap, activate, expires, attempt_limit, _ = trial
+        trial_id, state, cap, activate, expires, attempt_limit = trial
         if manual or state not in ("scheduled", "running") or not activate <= now < expires:
             return retry("trial_not_running", max(now + INVENTORY_RETRY_MS, activate)), None
         attempts = db.execute(
@@ -506,9 +480,18 @@ class Journal:
             case _:
                 return None
         now = now_ms()
-        until = now + (seconds + 30) * 1000
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
+            trial = db.execute(
+                """SELECT trial_id,generation FROM pool_trial_v1
+                   WHERE account=? AND state IN ('scheduled','running')
+                     AND activate_ms<=? AND ?<expires_ms""",
+                (self.account, now, now),
+            ).fetchone()
+            padding = (
+                0 if trial is not None or event_id is not None or source == "peer_flood" else 30
+            )
+            until = now + (seconds + padding) * 1000
             db.execute(
                 """INSERT INTO hold_v1 VALUES (?,?,?,?,?,?)
                    ON CONFLICT(account,grp) DO UPDATE SET until_ms=excluded.until_ms,
@@ -516,12 +499,6 @@ class Journal:
                    WHERE hold_v1.until_ms < excluded.until_ms""",
                 (self.account, group, until, source, method, seconds),
             )
-            trial = db.execute(
-                """SELECT trial_id,generation FROM pool_trial_v1
-                   WHERE account=? AND state IN ('scheduled','running')
-                     AND activate_ms<=? AND ?<expires_ms""",
-                (self.account, now, now),
-            ).fetchone()
             if event_id is not None:
                 db.execute(
                     """UPDATE pool_rpc_event_v1 SET outcome=?,wait_s=?,hold_until_ms=?,occurred_ms=?
@@ -547,16 +524,12 @@ class Journal:
                         until,
                     ),
                 )
-            if trial is not None:
-                stop_until = max(until, (now // DAY_MS + 1) * DAY_MS)
-                db.execute(
-                    """INSERT INTO pool_trial_stop_v1 VALUES (?,?,?,?)
-                       ON CONFLICT(account) DO UPDATE SET trial_id=excluded.trial_id,
-                         generation=excluded.generation, until_ms=MAX(until_ms,excluded.until_ms)""",
-                    (self.account, *trial, stop_until),
-                )
+            (effective_until,) = db.execute(
+                "SELECT until_ms FROM hold_v1 WHERE account=? AND grp=?",
+                (self.account, group),
+            ).fetchone()
             db.commit()
-        return retry("hold", until)
+        return retry("hold", effective_until)
 
 
 @dataclass(frozen=True)
@@ -596,11 +569,25 @@ class PoolTransport:
         methods = {
             functions.channels.GetFullChannelRequest: "channels.getFullChannel",
             functions.channels.GetParticipantRequest: "channels.getParticipant",
+            functions.contacts.ResolveUsernameRequest: "contacts.resolveUsername",
             functions.messages.GetDialogsRequest: "messages.getDialogs",
             functions.users.GetUsersRequest: "users.getUsers",
         }
         method = methods.get(type(request), "unknown")
         return self.journal.wait(method, f"method:{method}", error)
+
+    def read_hold(self, step: str | None = None) -> dict[str, Any] | None:
+        methods = ["users.getUsers"]
+        if step is not None:
+            methods.append("channels.getFullChannel")
+        if step in ("add_bot", "promote_bot", "verify"):
+            methods.extend(("contacts.resolveUsername", "channels.getParticipant"))
+        held = (self.journal.held(f"method:{method}") for method in methods)
+        if (
+            until := max((until for until in held if until is not None), default=None)
+        ) is not None:
+            return retry("hold", until)
+        return None
 
     async def dialogs(self, limit: int, *, wait_for_capacity: bool = False):
         method = "messages.getDialogs"
@@ -621,9 +608,9 @@ class PoolTransport:
             except Exception as error:
                 if self.journal.wait(method, group, error) is None:
                     raise
-                if isinstance(error, errors.FloodWaitError):
+                if isinstance(error, (errors.FloodWaitError, errors.FloodPremiumWaitError)):
                     held_until = self.journal.held(group)
-                    delay = (held_until - now_ms()) / 1000 + 1 if held_until is not None else 0
+                    delay = (held_until - now_ms()) / 1000 if held_until is not None else 0
                     if 0 < delay <= wait_budget and monotonic() + delay < deadline:
                         # Keep the same pagination cursor after the recorded wait.
                         await asyncio.sleep(delay)
@@ -665,6 +652,8 @@ class PoolTransport:
         if self.inventory_scan is scan:
             self.inventory_scan = None
         if not scan.cancelled() and (error := scan.exception()) is not None:
+            if isinstance(error, BrokerError) and error.code == "account_held":
+                return
             self.inventory_scan_failed = True
             detail = error.code if isinstance(error, BrokerError) else type(error).__name__
             print(f"Chat pool inventory scan failed ({detail})", file=sys.stderr)
@@ -736,6 +725,8 @@ class PoolTransport:
 
     async def snapshot(self, *, wait_for_inventory: bool = True) -> dict[str, Any]:
         try:
+            if self.read_hold() is not None:
+                raise BrokerError("hold")
             if wait_for_inventory:
                 inventory = await self.read_inventory()
             else:
@@ -832,9 +823,8 @@ class PoolTransport:
 
     async def observe(self, action: Action) -> dict[str, Any]:
         try:
-            for method in ("users.getUsers", "channels.getFullChannel"):
-                if (hold := self.journal.held(f"method:{method}")) is not None:
-                    return retry("hold", hold)
+            if (hold := self.read_hold(action.step)) is not None:
+                return hold
             await asyncio.wait_for(self.identity(), MAX_RPC_SECONDS)
             with raise_flood_waits():
                 return await self._observe(action)
@@ -913,6 +903,8 @@ class PoolTransport:
             return retry("invalid_action_binding")
         dispatched = False
         try:
+            if (hold := self.read_hold(action.step)) is not None:
+                return hold
             await asyncio.wait_for(self.identity(), MAX_RPC_SECONDS)
             with raise_flood_waits():
                 refusal = self.journal.guard(action, now_ms(), reserve=False)
@@ -1029,9 +1021,11 @@ class PoolTransport:
                         self.journal.finish_trial_attempt(event_id, "succeeded")
                         return evidence
         except Exception as error:
-            self.record_read_wait(error)
+            hold = self.record_read_wait(error)
             if not dispatched:
-                return retry("room_preflight_unavailable")
+                return hold or retry("room_preflight_unavailable")
+            if hold is not None:
+                return {**hold, "outcome": "uncertain"}
         return {"outcome": "uncertain"}
 
 

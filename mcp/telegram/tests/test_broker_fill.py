@@ -26,7 +26,7 @@ def create_request(*, reconcile=False):
             "step": "create",
             "chatId": None,
             "reconcile": reconcile,
-            "leaseExpiresAt": timestamp(now_ms() + 120_000),
+            "leaseExpiresAt": timestamp(fill_module.now_ms() + 120_000),
         },
         "limits": {"cap": 3, "groupStopAt": 100},
     }
@@ -35,6 +35,18 @@ def create_request(*, reconcile=False):
 def fixture_state(monkeypatch, tmp_path):
     monkeypatch.setenv("BOKU_HOME", os.fspath(tmp_path / "boku"))
     return State.discover()
+
+
+def trial_config(now):
+    return {
+        "id": "2d0a9c4b-32a4-42c3-9568-cc934bbc77d0",
+        "state": "running",
+        "generation": 1,
+        "cap": 32,
+        "activateAtMs": now - 1,
+        "expiresAtMs": now + 3 * fill_module.DAY_MS,
+        "attemptLimit": 120,
+    }
 
 
 def test_journal_scopes_cap_and_dispatch_identity_to_the_owner(monkeypatch, tmp_path):
@@ -51,20 +63,12 @@ def test_journal_scopes_cap_and_dispatch_identity_to_the_owner(monkeypatch, tmp_
     assert other.snapshot(now_ms())["addsToday"] == 1
 
 
-def test_trial_records_a_short_premium_wait_and_stops_across_restart(monkeypatch, tmp_path):
+def test_trial_records_a_short_premium_wait_and_resumes_at_deadline(monkeypatch, tmp_path):
     now = 1_800_000_000_000
     monkeypatch.setattr(fill_module, "now_ms", lambda: now)
     state = fixture_state(monkeypatch, tmp_path)
     journal = Journal(state, "42")
-    trial = {
-        "id": "2d0a9c4b-32a4-42c3-9568-cc934bbc77d0",
-        "state": "running",
-        "generation": 1,
-        "cap": 32,
-        "activateAtMs": now - 1,
-        "expiresAtMs": now + 3 * fill_module.DAY_MS,
-        "attemptLimit": 120,
-    }
+    trial = trial_config(now)
     journal.configure_trial(trial)
     action = Action.parse(create_request())
     event_id = journal.trial_attempt(action, "channels.createChannel")
@@ -77,30 +81,86 @@ def test_trial_records_a_short_premium_wait_and_stops_across_restart(monkeypatch
         event_id=event_id,
     )
     assert hold and hold["errorCode"] == "hold"
+    deadline = now + 2_000
+    assert hold["retryAt"] == timestamp(deadline)
     restarted = Journal(state, "42")
-    now += 60_000
-    action = replace(action, expires=now + 1_000)
+    blocked = restarted.guard(action, deadline - 1, reserve=False)
+    assert blocked == hold
+    unrelated = replace(action, step="add_bot", chat="-1001234567890")
+    assert restarted.guard(unrelated, now, reserve=False) is None
+    now = deadline
+    assert restarted.guard(action, now, reserve=False) is None
     assert restarted.snapshot(now)["holds"] == []
-    blocked = restarted.guard(action, now, reserve=False)
-    assert blocked and blocked["errorCode"] == "trial_flood_stop"
     events = restarted.trial_events(trial["id"], 0)
     assert len(events) == 1
     assert events[0]["id"] == event_id
     assert events[0]["outcome"] == "flood_premium_wait"
     assert events[0]["waitS"] == 2
+    assert events[0]["holdUntilMs"] == deadline
     assert restarted.trial_events(trial["id"], events[0]["sequence"]) == []
-    now = (now // fill_module.DAY_MS + 1) * fill_module.DAY_MS
-    action = replace(action, expires=now + 1_000)
-    assert restarted.guard(action, now, reserve=False) is not None
-    restarted.configure_trial(trial | {"generation": 2, "cap": 16})
+    assert restarted.trial_attempt(action, "channels.createChannel") is not None
+    assert restarted.trial_events(trial["id"], 0)[-1]["generation"] == trial["generation"]
+
+    assert restarted.guard(unrelated, now, reserve=True) is None
+    wait = restarted.wait("channels.inviteToChannel", "invite", errors.FloodWaitError(None, 3))
+    assert wait and wait["retryAt"] == timestamp(now + 3_000)
+    assert restarted.guard(unrelated, now + 3_000, reserve=False) == fill_module.retry(
+        "add_spacing", now + fill_module.ADD_GAP_MS
+    )
+
+
+def test_upgrade_ignores_legacy_day_stop_but_keeps_scoped_holds_and_manual_pause(
+    monkeypatch, tmp_path
+):
+    now = 1_800_000_000_000
+    monkeypatch.setattr(fill_module, "now_ms", lambda: now)
+    state = fixture_state(monkeypatch, tmp_path)
+    journal = Journal(state, "42")
+    trial = trial_config(now)
+    journal.configure_trial(trial)
+    with journal.connect() as db:
+        db.execute(
+            "CREATE TABLE pool_trial_stop_v1 (account TEXT, trial_id TEXT, generation INTEGER, until_ms INTEGER)"
+        )
+        db.execute(
+            "INSERT INTO pool_trial_stop_v1 VALUES(?,?,?,?)",
+            ("42", trial["id"], 1, now + fill_module.DAY_MS),
+        )
+        db.execute("UPDATE pool_trial_v1 SET next_resume_ms=?", (now + fill_module.DAY_MS,))
+        db.execute(
+            "INSERT INTO hold_v1 VALUES(?,?,?,?,?,?)",
+            ("42", "create", now + 3_000, "flood_wait", "channels.createChannel", 3),
+        )
+        db.commit()
+    restarted = Journal(state, "42")
+    action = Action.parse(create_request())
+    assert restarted.guard(action, now, reserve=False) == fill_module.retry("hold", now + 3_000)
+    now += 3_000
     assert restarted.guard(action, now, reserve=False) is None
-    stopped = trial | {"generation": 2, "cap": 16, "state": "ended", "nextResumeAtMs": now + 50}
-    restarted.configure_trial(stopped)
-    restarted.configure_trial(stopped | {"nextResumeAtMs": now + 200})
-    restarted.configure_trial(stopped | {"nextResumeAtMs": None})
     assert restarted.manual_trial_blocked()
-    now += 200
+    restarted.configure_trial(trial | {"state": "paused"})
+    restarted.configure_trial(trial)
+    blocked = restarted.guard(action, now, reserve=False)
+    assert blocked and blocked["errorCode"] == "trial_not_running"
+    restarted.configure_trial(trial | {"state": "ended"})
+    assert restarted.guard(action, now, reserve=False) is None
     assert not restarted.manual_trial_blocked()
+
+
+def test_peer_flood_uses_a_scoped_synthetic_deadline(monkeypatch, tmp_path):
+    now = 1_800_000_000_000
+    monkeypatch.setattr(fill_module, "now_ms", lambda: now)
+    journal = Journal(fixture_state(monkeypatch, tmp_path), "42")
+    trial = trial_config(now)
+    journal.configure_trial(trial)
+    action = Action.parse(create_request())
+    wait = journal.wait("channels.createChannel", "create", errors.PeerFloodError(None))
+    deadline = now + fill_module.DAY_MS
+    assert wait == fill_module.retry("hold", deadline)
+    assert journal.trial_events(trial["id"], 0)[0]["holdUntilMs"] == deadline
+    assert (
+        journal.guard(replace(action, expires=deadline + 1_000), deadline, reserve=False) is None
+    )
 
 
 @pytest.mark.asyncio
@@ -173,11 +233,55 @@ async def test_trial_socket_replays_flood_and_correlates_dispatch_history(monkey
 
 @pytest.mark.asyncio
 async def test_required_snapshot_wait_is_replayable(monkeypatch, tmp_path):
+    now = 1_800_000_000_000
+    monkeypatch.setattr(fill_module, "now_ms", lambda: now)
+
+    class Client:
+        identity_reads = 0
+
+        async def get_me(self):
+            self.identity_reads += 1
+            if self.identity_reads == 1:
+                raise errors.FloodPremiumWaitError(
+                    request=functions.users.GetUsersRequest([]), capture=2
+                )
+            return SimpleNamespace(id=42, bot=False)
+
+        async def iter_dialogs(self, *, limit):
+            if False:
+                yield
+
+    client = Client()
+    owner = PoolTransport(
+        cast(TelegramClient, client), fixture_state(monkeypatch, tmp_path), "42", b""
+    )
+    trial = trial_config(now)
+    owner.journal.configure_trial(trial)
+    await owner.read_inventory()
+    with pytest.raises(BrokerError, match="hold"):
+        await owner.broker_snapshot()
+    now += 1_999
+    with pytest.raises(BrokerError, match="hold"):
+        await owner.broker_snapshot()
+    assert client.identity_reads == 1
+    now += 1
+    assert (await owner.broker_snapshot())["groupCount"] == 0
+    replay = owner.journal.trial_events(trial["id"], 0)
+    assert len(replay) == 1
+    assert replay[0]["method"] == "users.getUsers"
+    assert replay[0]["source"] == "required_read"
+    assert replay[0]["outcome"] == "flood_premium_wait"
+    assert replay[0]["holdUntilMs"] == now
+
+
+@pytest.mark.asyncio
+async def test_participant_wait_only_defers_steps_that_read_it(monkeypatch, tmp_path):
+    now = 1_800_000_000_000
+    monkeypatch.setattr(fill_module, "now_ms", lambda: now)
+
     class Client:
         async def get_me(self):
-            raise errors.FloodPremiumWaitError(
-                request=functions.users.GetUsersRequest([]), capture=2
-            )
+            return SimpleNamespace(id=42, bot=False)
 
         async def iter_dialogs(self, *, limit):
             if False:
@@ -186,26 +290,48 @@ async def test_required_snapshot_wait_is_replayable(monkeypatch, tmp_path):
     owner = PoolTransport(
         cast(TelegramClient, Client()), fixture_state(monkeypatch, tmp_path), "42", b""
     )
-    now = now_ms()
-    trial_id = "2d0a9c4b-32a4-42c3-9568-cc934bbc77d0"
-    owner.journal.configure_trial(
-        {
-            "id": trial_id,
-            "state": "running",
-            "generation": 1,
-            "cap": 32,
-            "activateAtMs": now - 1,
-            "expiresAtMs": now + fill_module.DAY_MS,
-            "attemptLimit": 120,
-        }
+    owner.journal.configure_trial(trial_config(now))
+    hold = owner.journal.wait(
+        "channels.getParticipant", "method:channels.getParticipant", errors.FloodWaitError(None, 2)
     )
+    create = Action.parse(create_request(reconcile=True))
+    add = replace(create, step="add_bot", chat="-1001234567890")
+    assert await owner.observe(add) == hold == fill_module.retry("hold", now + 2_000)
+    assert (await owner.snapshot())["groupCount"] == 0
+    assert await owner.observe(create) == {"outcome": "not_found"}
+
+
+@pytest.mark.asyncio
+async def test_interrupted_inventory_hold_is_not_an_observation_failure(monkeypatch, tmp_path):
+    now = 1_800_000_000_000
+    monkeypatch.setattr(fill_module, "now_ms", lambda: now)
+    monkeypatch.setattr(fill_module, "CAPACITY_MAX_WAIT_SECONDS", 0)
+
+    class Client:
+        scans = 0
+
+        async def get_me(self):
+            return SimpleNamespace(id=42, bot=False)
+
+        async def iter_dialogs(self, *, limit):
+            self.scans += 1
+            if self.scans == 1:
+                raise errors.FloodPremiumWaitError(None, 2)
+            if False:
+                yield
+
+    owner = PoolTransport(
+        cast(TelegramClient, Client()), fixture_state(monkeypatch, tmp_path), "42", b""
+    )
+    owner.journal.configure_trial(trial_config(now))
+    with pytest.raises(BrokerError, match="account_held"):
+        await owner.read_inventory()
+    action = Action.parse(create_request(reconcile=True))
+    assert await owner.observe(action) == fill_module.retry("hold", now + 2_000)
+    now += 2_000
+    assert (await owner.observe(action))["errorCode"] == "inventory_refresh_pending"
     await owner.read_inventory()
-    with pytest.raises(BrokerError, match="hold"):
-        await owner.broker_snapshot()
-    replay = owner.journal.trial_events(trial_id, 0)
-    assert replay[0]["method"] == "users.getUsers"
-    assert replay[0]["source"] == "required_read"
-    assert replay[0]["outcome"] == "flood_premium_wait"
+    assert await owner.observe(action) == {"outcome": "not_found"}
 
 
 @pytest.mark.asyncio
@@ -316,7 +442,7 @@ async def test_capacity_scan_resumes_after_the_recorded_wait(monkeypatch, tmp_pa
         cast(TelegramClient, FakeClient()), fixture_state(monkeypatch, tmp_path), "42", b""
     )
     assert (await transport.snapshot())["groupCount"] == 2
-    assert slept == [33.0]
+    assert slept == [32.0]
 
 
 @pytest.mark.asyncio
@@ -407,7 +533,9 @@ async def test_flood_on_readback_after_a_create_always_remains_uncertain(monkeyp
     state = fixture_state(monkeypatch, tmp_path)
     account = PoolTransport(cast(TelegramClient, ResultClient()), state, "42", b"")
     await account.snapshot()
-    assert await account.dispatch(create_request()) == {"outcome": "uncertain"}
+    result = await account.dispatch(create_request())
+    assert result["outcome"] == "uncertain"
+    assert result["errorCode"] == "hold"
     assert account.journal.snapshot(now_ms())["holds"][0]["source"] == "flood_wait"
 
 
