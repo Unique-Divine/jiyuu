@@ -3154,48 +3154,6 @@ static int nullable_strcmp(const char *a, const char *b) {
     return strcmp(a ? a : "", b ? b : "");
 }
 
-static int project_record_compare(const void *left, const void *right) {
-    const mcp_project_record_t *a = left;
-    const mcp_project_record_t *b = right;
-    int by_name = nullable_strcmp(a->name, b->name);
-    if (by_name != 0) {
-        return by_name;
-    }
-    int by_root = nullable_strcmp(a->root_path, b->root_path);
-    if (by_root != 0) {
-        return by_root;
-    }
-    return nullable_strcmp(a->db_file, b->db_file);
-}
-
-static cbm_mcp_project_page_builder_fn project_page_builder;
-
-void cbm_mcp_set_project_page_builder(cbm_mcp_project_page_builder_fn builder) {
-    project_page_builder = builder;
-}
-
-static void build_project_page(mcp_project_record_t *records, int count,
-                               cbm_mcp_project_page_t *page) {
-    if (project_page_builder) {
-        project_page_builder(records, count, page);
-        return;
-    }
-    if (count > 1) {
-        qsort(records, (size_t)count, sizeof(*records), project_record_compare);
-    }
-    if (page->limit < 1) {
-        page->limit = 1;
-    } else if (page->limit > 500) {
-        page->limit = 500;
-    }
-    if (page->offset < 0) {
-        page->offset = 0;
-    }
-    page->start = page->offset < count ? page->offset : count;
-    int remaining = count - page->start;
-    page->end = page->start + (page->limit < remaining ? page->limit : remaining);
-}
-
 typedef enum {
     PROJECT_RECORD_SKIP = 0,
     PROJECT_RECORD_OK = 1,
@@ -3340,31 +3298,6 @@ static bool populate_project_record(const char *dir_path, bool include_stats,
     return true;
 }
 
-static void add_project_record_json(yyjson_mut_doc *doc, yyjson_mut_val *arr,
-                                    const mcp_project_record_t *record, bool include_stats) {
-    yyjson_mut_val *p = yyjson_mut_obj(doc);
-    yyjson_mut_obj_add_strcpy(doc, p, "name", record->name);
-    yyjson_mut_obj_add_strcpy(doc, p, "root_path", record->root_path);
-    if (record->branch) {
-        yyjson_mut_obj_add_strcpy(doc, p, "branch", record->branch);
-    }
-    if (include_stats) {
-        yyjson_mut_obj_add_int(doc, p, "nodes", record->nodes);
-        yyjson_mut_obj_add_int(doc, p, "edges", record->edges);
-        yyjson_mut_obj_add_int(doc, p, "size_bytes", record->size_bytes);
-    }
-    yyjson_mut_arr_add_val(arr, p);
-}
-
-static cbm_mcp_project_list_renderer_fn project_list_renderer;
-static cbm_mcp_read_override_free_fn project_list_payload_free;
-
-void cbm_mcp_set_project_list_renderer(cbm_mcp_project_list_renderer_fn renderer,
-                                        cbm_mcp_read_override_free_fn release) {
-    project_list_renderer = release ? renderer : NULL;
-    project_list_payload_free = release;
-}
-
 void cbm_mcp_render_project_table(cbm_sb_t *sb, const cbm_mcp_project_record_t *records,
                                    int page_count, bool metadata_only, bool include_stats) {
     /* Stable union schema: branch is an explicit empty marker instead of
@@ -3431,185 +3364,89 @@ void cbm_mcp_render_project_table(cbm_sb_t *sb, const cbm_mcp_project_record_t *
     free(cells);
 }
 
-/* list_projects: scan cache directory for .db files.
- * Each project is a single .db file — no central registry needed. */
-static char *handle_list_projects(cbm_mcp_server_t *srv, const char *args) {
-    bool metadata_only = false;
-    yyjson_doc *args_doc = args ? yyjson_read(args, strlen(args), 0) : NULL;
-    yyjson_val *args_root = args_doc ? yyjson_doc_get_root(args_doc) : NULL;
-    yyjson_val *metadata_value =
-        args_root && yyjson_is_obj(args_root) ? yyjson_obj_get(args_root, "metadata_only") : NULL;
-    metadata_only = metadata_value && yyjson_is_true(metadata_value);
-    char *detail = cbm_mcp_get_string_arg(args, "detail");
-    /* `include_details` is the boolean spelling main shipped for the same
-     * request; both select the stats projection. */
-    bool include_stats = !metadata_only && ((detail && strcmp(detail, "stats") == 0) ||
-                                            cbm_mcp_get_bool_arg(args, "include_details"));
-    free(detail);
-    if (args_doc) {
-        yyjson_doc_free(args_doc);
+/* Rust owns the list request and its page. This handle keeps native directory,
+ * path, and database operations behind the platform abstraction. */
+struct cbm_mcp_project_catalog {
+    char path[CBM_SZ_1K];
+    cbm_dir_t *dir;
+    cbm_mcp_server_t *server;
+};
+
+cbm_mcp_project_catalog_t *cbm_mcp_project_catalog_open(cbm_mcp_server_t *server,
+                                                        char **error) {
+    cbm_mcp_project_catalog_t *catalog = malloc(sizeof(*catalog));
+    if (!catalog) {
+        *error = cbm_mcp_text_result("out of memory while listing projects", true);
+        return NULL;
     }
 
-    char dir_path[CBM_SZ_1K];
-    cache_dir(dir_path, sizeof(dir_path));
-
-    cbm_dir_t *d = cbm_opendir(dir_path);
-
-    if (!d) {
+    cache_dir(catalog->path, sizeof(catalog->path));
+    catalog->dir = cbm_opendir(catalog->path);
+    if (!catalog->dir) {
         char msg[CBM_SZ_1K];
         snprintf(msg, sizeof(msg),
                  "{\"error\":\"cannot read cache directory: %s\",\"hint\":"
                  "\"Check directory permissions or run index_repository first.\"}",
-                 dir_path);
-        return cbm_mcp_text_result(msg, true);
+                 catalog->path);
+        *error = cbm_mcp_text_result(msg, true);
+        free(catalog);
+        return NULL;
     }
+    catalog->server = server;
+    *error = NULL;
+    return catalog;
+}
 
-    mcp_project_record_t *records = NULL;
-    int record_count = 0;
-    int record_cap = 0;
-    bool oom = false;
-    bool cancelled = false;
+cbm_mcp_project_catalog_result_t cbm_mcp_project_catalog_next(
+    cbm_mcp_project_catalog_t *catalog, cbm_mcp_project_record_t *record) {
     cbm_dirent_t *entry;
-    while ((entry = cbm_readdir(d)) != NULL) {
+    while ((entry = cbm_readdir(catalog->dir)) != NULL) {
         const char *name = entry->name;
         if (!cbm_is_project_index_db(name)) {
             continue;
         }
-        if (project_scan_should_stop(srv, name)) {
-            cancelled = true;
-            break;
+        if (project_scan_should_stop(catalog->server, name)) {
+            return CBM_MCP_CATALOG_CANCELLED;
         }
         char full_path[CBM_SZ_2K];
-        snprintf(full_path, sizeof(full_path), "%s/%s", dir_path, name);
-        int64_t size_bytes = cbm_file_size(full_path);
-        if (size_bytes < 0) {
+        snprintf(full_path, sizeof(full_path), "%s/%s", catalog->path, name);
+        int64_t size = cbm_file_size(full_path);
+        if (size < 0) {
             continue;
         }
-        mcp_project_record_t record = {0};
-        project_record_status_t read_status =
-            read_project_record_identity(dir_path, name, size_bytes, &record);
-        if (read_status == PROJECT_RECORD_OOM) {
-            oom = true;
-            break;
+        project_record_status_t status =
+            read_project_record_identity(catalog->path, name, size, record);
+        if (status == PROJECT_RECORD_OOM) {
+            return CBM_MCP_CATALOG_FAILED;
         }
-        if (read_status != PROJECT_RECORD_OK) {
-            continue;
+        if (status == PROJECT_RECORD_OK) {
+            return CBM_MCP_CATALOG_RECORD;
         }
-        if (record_count == record_cap) {
-            int new_cap = record_cap ? record_cap * 2 : 16;
-            void *grown = realloc(records, (size_t)new_cap * sizeof(*records));
-            if (!grown) {
-                project_record_clear(&record);
-                oom = true;
-                break;
-            }
-            records = grown;
-            record_cap = new_cap;
-        }
-        records[record_count++] = record;
     }
-    cbm_closedir(d);
+    cbm_closedir(catalog->dir);
+    catalog->dir = NULL;
+    return CBM_MCP_CATALOG_END;
+}
 
-    if (oom || cancelled) {
-        for (int i = 0; i < record_count; i++) {
-            project_record_clear(&records[i]);
-        }
-        free(records);
-        return cbm_mcp_text_result(cancelled ? "list_projects cancelled for this request"
-                                             : "out of memory while listing projects",
-                                   true);
+cbm_mcp_project_catalog_result_t cbm_mcp_project_catalog_hydrate(
+    cbm_mcp_project_catalog_t *catalog, cbm_mcp_project_record_t *record, bool include_stats) {
+    if (mcp_request_cancelled(catalog->server)) {
+        return CBM_MCP_CATALOG_CANCELLED;
     }
-    cbm_mcp_project_page_t page = {
-        .limit = cbm_mcp_get_int_arg(args, "limit", 50),
-        .offset = cbm_mcp_get_int_arg(args, "offset", 0),
-    };
-    build_project_page(records, record_count, &page);
-    int start = page.start;
-    int end = page.end;
-    if (!metadata_only) {
-        for (int i = start; i < end; i++) {
-            /* Populating a row reopens its database and asks git for the
-             * branch, so the page is polled like the scan above. */
-            if (mcp_request_cancelled(srv)) {
-                cancelled = true;
-                break;
-            }
-            if (!populate_project_record(dir_path, include_stats, &records[i])) {
-                oom = true;
-                break;
-            }
-        }
-    }
-    if (oom || cancelled) {
-        for (int i = 0; i < record_count; i++) {
-            project_record_clear(&records[i]);
-        }
-        free(records);
-        return cbm_mcp_text_result(cancelled ? "list_projects cancelled for this request"
-                                             : "failed to populate project page",
-                                   true);
-    }
+    return populate_project_record(catalog->path, include_stats, record)
+               ? CBM_MCP_CATALOG_RECORD
+               : CBM_MCP_CATALOG_FAILED;
+}
 
-    bool wants_json = mcp_wants_json(args);
-    char *payload = NULL;
-    const mcp_project_record_t *page_records = end > start ? records + start : NULL;
-    if (project_list_renderer) {
-        payload = project_list_renderer(page_records, record_count, &page, metadata_only,
-                                        include_stats, wants_json);
-    } else if (wants_json) {
-        yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
-        yyjson_mut_val *root = yyjson_mut_obj(doc);
-        yyjson_mut_doc_set_root(doc, root);
-        yyjson_mut_val *arr = yyjson_mut_arr(doc);
-        for (int i = 0; i < end - start; i++) {
-            add_project_record_json(doc, arr, &page_records[i], include_stats);
-        }
+void cbm_mcp_project_catalog_release_record(cbm_mcp_project_record_t *record) {
+    project_record_clear(record);
+}
 
-        yyjson_mut_obj_add_val(doc, root, "projects", arr);
-        yyjson_mut_obj_add_int(doc, root, "total", record_count);
-        yyjson_mut_obj_add_int(doc, root, "offset", page.offset);
-        yyjson_mut_obj_add_int(doc, root, "limit", page.limit);
-        yyjson_mut_obj_add_int(doc, root, "returned", end - start);
-        yyjson_mut_obj_add_bool(doc, root, "has_more", end < record_count);
-        if (end < record_count) {
-            yyjson_mut_obj_add_int(doc, root, "next_offset", end);
-        }
-        if (record_count == 0) {
-            yyjson_mut_obj_add_str(
-                doc, root, "hint",
-                "No projects indexed. Call index_repository(repo_path=...) first.");
-        }
-        payload = yy_doc_to_str(doc);
-        yyjson_mut_doc_free(doc);
-    } else {
-        cbm_sb_t sb;
-        cbm_sb_init(&sb);
-        cbm_mcp_render_project_table(&sb, page_records, end - start, metadata_only, include_stats);
-        cbm_tree_scalar_int(&sb, "total", record_count);
-        cbm_tree_scalar_int(&sb, "returned", end - start);
-        cbm_tree_scalar_bool(&sb, "has_more", end < record_count);
-        if (end < record_count) {
-            cbm_tree_scalar_int(&sb, "next_offset", end);
-        }
-        if (record_count == 0) {
-            cbm_tree_scalar_str(&sb, "hint",
-                                "No projects indexed. Call index_repository(repo_path=...) first.");
-        }
-        payload = cbm_sb_finish(&sb);
+void cbm_mcp_project_catalog_close(cbm_mcp_project_catalog_t *catalog) {
+    if (catalog->dir) {
+        cbm_closedir(catalog->dir);
     }
-
-    for (int i = 0; i < record_count; i++) {
-        project_record_clear(&records[i]);
-    }
-    free(records);
-
-    char *result = cbm_mcp_text_result(payload ? payload : "out of memory", payload == NULL);
-    if (payload && project_list_renderer) {
-        project_list_payload_free(payload);
-    } else {
-        free(payload);
-    }
-    return result;
+    free(catalog);
 }
 
 /* verify_project_indexed — returns a heap-allocated error JSON string when the
@@ -22903,7 +22740,8 @@ static char *dispatch_tool(cbm_mcp_server_t *srv, const char *tool_name, const c
     }
 
     if (strcmp(tool_name, "list_projects") == 0) {
-        return handle_list_projects(srv, args_json);
+        cbm_log_debug("list_projects.dispatch", "implementation", "rust");
+        return cbm_rust_mcp_list_projects(srv, args_json);
     }
     if (strcmp(tool_name, "get_graph_schema") == 0) {
         return handle_get_graph_schema(srv, args_json);

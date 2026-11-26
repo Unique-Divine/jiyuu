@@ -10025,6 +10025,41 @@ TEST(pipeline_full_cancel_after_destination_prepare_preserves_previous_generatio
     PASS();
 }
 
+TEST(pipeline_stage_install_rename_failure_keeps_destination_and_releases_owner) {
+    char tmp[256];
+    snprintf(tmp, sizeof(tmp), "/tmp/cbm_stage_install_rename_XXXXXX");
+    ASSERT_NOT_NULL(cbm_mkdtemp(tmp));
+    char db_path[512];
+    snprintf(db_path, sizeof(db_path), "%s/generation.db", tmp);
+    cbm_store_t *store = cbm_store_open_path(db_path);
+    ASSERT_NOT_NULL(store);
+    ASSERT_EQ(cbm_store_upsert_project(store, "previous", tmp), CBM_STORE_OK);
+    cbm_store_close(store);
+
+    char *stage = cbm_pipeline_create_staging_path(db_path);
+    ASSERT_NOT_NULL(stage);
+    /* Leave the owner lock in place and make the final rename fail. */
+    ASSERT_EQ(cbm_unlink(stage), 0);
+    int rc = cbm_pipeline_finalize_staged_generation(stage, db_path, NULL, true);
+    int stage_count = count_generation_stage_artifacts(tmp, "generation.db");
+    free(stage);
+
+    cbm_project_t previous = {0};
+    store = cbm_store_open_path_query(db_path);
+    ASSERT_NOT_NULL(store);
+    int previous_rc = cbm_store_get_project(store, "previous", &previous);
+    free((char *)previous.name);
+    free((char *)previous.indexed_at);
+    free((char *)previous.root_path);
+    cbm_store_close(store);
+    th_rmtree(tmp);
+
+    ASSERT_EQ(rc, CBM_PIPELINE_PERSIST_FAILED);
+    ASSERT_EQ(previous_rc, CBM_STORE_OK);
+    ASSERT_EQ(stage_count, 0);
+    PASS();
+}
+
 /* A failure after graph serialization but before metadata/publication must
  * discard only the staged generation. The final path remains the complete old
  * graph and a clean retry converges. */
@@ -35859,6 +35894,7 @@ SUITE(pipeline_semantic_manifest_repro) {
     RUN_TEST(pipeline_existing_artifact_refreshes_after_default_forced_full_reindex);
     RUN_TEST(pipeline_full_cancel_after_predump_preserves_previous_generation);
     RUN_TEST(pipeline_full_cancel_after_destination_prepare_preserves_previous_generation);
+    RUN_TEST(pipeline_stage_install_rename_failure_keeps_destination_and_releases_owner);
     RUN_TEST(pipeline_full_persist_failure_after_stage_dump_preserves_previous_generation);
     RUN_TEST(pipeline_incremental_persist_failure_preserves_previous_generation_and_retries);
     RUN_TEST(pipeline_incremental_successful_publication_preserves_adr);

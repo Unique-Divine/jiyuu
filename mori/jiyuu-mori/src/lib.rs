@@ -44,6 +44,15 @@ mod config_cli;
 #[path = "mcp_dispatch/methods.rs"]
 mod mcp_methods;
 
+#[cfg(any(feature = "native-engine-abi", test))]
+mod project_listing;
+
+#[cfg(feature = "native-engine-abi")]
+mod project_response;
+
+#[cfg(feature = "c-backend")]
+pub use project_response::register_index_status_renderer;
+
 #[cfg(feature = "native-engine-abi")]
 pub mod startup;
 

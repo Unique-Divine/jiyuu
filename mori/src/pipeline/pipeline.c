@@ -4068,13 +4068,12 @@ struct cbm_stage_finalize {
     const char *stage_path;
     const char *destination;
     atomic_int *cancelled;
-    bool destination_known_healthy;
     cbm_pipeline_t *frozen;
     cbm_replacement_prepare_t prepared;
     struct timespec started;
 };
 
-static bool stage_finalize_remove_sidecars(cbm_stage_finalize_t *run) {
+bool cbm_stage_install_remove_sidecars(cbm_stage_finalize_t *run) {
     if (cbm_remove_db_sidecars(run->stage_path) == 0) {
         return true;
     }
@@ -4084,41 +4083,53 @@ static bool stage_finalize_remove_sidecars(cbm_stage_finalize_t *run) {
     return false;
 }
 
-static bool stage_finalize_cancelled(cbm_stage_finalize_t *run) {
+bool cbm_stage_install_cancelled(cbm_stage_finalize_t *run) {
     return run->cancelled && atomic_load(run->cancelled);
 }
 
-static bool stage_finalize_prepare(cbm_stage_finalize_t *run) {
+static void stage_install_begin_prepare(cbm_stage_finalize_t *run) {
     cbm_log_info("finalize.timing", "block", "stage_sidecars", "elapsed_ms",
                  itoa_buf((int)elapsed_ms(run->started)));
     cbm_clock_gettime(CLOCK_MONOTONIC, &run->started);
-    /* A successful delta clone and patch already proved structural health.
-     * Skip the extra database scan, but remove the old sidecars in either case. */
-    if (run->destination_known_healthy) {
-        if (cbm_remove_db_sidecars(run->destination) != 0) {
-            char errno_text[16];
-            (void)snprintf(errno_text, sizeof(errno_text), "%d", errno);
-            cbm_log_error("finalize.prepare_failed", "reason", "healthy_sidecar_cleanup", "errno",
-                          errno_text, "path", run->destination);
-            return false;
-        }
-    } else if (prepare_existing_generation_for_replace(run->destination, &run->prepared, false) !=
-               0) {
-        return false;
-    }
+}
+
+static void stage_install_prepared(cbm_stage_finalize_t *run) {
 #if defined(CBM_INCREMENTAL_TEST_API) && CBM_INCREMENTAL_TEST_API
     if (cbm_pipeline_persist_test_take_cancel_after_destination_prepare() && run->cancelled) {
         atomic_store(run->cancelled, true);
     }
+#else
+    (void)run;
 #endif
+}
+
+bool cbm_stage_install_clean_destination_sidecars(cbm_stage_finalize_t *run) {
+    stage_install_begin_prepare(run);
+    if (cbm_remove_db_sidecars(run->destination) != 0) {
+        char errno_text[16];
+        (void)snprintf(errno_text, sizeof(errno_text), "%d", errno);
+        cbm_log_error("finalize.prepare_failed", "reason", "healthy_sidecar_cleanup", "errno",
+                      errno_text, "path", run->destination);
+        return false;
+    }
+    stage_install_prepared(run);
     return true;
 }
 
-static bool stage_finalize_rollback(cbm_stage_finalize_t *run) {
+bool cbm_stage_install_prepare_destination(cbm_stage_finalize_t *run) {
+    stage_install_begin_prepare(run);
+    if (prepare_existing_generation_for_replace(run->destination, &run->prepared, false) != 0) {
+        return false;
+    }
+    stage_install_prepared(run);
+    return true;
+}
+
+bool cbm_stage_install_rollback(cbm_stage_finalize_t *run) {
     return rollback_quarantined_generation(run->destination, &run->prepared) == 0;
 }
 
-static bool stage_finalize_rename(cbm_stage_finalize_t *run) {
+bool cbm_stage_install_rename(cbm_stage_finalize_t *run) {
     cbm_log_info("finalize.timing", "block", "prepare_live", "elapsed_ms",
                  itoa_buf((int)elapsed_ms(run->started)));
     cbm_clock_gettime(CLOCK_MONOTONIC, &run->started);
@@ -4132,13 +4143,13 @@ static bool stage_finalize_rename(cbm_stage_finalize_t *run) {
     return false;
 }
 
-static void stage_finalize_release(cbm_stage_finalize_t *run) {
+void cbm_stage_install_release(cbm_stage_finalize_t *run) {
     frozen_cleanup_note(run->frozen, stage_owner_release(run->stage_path));
     cbm_log_info("finalize.timing", "block", "rename", "elapsed_ms",
                  itoa_buf((int)elapsed_ms(run->started)));
 }
 
-static void stage_finalize_discard(cbm_stage_finalize_t *run) {
+void cbm_stage_install_discard(cbm_stage_finalize_t *run) {
     discard_generation_frozen(run->stage_path, run->frozen);
 }
 
@@ -4146,26 +4157,15 @@ static void stage_finalize_discard(cbm_stage_finalize_t *run) {
  * release; the caller still owns the path string. */
 static int finalize_staged_impl(char *stage_path, const char *final_db_path, atomic_int *cancelled,
                                 bool destination_known_healthy, cbm_pipeline_t *frozen) {
-    static const cbm_stage_finalize_ops_t ops = {
-        .abort_preserve_db = CBM_PIPELINE_ABORT_PRESERVE_DB,
-        .persist_failed = CBM_PIPELINE_PERSIST_FAILED,
-        .remove_sidecars = stage_finalize_remove_sidecars,
-        .cancelled = stage_finalize_cancelled,
-        .prepare = stage_finalize_prepare,
-        .rollback = stage_finalize_rollback,
-        .rename = stage_finalize_rename,
-        .release = stage_finalize_release,
-        .discard = stage_finalize_discard,
-    };
     cbm_stage_finalize_t run = {
         .stage_path = stage_path,
         .destination = final_db_path,
         .cancelled = cancelled,
-        .destination_known_healthy = destination_known_healthy,
         .frozen = frozen,
     };
     cbm_clock_gettime(CLOCK_MONOTONIC, &run.started);
-    return cbm_rust_stage_finalize(&run, &ops);
+    return cbm_rust_stage_finalize(&run, destination_known_healthy, CBM_PIPELINE_ABORT_PRESERVE_DB,
+                                   CBM_PIPELINE_PERSIST_FAILED);
 }
 
 int cbm_pipeline_finalize_staged_generation(char *path, const char *destination,
