@@ -148,7 +148,7 @@ mod go_imports;
 #[cfg(feature = "c-backend")]
 pub use go_imports::register as mori_register_go_import_extractor;
 
-#[cfg(feature = "c-backend")]
+#[cfg(feature = "native-engine-abi")]
 mod native_tree;
 
 #[cfg(feature = "c-backend")]
@@ -157,11 +157,8 @@ mod rust_use_imports;
 #[cfg(feature = "c-backend")]
 pub use rust_use_imports::register as mori_register_rust_use_imports;
 
-#[cfg(feature = "c-backend")]
+#[cfg(feature = "native-engine-abi")]
 mod markdown_extract;
-
-#[cfg(feature = "c-backend")]
-pub use markdown_extract::register as mori_register_markdown_extractor;
 
 #[cfg(feature = "c-backend")]
 mod ts_static_imports;

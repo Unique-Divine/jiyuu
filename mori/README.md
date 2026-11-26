@@ -532,11 +532,13 @@ for GraphQL schema field spans, operation roots, and parser input escape masking
 Both paths use the same Tree-sitter parser and the original source bytes
 for field metadata. The worker log records both callbacks at debug level.
 
-### Markdown Heading Extraction
+### Markdown Section Extraction
 
-Set `MORI_IMPL_MARKDOWN_EXTRACT=rust` to select Rust heading text extraction.
-The implementation borrows the same Tree-sitter tree to read ATX and Setext
-headings. Section identity, body extraction, and document linking are C.
+Rust reads ATX and Setext headings from the existing Tree-sitter tree. It
+assigns section identities, collects each section's body, and selects which
+section owns each document reference. C scans reference syntax, extracts
+diagram labels, and writes definitions and references to the result arena.
+The worker debug log records `extract.markdown_sections`.
 
 ### Python Import Extraction
 

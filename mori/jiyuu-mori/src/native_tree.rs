@@ -24,6 +24,7 @@ unsafe extern "C" {
     fn ts_node_type(node: RawNode) -> *const c_char;
     fn ts_node_start_byte(node: RawNode) -> u32;
     fn ts_node_end_byte(node: RawNode) -> u32;
+    #[cfg(feature = "c-backend")]
     fn ts_node_is_named(node: RawNode) -> bool;
     fn ts_node_child_by_field_name(
         node: RawNode,
@@ -114,6 +115,7 @@ impl RawNode {
         })
     }
 
+    #[cfg(feature = "c-backend")]
     pub(crate) unsafe fn named_children(self) -> impl Iterator<Item = Self> {
         // SAFETY: Namedness is checked while each yielded node's tree is live.
         unsafe { self.children().filter(|child| ts_node_is_named(*child)) }
