@@ -61,6 +61,7 @@ C_SOURCES = [
     "src/foundation/mem_core.c",
     "src/foundation/mem.c",
     "src/foundation/mem_events.c",
+    "src/foundation/path_syntax_internal.c",
     "src/foundation/platform.c",
     "src/foundation/profile.c",
     "src/foundation/str_util.c",
@@ -120,7 +121,17 @@ def probe(scratch: Path) -> str:
 
     reference = scratch / "reference"
     candidate = scratch / "candidate"
-    run(*CC, PROBE, *C_SOURCES, reference_c, "-o", reference)
+    # The pinned source used to get this declaration transitively.
+    run(
+        *CC,
+        "-include",
+        "foundation/path_syntax_internal.h",
+        PROBE,
+        *C_SOURCES,
+        reference_c,
+        "-o",
+        reference,
+    )
     run(*CC, PROBE, *C_SOURCES, PKGMAP, rust_archive, "-o", candidate)
 
     before = run(reference, repo)

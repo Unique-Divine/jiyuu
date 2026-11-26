@@ -111,54 +111,69 @@ fn quoted_literal(source: &[u8]) -> Option<&[u8]> {
     None
 }
 
-fn normalize_target_path(path: &[u8]) -> Option<Vec<u8>> {
+fn normalize_target_path<'a>(
+    path: &[u8],
+    normalized: &'a mut [u8; PATH_BUFFER],
+) -> Option<&'a [u8]> {
     if path.starts_with(b"/")
         || path.iter().any(|&byte| matches!(byte, b'\\' | b':'))
     {
         return None;
     }
-    let mut normalized = Vec::new();
+    let mut used = 0;
     for component in path.split(|&byte| byte == b'/') {
         match component {
             b"" | b"." => {}
             b".." => {
-                if normalized.is_empty() {
+                if used == 0 {
                     return None;
                 }
-                let parent = normalized
+                used = normalized[..used]
                     .iter()
                     .rposition(|&byte| byte == b'/')
                     .unwrap_or(0);
-                normalized.truncate(parent);
             }
             _ => {
                 // The reference reserves room for a separator and a NUL on every append.
-                if normalized.len() + component.len() + 2 > PATH_BUFFER {
+                if used + component.len() + 2 > PATH_BUFFER {
                     return None;
                 }
-                if !normalized.is_empty() {
-                    normalized.push(b'/');
+                if used != 0 {
+                    normalized[used] = b'/';
+                    used += 1;
                 }
-                normalized.extend_from_slice(component);
+                let end = used + component.len();
+                normalized[used..end].copy_from_slice(component);
+                used = end;
             }
         }
     }
-    Some(normalized)
+    Some(&normalized[..used])
 }
 
-fn target_path(call: &[u8], root: &[u8], name: &[u8]) -> Option<Vec<u8>> {
-    let default_path;
+fn target_path<'a>(
+    call: &[u8],
+    root: &[u8],
+    name: &[u8],
+    normalized: &'a mut [u8; PATH_BUFFER],
+) -> Option<&'a [u8]> {
+    let mut default_path;
     let path = match argument(call, b"path:") {
         Some(value) => quoted_literal(value)?,
         None => {
-            if root.len() + 1 + name.len() >= PATH_BUFFER {
+            let name_start = root.len() + 1;
+            let end = name_start + name.len();
+            if end >= PATH_BUFFER {
                 return None;
             }
-            default_path = [root, b"/", name].concat();
-            &default_path
+            default_path = [0; PATH_BUFFER];
+            default_path[..root.len()].copy_from_slice(root);
+            default_path[root.len()] = b'/';
+            default_path[name_start..end].copy_from_slice(name);
+            &default_path[..end]
         }
     };
-    normalize_target_path(path)
+    normalize_target_path(path, normalized)
 }
 
 fn scan_targets(
@@ -170,6 +185,15 @@ fn scan_targets(
         .iter()
         .rposition(|&byte| byte == b'/')
         .map_or(&[][..], |slash| &manifest[..slash]);
+    let mut normalized = [0; PATH_BUFFER];
+    // Non-empty suffixes use the reference's 1023-byte joined path limit.
+    let mut entry = [0; PATH_BUFFER - 1];
+    let mut path_start = manifest_dir.len().min(entry.len());
+    entry[..path_start].copy_from_slice(&manifest_dir[..path_start]);
+    if path_start != 0 && path_start < entry.len() {
+        entry[path_start] = b'/';
+        path_start += 1;
+    }
     while let Some((open, root)) = code_offsets(source).find_map(|offset| {
         TARGETS.iter().find_map(|&(prefix, root)| {
             source[offset..]
@@ -184,19 +208,15 @@ fn scan_targets(
         let call = &source[open..close];
         if let Some(name) = argument(call, b"name:").and_then(quoted_literal)
             && !name.is_empty()
-            && let Some(path) = target_path(call, root, name)
+            && let Some(path) = target_path(call, root, name, &mut normalized)
         {
             if path.is_empty() {
                 emit(name, manifest_dir);
             } else {
-                let mut entry = manifest_dir.to_vec();
-                if !entry.is_empty() {
-                    entry.push(b'/');
-                }
-                entry.extend_from_slice(&path);
-                // Match the reference's fixed buffer for non-empty suffixes.
-                entry.truncate(PATH_BUFFER - 1);
-                emit(name, &entry);
+                let path = &path[..path.len().min(entry.len() - path_start)];
+                let end = path_start + path.len();
+                entry[path_start..end].copy_from_slice(path);
+                emit(name, &entry[..end]);
             }
         }
         // A nested dependency target belongs to the enclosing call.
@@ -284,7 +304,7 @@ mod tests {
     }
 
     #[test]
-    fn preserves_byte_paths_and_buffer_limits() {
+    fn preserves_non_utf8_names() {
         let mut targets = Vec::new();
         scan_targets(
             b".target(name: \"\xff\", path: \"\")",
@@ -294,12 +314,59 @@ mod tests {
             },
         );
         assert_eq!(targets, [(vec![0xff], vec![])]);
+    }
 
-        let dir = vec![b'd'; PATH_BUFFER - 3];
-        let manifest = [dir.as_slice(), b"/Package.swift"].concat();
-        scan_targets(b".target(name: \"App\")", &manifest, |_, entry| {
-            assert_eq!(entry, [dir.as_slice(), b"/S"].concat());
+    #[test]
+    fn skips_over_limit_paths_and_keeps_later_targets() {
+        let literal_at_limit = "a".repeat(PATH_BUFFER - 2);
+        let literal_over_limit = "b".repeat(PATH_BUFFER - 1);
+        let default_at_limit = "c".repeat(PATH_BUFFER - 1 - b"Sources/".len());
+        let default_over_limit = format!("{default_at_limit}/");
+        let source = format!(
+            r#"
+            .target(name: "Fits", path: "{literal_at_limit}")
+            .target(name: "Skipped", path: "{literal_over_limit}/../Lib")
+            .target(name: "{default_at_limit}")
+            .target(name: "{default_over_limit}")
+            .target(name: "Recovered", path: "{literal_at_limit}/../Lib")
+            "#
+        );
+        let mut targets = Vec::new();
+        scan_targets(source.as_bytes(), b"Package.swift", |name, entry| {
+            targets.push((name.to_vec(), entry.to_vec()));
         });
-        assert!(normalize_target_path(&[b'a'; PATH_BUFFER - 1]).is_none());
+        assert_eq!(
+            targets,
+            [
+                (b"Fits".to_vec(), literal_at_limit.as_bytes().to_vec()),
+                (
+                    default_at_limit.as_bytes().to_vec(),
+                    [b"Sources/", default_at_limit.as_bytes()].concat(),
+                ),
+                (b"Recovered".to_vec(), b"Lib".to_vec()),
+            ]
+        );
+    }
+
+    #[test]
+    fn caps_joined_paths_but_keeps_full_dirs_for_empty_suffixes() {
+        let dir = [b'd'; PATH_BUFFER + 1];
+        let source = br#".target(name: "App") .target(name: "Root", path: ".")"#;
+        let dir_lengths =
+            [PATH_BUFFER - 3, PATH_BUFFER - 2, PATH_BUFFER - 1, dir.len()];
+        for dir_len in dir_lengths {
+            let dir = &dir[..dir_len];
+            let manifest = [dir, b"/Package.swift"].concat();
+            let mut joined = [dir, b"/Sources/App"].concat();
+            joined.truncate(PATH_BUFFER - 1);
+            let mut targets = Vec::new();
+            scan_targets(source, &manifest, |name, entry| {
+                targets.push((name.to_vec(), entry.to_vec()));
+            });
+            assert_eq!(
+                targets,
+                [(b"App".to_vec(), joined), (b"Root".to_vec(), dir.to_vec())]
+            );
+        }
     }
 }
