@@ -201,9 +201,11 @@ is `~/.boku`. Files are partitioned by UTC day as `mcp-YYYY-MM-DD.jsonl`
 and may have a numbered segment suffix. The server keeps up to 30 UTC days
 and 100 MiB of history per log directory.
 
-`call.start` and `call.end` share a `requestId`. Each record has a schema
-version, UTC timestamp, process run ID, and sequence number. The end record
-includes duration, the MCP outcome, and a typed failure code when available.
+`call.start`, `call.dispatch`, and `call.end` share a `requestId`. Dispatch
+means the server invoked the tool after argument validation. Each
+record has a schema version, UTC timestamp, process run ID, and sequence
+number. The end record includes duration, the MCP protocol outcome, and
+a typed failure code when available.
 A resolved Telegram account appears as `accountId`, or as `accountIds`
 when a tool uses more than one account. Tool payloads and exception text
 stay out of the history.
@@ -212,8 +214,8 @@ To inspect a call and any linked requests by ID, run:
 
 ```sh
 find "${BOKU_HOME:-$HOME/.boku}/telegram-mcp/logs" -maxdepth 1 -type f \
-  -name '*.jsonl' -exec jq -c --arg id REQUEST_ID \
-  'select(.requestId == $id or .parentId == $id or .event == "log.gap")' {} +
+  -name '*.jsonl' -exec jq -Rc --arg id REQUEST_ID \
+  'fromjson? | select(.requestId == $id or .parentId == $id or .event == "log.gap")' {} +
 ```
 
 History is diagnostic. Queue pressure and disk failures can lose records.

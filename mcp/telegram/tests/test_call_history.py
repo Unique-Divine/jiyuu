@@ -83,23 +83,33 @@ async def test_call_handler_records_only_safe_fields(tmp_path, monkeypatch):
     ):
         assert secret not in text
     rows = list(read_rows(root))
-    assert len(rows) == 12
-    assert [row["seq"] for row in rows] == list(range(1, 13))
-    for start, end in zip(rows[::2], rows[1::2]):
-        assert start["requestId"] == end["requestId"]
+    assert len(rows) == 16
+    assert [row["seq"] for row in rows] == list(range(1, 17))
+    calls = {}
+    for row in rows:
+        calls.setdefault(row["requestId"], []).append(row)
+    ends = []
+    for index, events in enumerate(calls.values()):
+        start, end = events[0], events[-1]
         assert start["event"] == "call.start"
         assert end["event"] == "call.end"
+        if index in (0, 1, 2, 5):
+            assert events[1]["event"] == "call.dispatch"
+        else:
+            assert len(events) == 2
         assert end["durationMs"] >= 0
         assert end["transport"] == "stdio"
-    assert rows[1]["accountIds"] == ["101", "102"]
-    assert rows[3]["outcome"] == "flood"
-    assert rows[3]["protocolOutcome"] == "ok"
-    assert rows[3]["waitSeconds"] == 42
-    assert rows[5]["protocolOutcome"] == "error"
-    assert rows[7]["method"] == "unknown"
-    assert rows[7]["code"] == "unknown_method"
-    assert rows[9]["outcome"] == "error"
-    assert rows[11]["outcome"] == "cancelled"
+        ends.append(end)
+    assert ends[0]["accountIds"] == ["101", "102"]
+    assert ends[0]["outcome"] == "completed"
+    assert ends[1]["outcome"] == "flood"
+    assert ends[1]["protocolOutcome"] == "ok"
+    assert ends[1]["waitSeconds"] == 42
+    assert ends[2]["protocolOutcome"] == "error"
+    assert ends[3]["method"] == "unknown"
+    assert ends[3]["code"] == "unknown_method"
+    assert ends[4]["outcome"] == "error"
+    assert ends[5]["outcome"] == "cancelled"
 
 
 def test_abrupt_exit_and_concurrent_processes(tmp_path):
@@ -185,13 +195,19 @@ def test_utc_rotation_and_root_byte_limit(tmp_path, monkeypatch):
     history = History(root, keep_days=2, max_bytes=6400, segment_bytes=4096)
     initial = history.call("mcp", "fixture")
     assert history.flush()
+    first_day = root / "mcp-2026-10-01.jsonl"
+    with first_day.open("ab") as stream:
+        stream.write(b'{"incomplete":')
     clock = datetime(2026, 10, 2, 0, 1, tzinfo=timezone.utc)
     initial.finish("ok")
     assert history.flush()
-    assert (root / "mcp-2026-10-01.jsonl").exists()
+    assert len([json.loads(line) for line in first_day.read_text().splitlines()]) == 1
     assert (root / "mcp-2026-10-02.jsonl").exists()
+    assert any(row.get("repairedLines") == 1 for row in read_rows(root))
 
     clock = datetime(2026, 10, 3, 0, 1, tzinfo=timezone.utc)
+    history._prune_expired()
+    assert not first_day.exists()
     for _ in range(40):
         history.call("mcp", "fixture").finish("ok")
         history.call("broker", "fill.observe").finish("not_found")
