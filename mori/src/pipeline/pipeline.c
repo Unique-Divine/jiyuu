@@ -3171,8 +3171,10 @@ static int run_parallel_pipeline(cbm_pipeline_t *p, cbm_pipeline_ctx_t *ctx,
         free(def_modules);
     }
     cbm_pipeline_sync_next_id(p->gbuf, &shared_ids);
-    cbm_pipeline_extract_infra_routes(ctx, p->gbuf, files, cache, file_count);
-    cbm_pipeline_process_infra_bindings(ctx, p->gbuf, files, cache, file_count);
+    if (rc == 0) {
+        cbm_pipeline_extract_infra_routes(ctx, p->gbuf, files, cache, file_count);
+        cbm_pipeline_process_infra_bindings(ctx, p->gbuf, files, cache, file_count);
+    }
     for (int i = 0; i < file_count; i++) {
         if (cache[i]) {
             cbm_free_result(cache[i]);

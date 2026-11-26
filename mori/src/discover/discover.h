@@ -208,8 +208,10 @@ int cbm_discover(const char *repo_path, const cbm_discover_opts_t *opts, cbm_fil
 /* Apply the exact same full discovery/filter policy without retaining a file
  * array. Stops before counting more than max_files. deadline_ms is an
  * absolute cbm_now_ms() deadline. Zero disables it. Returns LIMIT_EXCEEDED
- * when at least max_files + 1 indexable files exist,
- * ERROR on traversal/deadline/allocation failure, or OK with the exact count. */
+ * when the next indexable file would exceed the count or a resource limit,
+ * with *count_out set to the accepted count. Returns ERROR on invalid input,
+ * traversal, deadline, or allocation failure, with *count_out set to -1 if
+ * provided. Returns OK with the exact count. */
 cbm_discover_status_t cbm_discover_count_bounded(const char *repo_path,
                                                  const cbm_discover_opts_t *opts, int max_files,
                                                  uint64_t deadline_ms, int *count_out);
@@ -269,8 +271,9 @@ typedef struct {
     cbm_index_limit_u64_t resource_bytes;
 } cbm_discover_walk_limits_t;
 
-/* The callback runs only for selected source files. On refusal it may fill
- * the diagnostic. A refusal without a resource names the bounded count limit. */
+/* The callback runs only for selected source files. Manifest discovery lends
+ * a diagnostic for resource refusals. Bounded discovery passes NULL and the
+ * Rust callback retains any refusal in its own state. */
 typedef bool (*cbm_discover_admit_fn)(void *state, int64_t size,
                                       cbm_index_resource_violation_t *violation);
 

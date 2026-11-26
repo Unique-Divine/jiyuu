@@ -260,7 +260,48 @@ static bool core_reports_frees(void) {
 #define MEMEV_FREEING(block) ((void)0)
 #endif
 
+void *cbm_result_realloc(void *block, size_t bytes) {
+    return realloc(block, bytes);
+}
+
+char *cbm_result_strdup(const char *text) {
+    return strdup(text);
+}
+
+void cbm_result_free(void *block) {
+    free(block);
+}
+
+#if defined(CBM_MEM_TEST_API) && CBM_MEM_TEST_API
+static _Thread_local bool tl_test_alloc_armed;
+static _Thread_local bool tl_test_alloc_fired;
+static _Thread_local cbm_mem_class_t tl_test_alloc_class;
+static _Thread_local size_t tl_test_alloc_bytes;
+
+void cbm_mem_test_fail_alloc_size(cbm_mem_class_t cls, size_t bytes) {
+    tl_test_alloc_class = cls;
+    tl_test_alloc_bytes = bytes;
+    tl_test_alloc_fired = false;
+    tl_test_alloc_armed = true;
+}
+
+bool cbm_mem_test_reset_alloc_failure(void) {
+    bool fired = tl_test_alloc_fired;
+    tl_test_alloc_armed = false;
+    tl_test_alloc_fired = false;
+    return fired;
+}
+#endif
+
 void *cbm_alloc(cbm_mem_class_t cls, size_t bytes) {
+#if defined(CBM_MEM_TEST_API) && CBM_MEM_TEST_API
+    if (tl_test_alloc_armed && cls == tl_test_alloc_class && bytes == tl_test_alloc_bytes) {
+        tl_test_alloc_armed = false;
+        tl_test_alloc_fired = true;
+        errno = ENOMEM;
+        return NULL;
+    }
+#endif
     MEMEV_HINT(cls);
     void *block = CBM_BACKING_MALLOC(bytes ? bytes : CBM_ALLOC_ONE);
     MEMEV_ALLOCATED(block, bytes, 0);

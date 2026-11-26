@@ -34,7 +34,6 @@ impl Drop for Fixture {
 struct IndexSession {
     root: PathBuf,
     routing_override: Option<&'static str>,
-    rust_manifest: bool,
     seen_logs: HashSet<PathBuf>,
 }
 
@@ -47,7 +46,6 @@ impl IndexSession {
         Self {
             root,
             routing_override,
-            rust_manifest: false,
             seen_logs: HashSet::new(),
         }
     }
@@ -65,9 +63,6 @@ impl IndexSession {
             .env("CBM_LOG_LEVEL", "info");
         if let Some(routing) = self.routing_override {
             command.env("MORI_IMPL_INDEX_ROUTE", routing);
-        }
-        if self.rust_manifest {
-            command.env("MORI_IMPL_INDEX_MANIFEST", "rust");
         }
         command
     }
@@ -199,11 +194,7 @@ impl IndexSession {
         }
         let used_rust = logs
             .contains("msg=incremental.manifest_compare implementation=rust");
-        assert_eq!(
-            used_rust,
-            step.decision.is_some() && self.rust_manifest,
-            "{logs}"
-        );
+        assert_eq!(used_rust, step.decision.is_some(), "{logs}");
 
         let name = output["project"].as_str().unwrap();
         let (generation, routes) = self.state(name);
@@ -484,20 +475,16 @@ fn default_rust_routing_preserves_native_update_paths_and_generation() {
         previous_rust = rust_generation;
     }
 
-    let stopped = rust.command().args(["daemon", "stop"]).output().unwrap();
-    assert!(stopped.status.success(), "{stopped:?}");
-    rust.rust_manifest = true;
     fs::write(
         repo.join("schema.graphqls"),
         "type Query { value: Int another: Int latest: Int }\n",
     )
     .unwrap();
-    let (name, fallback_generation, fallback_routes) =
-        rust.index(&repo, &steps[3]);
+    let (name, next_generation, next_routes) = rust.index(&repo, &steps[3]);
     let (_, _, native_routes) = native.index(&repo, &steps[3]);
-    assert_ne!(fallback_generation, previous_rust);
-    assert_eq!(fallback_routes.len(), 3);
-    assert_eq!(fallback_routes, native_routes);
+    assert_ne!(next_generation, previous_rust);
+    assert_eq!(next_routes.len(), 3);
+    assert_eq!(next_routes, native_routes);
     assert_eq!(rust.graph(&name), native.graph(&name));
 }
 

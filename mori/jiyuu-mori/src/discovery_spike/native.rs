@@ -3,7 +3,8 @@
 mod budget;
 mod selection;
 
-use budget::{Budget, Limits, Violation};
+use crate::abi_rows::write_optional;
+use budget::{BOUNDED_COUNT, Budget, Limits, Violation};
 use selection::{Check, Decision};
 use std::borrow::Cow;
 use std::ffi::{CStr, c_char, c_int, c_long, c_void};
@@ -27,6 +28,11 @@ struct Selection {
 }
 
 #[repr(C)]
+struct Options {
+    _opaque: [u8; 0],
+}
+
+#[repr(C)]
 struct EntryOps {
     admit: unsafe extern "C" fn(*mut c_void, i64, *mut Violation) -> bool,
     select: unsafe extern "C" fn(*const Selection, bool) -> Decision,
@@ -34,7 +40,16 @@ struct EntryOps {
 
 static ENTRY_OPS: EntryOps = EntryOps { admit, select };
 
+type BoundedWalk =
+    unsafe extern "C" fn(*mut Walk, *mut Frame, *mut c_void) -> bool;
+
 unsafe extern "C" {
+    fn cbm_discover_run_bounded(
+        repo: *const c_char,
+        opts: *const Options,
+        run: BoundedWalk,
+        state: *mut c_void,
+    ) -> bool;
     fn cbm_discover_walk_limits(walk: *const Walk, limits: *mut Limits);
     fn cbm_discover_walk_prepare(walk: *mut Walk, frame: *mut Frame) -> bool;
     fn cbm_discover_frame_path(frame: *const Frame) -> *const c_char;
@@ -53,6 +68,86 @@ unsafe extern "C" {
     ) -> c_int;
     fn cbm_now_ms() -> u64;
     fn cbm_max_file_bytes() -> c_long;
+    fn cbm_log(level: c_int, event: *const c_char, ...);
+}
+
+struct WalkState {
+    budget: Budget,
+    refusal: Option<Violation>,
+}
+
+impl WalkState {
+    fn new(limits: Limits) -> Self {
+        Self {
+            budget: Budget::new(limits),
+            refusal: None,
+        }
+    }
+}
+
+// cbm_discover_status_t
+const ERROR: c_int = -1;
+const OK: c_int = 0;
+const LIMIT_EXCEEDED: c_int = 1;
+
+#[unsafe(no_mangle)]
+unsafe extern "C" fn mori_discover_count_bounded(
+    repo: *const c_char,
+    opts: *const Options,
+    limits: *const Limits,
+    violation_out: *mut Violation,
+    count_out: *mut c_int,
+) -> c_int {
+    // SAFETY: The C ABI shim lends initialized limits and the caller's
+    // options and output slots for this synchronous call.
+    unsafe {
+        write_optional(count_out, -1);
+        let limits = limits.read();
+        if repo.is_null() || count_out.is_null() || limits.max_files < 0 {
+            return ERROR;
+        }
+        write_optional(violation_out, Violation::default());
+        let mut state = WalkState::new(limits);
+        let completed = cbm_discover_run_bounded(
+            repo,
+            opts,
+            bounded_walk,
+            std::ptr::from_mut(&mut state).cast(),
+        );
+        let refused = state.refusal.is_some();
+        if let Some(violation) = state.refusal
+            && violation.resource != BOUNDED_COUNT
+        {
+            write_optional(violation_out, violation);
+        }
+        if !completed {
+            return ERROR;
+        }
+        // Admission stops before the count can exceed max_files, a c_int.
+        write_optional(count_out, state.budget.count() as c_int);
+        if refused { LIMIT_EXCEEDED } else { OK }
+    }
+}
+
+unsafe extern "C" fn bounded_walk(
+    walk: *mut Walk,
+    root: *mut Frame,
+    state: *mut c_void,
+) -> bool {
+    const CBM_LOG_DEBUG: c_int = 0;
+    // SAFETY: C lends the prepared walk and frame. State points to the
+    // WalkState passed to cbm_discover_run_bounded above.
+    catch_unwind(|| unsafe {
+        cbm_log(
+            CBM_LOG_DEBUG,
+            c"discover.admission_backend".as_ptr(),
+            c"implementation".as_ptr(),
+            c"rust".as_ptr(),
+            std::ptr::null::<c_char>(),
+        );
+        walk_tree(walk, root, true, &mut *state.cast::<WalkState>())
+    })
+    .unwrap_or(false)
 }
 
 struct Child(NonNull<Frame>);
@@ -74,22 +169,33 @@ pub(super) unsafe extern "C" fn mori_discover_walk(
     catch_unwind(|| unsafe {
         let mut limits = MaybeUninit::uninit();
         cbm_discover_walk_limits(walk, limits.as_mut_ptr());
-        let mut budget = Budget::new(limits.assume_init());
-        let count_only = budget.limits.max_files >= 0;
-        if budget.deadline_expired(|| cbm_now_ms()) {
+        walk_tree(walk, root, false, &mut WalkState::new(limits.assume_init()))
+    })
+    .unwrap_or(false)
+}
+
+unsafe fn walk_tree(
+    walk: *mut Walk,
+    root: *mut Frame,
+    count_only: bool,
+    state: &mut WalkState,
+) -> bool {
+    // SAFETY: Both entry points borrow live native walk and root state.
+    unsafe {
+        if state.budget.deadline_expired(|| cbm_now_ms()) {
             return false;
         }
-        let mut pending: Vec<Child> = Vec::new();
-        if !scan_directory(walk, root, &mut pending, count_only, &mut budget) {
+        let mut pending = Vec::new();
+        if !scan_directory(walk, root, &mut pending, count_only, state) {
             return false;
         }
         // Match the reference order. Scan each parent before visiting its
         // children in reverse discovery order. This fixes the ignore sample.
         while let Some(child) = pending.pop() {
-            if budget.deadline_expired(|| cbm_now_ms()) {
+            if state.budget.deadline_expired(|| cbm_now_ms()) {
                 return false;
             }
-            if cbm_discover_walk_stopped(walk) {
+            if state.refusal.is_some() || cbm_discover_walk_stopped(walk) {
                 break;
             }
             if !scan_directory(
@@ -97,14 +203,13 @@ pub(super) unsafe extern "C" fn mori_discover_walk(
                 child.0.as_ptr(),
                 &mut pending,
                 count_only,
-                &mut budget,
+                state,
             ) {
                 return false;
             }
         }
         true
-    })
-    .unwrap_or(false)
+    }
 }
 
 unsafe fn scan_directory(
@@ -112,7 +217,7 @@ unsafe fn scan_directory(
     frame: *mut Frame,
     pending: &mut Vec<Child>,
     count_only: bool,
-    budget: &mut Budget,
+    state: &mut WalkState,
 ) -> bool {
     // SAFETY: walk and frame are valid for this scan. The path borrows the
     // frame. Native policy copies the name before it returns.
@@ -126,10 +231,10 @@ unsafe fn scan_directory(
             return !count_only;
         };
         loop {
-            if budget.deadline_expired(|| cbm_now_ms()) {
+            if state.budget.deadline_expired(|| cbm_now_ms()) {
                 return false;
             }
-            if cbm_discover_walk_stopped(walk) {
+            if state.refusal.is_some() || cbm_discover_walk_stopped(walk) {
                 break;
             }
             let Some(name) = entries.next_name() else {
@@ -140,7 +245,7 @@ unsafe fn scan_directory(
                 frame,
                 name.as_ptr(),
                 &ENTRY_OPS,
-                std::ptr::from_mut(budget).cast(),
+                std::ptr::from_mut(state).cast(),
             ))
             .map(Child)
             {
@@ -232,13 +337,20 @@ unsafe extern "C" fn admit(
     size: i64,
     violation: *mut Violation,
 ) -> bool {
-    // SAFETY: walk_entry lends a live Budget and a writable diagnostic for
-    // this call. cbm_max_file_bytes returns a positive extraction ceiling.
-    let budget = unsafe { &mut *state.cast::<Budget>() };
-    match budget.admit(size, || unsafe { cbm_max_file_bytes() as u64 }) {
+    // SAFETY: walk_entry lends live state and provides a writable diagnostic
+    // for manifest discovery. The native extraction ceiling is positive.
+    let state = unsafe { &mut *state.cast::<WalkState>() };
+    match state
+        .budget
+        .admit(size, || unsafe { cbm_max_file_bytes() as u64 })
+    {
         Ok(()) => true,
         Err(reason) => {
-            unsafe { violation.write(reason) };
+            if violation.is_null() {
+                state.refusal = Some(reason);
+            } else {
+                unsafe { write_optional(violation, reason) };
+            }
             false
         }
     }

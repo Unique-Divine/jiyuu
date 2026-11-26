@@ -16,6 +16,10 @@ mod admission;
 mod git_excludes;
 mod sphinx;
 
+use crate::discover_results::{
+    FileInfo, IgnoredFile, cbm_discover_free, cbm_discover_free_excluded,
+    cbm_discover_free_ignored,
+};
 use sphinx::Suffixes;
 
 const IGNORED_CAP: usize = 2_000;
@@ -65,21 +69,6 @@ struct ResourceViolation {
     limit: u64,
 }
 
-#[repr(C)]
-struct FileInfo {
-    path: *mut c_char,
-    rel_path: *mut c_char,
-    language: c_int,
-    size: i64,
-    mtime_ns: i64,
-}
-
-#[repr(C)]
-struct IgnoredFile {
-    rel_path: *mut c_char,
-    reason: *mut c_char,
-}
-
 unsafe extern "C" {
     fn cbm_discover_count_bounded(
         repo_path: *const c_char,
@@ -99,9 +88,6 @@ unsafe extern "C" {
         ignored_count: *mut c_int,
         ignored_total: *mut c_int,
     ) -> c_int;
-    fn cbm_discover_free(files: *mut FileInfo, count: c_int);
-    fn cbm_discover_free_excluded(excluded: *mut *mut c_char, count: c_int);
-    fn cbm_discover_free_ignored(ignored: *mut IgnoredFile, count: c_int);
 
     fn cbm_gitignore_load(path: *const c_char) -> *mut c_void;
     fn cbm_gitignore_match_result(
@@ -229,7 +215,7 @@ impl NativeWalk {
                 ignored: items(self.ignored, self.ignored_count)
                     .map(|ptr| {
                         let file = &*ptr;
-                        (c_text(file.rel_path).into(), c_text(file.reason))
+                        (c_text(file.path).into(), c_text(file.reason))
                     })
                     .collect(),
                 ignored_total: self.ignored_total as usize,
@@ -894,6 +880,55 @@ fn admission_reports_resource_limit_details() {
 }
 
 #[test]
+fn admission_publishes_count_and_resets_diagnostic_at_the_abi() {
+    let scratch = Scratch::new();
+    let root = c_path(&scratch.0);
+    let missing = c_path(&scratch.0.join("missing"));
+    let mut violation = ResourceViolation {
+        resource: 1,
+        observed: 2,
+        limit: 1,
+    };
+    let opts = Options {
+        mode: Mode::Full,
+        ignore_file: null(),
+        max_file_size: 0,
+        resource_policy: null(),
+        resource_violation: std::ptr::from_mut(&mut violation).cast(),
+    };
+    let mut count = 42;
+
+    // SAFETY: All non-null arguments refer to live ABI inputs and outputs.
+    unsafe {
+        assert_eq!(
+            cbm_discover_count_bounded(root.as_ptr(), &opts, -1, 0, &mut count),
+            -1
+        );
+        assert_eq!(count, -1);
+        assert_eq!(violation.resource, 1);
+
+        assert_eq!(
+            cbm_discover_count_bounded(
+                missing.as_ptr(),
+                &opts,
+                0,
+                0,
+                &mut count
+            ),
+            -1
+        );
+        assert_eq!(count, -1);
+        assert_eq!(violation, ResourceViolation::default());
+
+        assert_eq!(
+            cbm_discover_count_bounded(root.as_ptr(), null(), 0, 0, &mut count),
+            0
+        );
+        assert_eq!(count, 0);
+    }
+}
+
+#[test]
 fn ordinary_discovery_discards_partial_results_on_resource_refusal() {
     let scratch = Scratch::new();
     let body = "fn entry() {}\n";
@@ -1397,6 +1432,64 @@ fn production_walk_preserves_order_and_the_capped_ignore_sample() {
             .iter()
             .all(|file| !file.path.0.contains(&b'/'))
     );
+}
+
+#[test]
+fn full_discovery_publishes_optional_outputs_through_c_destructors() {
+    let scratch = Scratch::new();
+    let raw = if cfg!(target_os = "linux") {
+        b'\xff'
+    } else {
+        b'x'
+    };
+    let excluded = [b"excluded-".as_slice(), &[raw]].concat();
+    let ignored = [b"ignored-".as_slice(), &[raw], b".rs"].concat();
+    fs::create_dir(scratch.0.join(OsStr::from_bytes(&excluded))).unwrap();
+    fs::write(
+        scratch.0.join(OsStr::from_bytes(&ignored)),
+        b"fn ignored() {}",
+    )
+    .unwrap();
+    scratch.write(
+        ".cbmignore",
+        [&excluded[..], b"/\n", &ignored, b"\n"].concat(),
+    );
+    scratch.write("kept.rs", "fn kept() {}");
+
+    let repo = c_path(&scratch.0);
+    let mut out = NativeWalk::default();
+    // SAFETY: The output slots are live. Leave the excluded count and ignored
+    // array absent. NativeWalk will call the C destructors at the end.
+    let status = unsafe {
+        cbm_discover_ex2(
+            repo.as_ptr(),
+            null(),
+            &mut out.files,
+            &mut out.count,
+            &mut out.excluded,
+            null_mut(),
+            null_mut(),
+            &mut out.ignored_count,
+            &mut out.ignored_total,
+        )
+    };
+    assert_eq!(status, 0);
+    assert!(!out.excluded.is_null());
+    out.excluded_count = 1;
+    let snapshot = out.snapshot();
+    assert_eq!(snapshot.excluded, [RelativePath(excluded.clone())]);
+    assert_eq!(snapshot.files.len(), 1);
+    assert_eq!(snapshot.files[0].path.0, b"kept.rs");
+    assert!(snapshot.ignored.is_empty());
+    assert_eq!(snapshot.ignored_total, 0);
+
+    let complete = NativeWalk::run(&scratch.0, Mode::Full, 0).snapshot();
+    assert_eq!(complete.excluded, [RelativePath(excluded)]);
+    assert_eq!(
+        complete.ignored,
+        [(RelativePath(ignored), b"cbmignore".to_vec())]
+    );
+    assert_eq!(complete.ignored_total, 1);
 }
 
 #[test]

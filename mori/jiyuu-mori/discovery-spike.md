@@ -1,19 +1,30 @@
 # Rust Directory Walk
 
-The C entry points `cbm_discover_ex2` and
-`cbm_discover_count_bounded` call the exported Rust function
-`mori_discover_walk` directly. Mori and the candidate C test runners
-link the same implementation through feature `native-engine-abi`.
-Compare the candidate with the standalone oracle built from `8bdd8fc`.
+The C entry point `cbm_discover_ex2` calls the Rust function
+`mori_discover_collect`, which owns the full result until native setup and the
+walk succeed. The C entry point `cbm_discover_count_bounded` calls the Rust
+function `mori_discover_count_bounded`, which uses the same walker without
+collecting rows. It returns the count, status, and any resource diagnostic.
+Mori and the candidate C test runners link both paths through the
+`native-engine-abi` feature. The standalone reference build is pinned to
+`8bdd8fc20327fcfea4d920138fef77a3b00ca1ef`.
 
 Rust scans a directory before visiting its children in reverse enumeration
 order. It decides which directories to descend into, applies ignore
 precedence and tracked-path exceptions, and checks the bounded count,
 aggregate file and byte limits, and monotonic deadline. C provides the
-ignore rules and tracked paths, performs native metadata and language
-probes, and owns the result arrays. The Windows walker uses the existing
-UTF-8 Win32 enumeration helpers. Path capacity, symlink and reparse-point
-handling, and native mtimes follow the existing C metadata probes.
+ignore rules and tracked paths and performs native metadata and language
+probes. Rust collects raw path bytes, excluded subtrees, and the capped
+ignore sample. The C destructors free the published arrays. The Windows
+walker uses the existing UTF-8 Win32 enumeration helpers. Path capacity,
+symlink and reparse-point handling, and native mtimes follow the existing
+C metadata probes.
+
+Ordinary and frozen semantic manifests use `mori_manifest_build` to own,
+deduplicate, and sort the rows. C supplies the Git and config digests,
+hashes stable file generations, and enumerates repository controls and
+path aliases. Frozen manifest assembly and sorting poll the pipeline
+checkpoint. The manifest destructor continues to free the ABI rows.
 
 Initial discovery, fresh manifest validation, and stored-depth
 rediscovery use the same walker, including when resource limits apply.

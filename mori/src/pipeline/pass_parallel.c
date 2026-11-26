@@ -1748,9 +1748,12 @@ int cbm_parallel_extract_ex(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t *file
     CBM_PROF_START(t_merge);
     int total_nodes = 0;
     int total_errors = 0;
+    bool merge_failed = false;
     for (int i = 0; i < worker_count; i++) {
         if (workers[i].local_gbuf) {
-            cbm_gbuf_merge(ctx->gbuf, workers[i].local_gbuf);
+            if (!merge_failed) {
+                merge_failed = cbm_gbuf_merge(ctx->gbuf, workers[i].local_gbuf) != 0;
+            }
             total_nodes += workers[i].nodes_created;
             total_errors += workers[i].errors;
             cbm_gbuf_free(workers[i].local_gbuf);
@@ -1791,6 +1794,10 @@ int cbm_parallel_extract_ex(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t *file
     }
     if (atomic_load(&ec.over_budget_abort)) {
         return CBM_PIPELINE_ABORT_OVER_BUDGET;
+    }
+    if (merge_failed) {
+        cbm_log_error("pipeline.err", "phase", "extract_merge");
+        return CBM_PIPELINE_ABORT_PRESERVE_DB;
     }
     if (atomic_load(ctx->cancelled)) {
         return CBM_NOT_FOUND;
@@ -4870,9 +4877,12 @@ int cbm_parallel_resolve(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t *files, 
     int total_usages = 0;
     int total_semantic = 0;
     int total_lsp_overrides = 0;
+    bool merge_failed = false;
     for (int i = 0; i < worker_count; i++) {
         if (workers[i].local_edge_buf) {
-            cbm_gbuf_merge(ctx->gbuf, workers[i].local_edge_buf);
+            if (!merge_failed) {
+                merge_failed = cbm_gbuf_merge(ctx->gbuf, workers[i].local_edge_buf) != 0;
+            }
             total_calls += workers[i].calls_resolved;
             total_usages += workers[i].usages_resolved;
             total_semantic += workers[i].semantic_resolved;
@@ -4887,6 +4897,10 @@ int cbm_parallel_resolve(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t *files, 
 
     if (atomic_load(&ctx->test_declarations_failed)) {
         cbm_log_error("pipeline.err", "phase", "test_declarations_resolve");
+        return CBM_PIPELINE_ABORT_PRESERVE_DB;
+    }
+    if (merge_failed) {
+        cbm_log_error("pipeline.err", "phase", "resolve_merge");
         return CBM_PIPELINE_ABORT_PRESERVE_DB;
     }
 
