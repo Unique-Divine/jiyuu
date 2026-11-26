@@ -2453,6 +2453,11 @@ fn three_match_default_dispatch_matches_both_c_evaluators() {
     const BOUND_PAIR: &str = "MATCH (a:ThreeStart)-[:CALLS]->(hub:ThreeHub)
         MATCH (hub)-[:STEP]->(m:ThreeMiddle)
         MATCH (a)-[t:CALLS]->(hub) RETURN m.name, t.line";
+    const SECOND_CLAUSE_ANCHOR: &str =
+        "MATCH (a:ThreeStart)-[:CALLS]->(hub:ThreeHub)
+        MATCH (hub)-[:STEP]->(m:ThreeMiddle)
+        MATCH (m)-[:PUBLISH]->(leaf:ThreeLeaf)
+        RETURN leaf.name ORDER BY leaf.name";
     const FALLBACK: &str = "MATCH (a:ThreeStart)-[:CALLS]->(hub:ThreeHub)
         MATCH (hub)-[:STEP]->(m:ThreeMiddle) MATCH (leaf:ThreeLeaf)
         RETURN leaf.name ORDER BY leaf.name LIMIT 1";
@@ -2473,6 +2478,9 @@ fn three_match_default_dispatch_matches_both_c_evaluators() {
     for (name, rank) in [("zulu", 2), ("alpha", 1), ("ignored", 0)] {
         let leaf = add_node("ThreeLeaf", name, name);
         edge(&db, CLIENT, leaf, hub, "FINISH", json!({"rank": rank}));
+        if name == "alpha" {
+            edge(&db, CLIENT, middle, leaf, "PUBLISH", json!({}));
+        }
     }
     drop(db);
     fixture.stop_query_daemon(Path::new(MORI));
@@ -2511,6 +2519,7 @@ fn three_match_default_dispatch_matches_both_c_evaluators() {
             (BOUND_PAIR, true),
             (FALLBACK, false),
             (tied.as_str(), true),
+            (SECOND_CLAUSE_ANCHOR, true),
         ] {
             pages.push(query(
                 json!({"project":CLIENT,"query":cypher,"format":"json"}),
@@ -2543,6 +2552,7 @@ fn three_match_default_dispatch_matches_both_c_evaluators() {
     assert_eq!(page(5)["rows"], json!([["middle", "10"], ["middle", "10"]]));
     assert_eq!(page(6)["rows"], json!([["alpha"]]));
     assert_eq!(page(7)["rows"], json!([zulu, alpha, zulu]));
+    assert_eq!(page(8)["rows"], json!([["alpha"], ["alpha"]]));
 }
 
 #[test]

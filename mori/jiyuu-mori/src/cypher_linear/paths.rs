@@ -865,6 +865,12 @@ mod tests {
 
     #[test]
     fn mandatory_joins_outside_connected_fixed_hops_use_c() {
+        assert!(
+            classify(
+                "MATCH (a)-[]->(b) MATCH (b)-[]->(c) MATCH (c)-[]->(d) RETURN d.name"
+            )
+            .is_ok()
+        );
         for pattern in [
             "MATCH (a)-[:CALLS]->(b) MATCH (c)-[:CALLS]->(d)",
             "MATCH (a)-[:CALLS]->() MATCH (c)-[:CALLS]->()",
@@ -874,15 +880,15 @@ mod tests {
             "MATCH (a)-[:CALLS]->(b) MATCH (b)",
             "MATCH (a)-[:CALLS]->(b)-[:CALLS]->(c) MATCH (c)-[:CALLS]->(d)",
             "MATCH (a)-[:CALLS]->(b) MATCH (b)-[:CALLS]->(c)-[:CALLS]->(d)",
-            "MATCH (a)-->(b) MATCH (b)-->(c) MATCH (d)-->(e)",
-            "MATCH (a)-->(b) MATCH (c)-->(d) MATCH (b)-->(c)",
-            "MATCH (a)-->(b) MATCH (b)-->(c) MATCH (c)-[:CALLS*1]->(d)",
-            "MATCH (a)-->(b) MATCH (b)-->(c) MATCH (c)-->(d)-->(e)",
-            "MATCH (a)-->(b) MATCH (b)-->(c) MATCH (c)",
-            "MATCH (a)-->(b) MATCH (b)-->(c) MATCH (c)-->(d) MATCH (d)-->(e)",
-            "MATCH (a)--> (b) MATCH (b)-->() MATCH ()-->(d)",
+            "MATCH (a)-[]->(b) MATCH (b)-[]->(c) MATCH (d)-[]->(e)",
+            "MATCH (a)-[]->(b) MATCH (c)-[]->(d) MATCH (b)-[]->(c)",
+            "MATCH (a)-[]->(b) MATCH (b)-[]->(c) MATCH (c)-[:CALLS*1]->(d)",
+            "MATCH (a)-[]->(b) MATCH (b)-[]->(c) MATCH (c)-[]->(d)-[]->(e)",
+            "MATCH (a)-[]->(b) MATCH (b)-[]->(c) MATCH (c)",
+            "MATCH (a)-[]->(b) MATCH (b)-[]->(c) MATCH (c)-[]->(d) MATCH (d)-[]->(e)",
+            "MATCH (a)-[]-> (b) MATCH (b)-[]->() MATCH ()-[]->(d)",
             "MATCH (a)-[r:CALLS]->(b) MATCH (b)-[r:CALLS]->(c)",
-            "MATCH (a)-[r:CALLS]->(b) MATCH (b)-->(c) MATCH (c)-[r:CALLS]->(d)",
+            "MATCH (a)-[r:CALLS]->(b) MATCH (b)-[]->(c) MATCH (c)-[r:CALLS]->(d)",
         ] {
             let source = format!("{pattern} RETURN a.name");
             assert_eq!(
@@ -893,7 +899,7 @@ mod tests {
         }
         assert_eq!(
             classify(
-                "MATCH (a)-->(b) MATCH (b)-->(c) RETURN c.name LIMIT 100001"
+                "MATCH (a)-[]->(b) MATCH (b)-[]->(c) RETURN c.name LIMIT 100001"
             )
             .unwrap_err(),
             ParseError::Unsupported,
@@ -919,6 +925,30 @@ mod tests {
              RETURN leaf.name LIMIT 1",
         )
         .unwrap();
+        assert_eq!(
+            query.execute_on(&db, "p").unwrap().rows,
+            [[b"two".to_vec()]]
+        );
+
+        // The last edge reaches a node that raises a SQLite read error. The
+        // unindexed edge scan reads it after the valid low-ID edges, before
+        // the walker emits a row or performs its final cancellation check.
+        db.execute_batch(
+            "INSERT INTO nodes VALUES
+                (4, 'p', 'Tail', 'bad', 'bad', '', 1, 2, '{}');
+             INSERT INTO edges VALUES (1101, 'p', 1, 4, 'LAST', '{}');
+             CREATE TEMP VIEW nodes AS
+             SELECT id, project, label, name, qualified_name, file_path, start_line, end_line,
+                    CASE WHEN id = 4 THEN abs(-9223372036854775808) ELSE properties END AS properties
+             FROM main.nodes;",
+        )
+        .unwrap();
+        assert!(matches!(
+            query.execute_on(&db, "p"),
+            Err(ExecutionError::Storage(rusqlite::Error::SqliteFailure(_, Some(message))))
+                if message == "integer overflow"
+        ));
+
         let polls = Cell::new(0);
         let cancelled = || {
             polls.set(polls.get() + 1);
@@ -929,10 +959,7 @@ mod tests {
             query.execute_with_budget(&db, "p", &mut budget),
             Err(ExecutionError::Cancelled)
         ));
-        assert_eq!(
-            query.execute_on(&db, "p").unwrap().rows,
-            [[b"two".to_vec()]]
-        );
+        assert_eq!(polls.get(), 2);
     }
 
     #[test]
