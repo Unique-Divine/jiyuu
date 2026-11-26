@@ -3244,7 +3244,8 @@ TEST(probe_ansible_files_import_what_they_name) {
 /* Every Resource a Terraform block DEPLOYS as "<block> DEPLOYS <name>
  * <obj_key> v=<version>", then "terraform resources <n>": the Resources
  * marked ecosystem terraform, then each INFRA_MAPS edge into one of them as
- * "<label>:<name> INFRA_MAPS <name>". */
+ * "<label>:<name> INFRA_MAPS <name>". Count the file's DEFINES edges and the
+ * release's chart and rendered image in the same index run. */
 static char *gpf_tf_k8s(const GpfFile *files, int nfiles) {
     GpfProj lp;
     cbm_store_t *store = gpf_index_files(&lp, files, nfiles);
@@ -3263,7 +3264,18 @@ static char *gpf_tf_k8s(const GpfFile *files, int nfiles) {
             "coalesce((SELECT group_concat(y, '') FROM (SELECT char(10) || s.label || ':' || s.name "
             "|| ' INFRA_MAPS ' || t.name AS y FROM edges e JOIN nodes s ON s.id=e.source_id JOIN "
             "nodes t ON t.id=e.target_id WHERE e.project=?1 AND e.type='INFRA_MAPS' AND "
-            "json_extract(t.properties,'$.ecosystem')='terraform' ORDER BY y)), '')";
+            "json_extract(t.properties,'$.ecosystem')='terraform' ORDER BY y)), '') || char(10) || "
+            "'terraform definitions ' || (SELECT COUNT(*) FROM edges e JOIN nodes s ON "
+            "s.id=e.source_id JOIN nodes t ON t.id=e.target_id WHERE e.project=?1 AND "
+            "e.type='DEFINES' AND s.label='File' AND s.file_path='k8s/main.tf' AND "
+            "json_extract(t.properties,'$.ecosystem')='terraform') || char(10) || "
+            "'terraform release ' || coalesce((SELECT group_concat(x, ', ') FROM ("
+            "SELECT t.label || ':' || CASE WHEN t.label='Chart' THEN t.file_path "
+            "ELSE json_extract(e.properties,'$.image') END AS x FROM edges e JOIN nodes s ON "
+            "s.id=e.source_id JOIN nodes t ON t.id=e.target_id WHERE e.project=?1 AND "
+            "s.name='resource.helm_release.app' AND e.type='DEPLOYS' AND "
+            "json_extract(e.properties,'$.via')='terraform' AND t.label IN ('Chart','Image') "
+            "ORDER BY x)), '')";
         if (sqlite3_prepare_v2(cbm_store_get_db(store), sql, -1, &st, NULL) == SQLITE_OK) {
             sqlite3_bind_text(st, 1, lp.project, -1, SQLITE_STATIC);
             if (sqlite3_step(st) == SQLITE_ROW) {
@@ -3284,7 +3296,10 @@ static char *gpf_tf_k8s(const GpfFile *files, int nfiles) {
  * a cluster-scoped kind's obj_key says `_`. A
  * computed name, and a type acting on an object declared elsewhere
  * (kubernetes_annotations), make none. A manifest of the same bundle
- * references it like a manifest's object: the Ingress maps to the Service. */
+ * references it like a manifest's object: the Ingress maps to the Service.
+ * That join needs Terraform objects before reference resolution. The Helm
+ * release needs the chart defaults before its own values can render an image,
+ * and its release record must be queued before chart releases are linked. */
 TEST(probe_terraform_kubernetes_objects_are_resources) {
     static const GpfFile files[] = {
         {"k8s/main.tf",
@@ -3306,12 +3321,20 @@ TEST(probe_terraform_kubernetes_objects_are_resources) {
          "    namespace = \"apps\"\n  }\n}\n"
          "resource \"kubernetes_service_v1\" \"web\" {\n  metadata {\n    name      = \"web\"\n"
          "    namespace = \"apps\"\n  }\n}\n"
-         "variable \"name\" {}\n"},
+         "variable \"name\" {}\n"
+         "resource \"helm_release\" \"app\" {\n  name = \"app\"\n  chart = \"../charts/app\"\n"
+         "  set {\n    name = \"image.tag\"\n    value = \"7.7\"\n  }\n}\n"},
         {"k8s/ingress.yaml",
          "apiVersion: networking.k8s.io/v1\nkind: Ingress\nmetadata:\n  name: web\n"
          "  namespace: apps\nspec:\n  rules:\n    - http:\n        paths:\n          - path: /\n"
          "            pathType: Prefix\n            backend:\n              service:\n"
-         "                name: web\n                port:\n                  number: 80\n"}};
+         "                name: web\n                port:\n                  number: 80\n"},
+        {"charts/app/Chart.yaml", "apiVersion: v2\nname: app\nversion: 1.0.0\n"},
+        {"charts/app/values.yaml", "image:\n  repository: ghcr.io/acme/app\n  tag: \"1.0\"\n"},
+        {"charts/app/templates/deploy.yaml",
+         "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: app\nspec:\n  template:\n"
+         "    spec:\n      containers:\n        - name: app\n"
+         "          image: \"{{ .Values.image.repository }}:{{ .Values.image.tag }}\"\n"}};
     int n = (int)(sizeof(files) / sizeof(files[0]));
     char *got = gpf_tf_k8s(files, n);
     static const char want[] =
@@ -3326,7 +3349,9 @@ TEST(probe_terraform_kubernetes_objects_are_resources) {
         "resource.kubernetes_service_v1.web DEPLOYS Service/web core/Service/apps/web v=-\n"
         "terraform resources 6\n"
         "Resource:Ingress/web INFRA_MAPS Service/web\n"
-        "Route:*/ INFRA_MAPS Service/web";
+        "Route:*/ INFRA_MAPS Service/web\n"
+        "terraform definitions 6\n"
+        "terraform release Chart:charts/app/Chart.yaml, Image:ghcr.io/acme/app:7.7";
     if (!got || strcmp(got, want) != 0) {
         fprintf(stderr, "terraform k8s got:\n%s\nwant:\n%s\n", got ? got : "(null)", want);
         free(got);
