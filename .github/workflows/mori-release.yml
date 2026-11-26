@@ -313,28 +313,28 @@ jobs:
             | tee "$scratch/query.json"
           jq -e '.warning | contains("variable-length hop range clamped")' "$scratch/query.json"
           grep -F 'msg=query_graph.evaluator backend=rust' "$CBM_CACHE_DIR/logs/cbm-daemon.log"
-      - name: Build pinned C binary for CLI parity
+      - name: Identify the frozen C release reference
+        id: c-oracle
         env:
-          C_REFERENCE_SHA: 8bdd8fc20327fcfea4d920138fef77a3b00ca1ef
+          MORI_WITH_UI: "1"
+          MORI_REFERENCE_VERSION: ${{ needs.validate.outputs.version }}
         run: |
-          set -euo pipefail
-          reference_dir="$(mktemp -d "$RUNNER_TEMP/mori-c-reference.XXXXXX")"
-          trap 'rm -rf "$reference_dir"' EXIT
-          git -C "$reference_dir" init --quiet
-          git -C "$reference_dir" fetch --quiet --depth=1 --no-tags \
-            https://github.com/Unique-Divine/jiyuu.git "$C_REFERENCE_SHA"
-          git -C "$reference_dir" checkout --quiet --detach FETCH_HEAD
-          test "$(git -C "$reference_dir" rev-parse HEAD)" = "$C_REFERENCE_SHA"
-          echo "C CLI reference commit $C_REFERENCE_SHA"
-          cd "$reference_dir/mori"
-          bun scripts/grammars-fetch.ts
-
-          # CLI parity compares --version, so report the candidate version.
-          export CFLAGS_EXTRA="-DCBM_VERSION=\"\\\"$VERSION\\\"\""
-          make -f Makefile.cbm -j"$(getconf _NPROCESSORS_ONLN)" cbm-with-ui \
-            BUILD_DIR=build/release-reference CC="$CC" CXX="$CXX" \
-            MEMWASTE=0 MEMWASTE_ACCESS=0 MEMWASTE_PROFILE=0 TEST_COVERAGE=0
-          cp build/release-reference/codebase-memory-mcp "$C_BIN"
+          key="$(python3 scripts/c_reference_cache.py key "$RUST_TARGET")"
+          printf 'key=%s\n' "$key" >> "$GITHUB_OUTPUT"
+      - name: Cache the frozen C release reference
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/mori-release-c-reference
+          key: mori-c-reference-${{ steps.c-oracle.outputs.key }}
+      - name: Verify or build the frozen C release reference
+        env:
+          MORI_WITH_UI: "1"
+          MORI_REFERENCE_VERSION: ${{ needs.validate.outputs.version }}
+        run: |
+          MORI_MAKE_JOBS="$(getconf _NPROCESSORS_ONLN)"
+          export MORI_MAKE_JOBS
+          python3 scripts/c_reference_cache.py ensure "$RUST_TARGET" "$RUNNER_TEMP/mori-release-c-reference"
+          cp "$RUNNER_TEMP/mori-release-c-reference/codebase-memory-mcp" "$C_BIN"
       - name: CLI parity with codebase-memory-mcp
         run: bun scripts/cli-parity.ts --mori "$BIN" --c "$C_BIN"
       # 0.13.1 had no Intel macOS archive. All targets run the smoke tests
