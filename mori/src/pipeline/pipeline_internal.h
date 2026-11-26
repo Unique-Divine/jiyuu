@@ -1799,6 +1799,7 @@ int cbm_pipeline_build_semantic_manifest(const cbm_pipeline_t *p, const char *pr
                                          const cbm_userconfig_t *userconfig, cbm_file_hash_t **out,
                                          int *out_count);
 void cbm_pipeline_free_semantic_manifest(cbm_file_hash_t *manifest, int count);
+void cbm_pipeline_mark_semantic_manifest_written(const cbm_file_hash_t *manifest, size_t count);
 bool cbm_pipeline_semantic_manifests_equal(const cbm_file_hash_t *left, int left_count,
                                            const cbm_file_hash_t *right, int right_count);
 

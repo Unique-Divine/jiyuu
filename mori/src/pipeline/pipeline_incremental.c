@@ -35,6 +35,7 @@ enum { INCR_RING_BUF = 4, INCR_RING_MASK = 3, INCR_TS_BUF = 24 };
 #include "foundation/compat_thread.h"
 #include "foundation/limits.h" /* cbm_max_file_bytes */
 #include "foundation/platform.h"
+#include "foundation/sanitized.h"
 #include "foundation/sha256.h"
 #include "result_spill.h"
 
@@ -159,6 +160,22 @@ typedef struct {
     mori_manifest_t *rows;
     cbm_pipeline_t *frozen; /* optional cooperative frozen checkpoint */
 } semantic_manifest_builder_t;
+
+void cbm_pipeline_mark_semantic_manifest_written(const cbm_file_hash_t *manifest, size_t count) {
+#if __has_feature(memory_sanitizer)
+    for (size_t i = 0; i < count; i++) {
+        const cbm_file_hash_t *row = &manifest[i];
+        CBM_MSAN_WRITTEN(&row->project, sizeof(row->project));
+        CBM_MSAN_WRITTEN(&row->rel_path, sizeof(row->rel_path));
+        CBM_MSAN_WRITTEN(&row->sha256, sizeof(row->sha256));
+        CBM_MSAN_WRITTEN(&row->mtime_ns, sizeof(row->mtime_ns));
+        CBM_MSAN_WRITTEN(&row->size, sizeof(row->size));
+    }
+#else
+    (void)manifest;
+    (void)count;
+#endif
+}
 
 static bool semantic_manifest_is_virtual_path(const char *rel_path) {
     return rel_path &&

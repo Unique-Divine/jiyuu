@@ -114,6 +114,10 @@ type Collect = unsafe extern "C" fn(*mut c_void, *mut c_void) -> c_int;
 
 unsafe extern "C" {
     fn cbm_pipeline_free_semantic_manifest(rows: *mut FileHash, count: c_int);
+    fn cbm_pipeline_mark_semantic_manifest_written(
+        rows: *const FileHash,
+        count: usize,
+    );
     fn cbm_pipeline_frozen_checkpoint(pipeline: *mut c_void) -> c_int;
 }
 
@@ -137,12 +141,21 @@ unsafe extern "C" fn mori_manifest_build(
         return status;
     }
     let rows = manifest.rows.as_mut_slice();
-    if frozen.is_null() {
+    let complete = if frozen.is_null() {
         rows.sort_unstable_by(path_order);
-    } else if !sort_frozen(rows, || {
-        // SAFETY: The C caller retains the frozen pipeline until we return.
-        unsafe { cbm_pipeline_frozen_checkpoint(frozen) != 0 }
-    }) {
+        true
+    } else {
+        sort_frozen(rows, || {
+            // SAFETY: The C caller retains the frozen pipeline until we return.
+            unsafe { cbm_pipeline_frozen_checkpoint(frozen) != 0 }
+        })
+    };
+    // SAFETY: Both sorts only move initialized rows, even when cancelled.
+    // C reads the fields when consuming or freeing the manifest.
+    unsafe {
+        cbm_pipeline_mark_semantic_manifest_written(rows.as_ptr(), rows.len())
+    };
+    if !complete {
         return ERROR;
     }
 
