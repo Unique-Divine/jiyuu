@@ -47,6 +47,8 @@ mod shell_pass;
 #[cfg(any(feature = "native-engine-abi", test))]
 mod similarity;
 #[cfg(any(feature = "native-engine-abi", test))]
+mod snippet_window;
+#[cfg(any(feature = "native-engine-abi", test))]
 mod swift_package_map;
 #[cfg(feature = "native-engine-abi")]
 mod terraform;
