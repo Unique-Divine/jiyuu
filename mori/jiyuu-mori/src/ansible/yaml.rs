@@ -4,6 +4,11 @@ use std::ffi::{CStr, c_char, c_void};
 use std::marker::PhantomData;
 use std::ptr::{self, NonNull};
 
+use crate::native_parser::{
+    RawLanguage, RawParser, RawTree, ts_parser_delete, ts_parser_new,
+    ts_parser_parse_string, ts_parser_set_language, ts_tree_delete,
+};
+
 pub(super) const SCANNER_PADDING: usize = 16;
 
 #[repr(C)]
@@ -21,20 +26,7 @@ struct Point {
 }
 
 unsafe extern "C" {
-    fn ts_parser_new() -> *mut c_void;
-    fn ts_parser_delete(parser: *mut c_void);
-    fn ts_parser_set_language(
-        parser: *mut c_void,
-        language: *const c_void,
-    ) -> bool;
-    fn ts_parser_parse_string(
-        parser: *mut c_void,
-        old_tree: *const c_void,
-        source: *const c_char,
-        len: u32,
-    ) -> *mut c_void;
-    fn ts_tree_delete(tree: *mut c_void);
-    fn ts_tree_root_node(tree: *const c_void) -> RawNode;
+    fn ts_tree_root_node(tree: *const RawTree) -> RawNode;
     fn ts_node_type(node: RawNode) -> *const c_char;
     fn ts_node_parent(node: RawNode) -> RawNode;
     fn ts_node_named_child(node: RawNode, index: u32) -> RawNode;
@@ -50,11 +42,11 @@ unsafe extern "C" {
     fn ts_node_end_point(node: RawNode) -> Point;
 }
 
-pub(super) struct Parser(NonNull<c_void>);
+pub(super) struct Parser(NonNull<RawParser>);
 
 impl Parser {
     /// The language pointer must be a live Tree-sitter language.
-    pub(super) unsafe fn new(language: *const c_void) -> Option<Self> {
+    pub(super) unsafe fn new(language: *const RawLanguage) -> Option<Self> {
         let parser = Self(NonNull::new(unsafe { ts_parser_new() })?);
         unsafe { ts_parser_set_language(parser.0.as_ptr(), language) }
             .then_some(parser)
@@ -87,7 +79,7 @@ impl Drop for Parser {
 }
 
 pub(super) struct Document {
-    tree: NonNull<c_void>,
+    tree: NonNull<RawTree>,
     source: Vec<u8>,
 }
 

@@ -30,6 +30,8 @@ mod msbuild_condition;
 mod native_graph_buffer;
 #[cfg(feature = "native-engine-abi")]
 mod native_hash_table;
+#[cfg(feature = "native-engine-abi")]
+mod native_parser;
 #[cfg(any(feature = "native-engine-abi", test))]
 mod operator_helm;
 #[cfg(feature = "native-engine-abi")]

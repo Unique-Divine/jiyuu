@@ -957,7 +957,7 @@ unsafe extern "C" fn cbm_rust_ansible_run(
     if count <= 0 || run.cancelled() {
         return false;
     }
-    let Some(mut parser) = (unsafe { Parser::new(language) }) else {
+    let Some(mut parser) = (unsafe { Parser::new(language.cast()) }) else {
         return false;
     };
     let mut sources = Vec::new();

@@ -373,25 +373,16 @@ unsafe extern "C" fn cbm_rust_tf_k8s_records(
 #[cfg(all(test, feature = "c-backend"))]
 mod tests {
     use super::*;
+    use crate::native_parser::{
+        RawLanguage, RawTree, ts_parser_delete, ts_parser_new,
+        ts_parser_parse_string, ts_parser_set_language, ts_tree_delete,
+    };
 
     // Link the vendored runtime and pinned HCL grammar. No pipeline state is
     // needed to exercise the same callback the index run will use.
     unsafe extern "C" {
-        fn tree_sitter_hcl() -> *const c_void;
-        fn ts_parser_new() -> *mut c_void;
-        fn ts_parser_set_language(
-            parser: *mut c_void,
-            language: *const c_void,
-        ) -> bool;
-        fn ts_parser_parse_string(
-            parser: *mut c_void,
-            old_tree: *const c_void,
-            source: *const u8,
-            len: u32,
-        ) -> *mut c_void;
-        fn ts_parser_delete(parser: *mut c_void);
-        fn ts_tree_root_node(tree: *const c_void) -> TsNode;
-        fn ts_tree_delete(tree: *mut c_void);
+        fn tree_sitter_hcl() -> *const RawLanguage;
+        fn ts_tree_root_node(tree: *const RawTree) -> TsNode;
     }
 
     #[derive(Debug, PartialEq)]
@@ -430,7 +421,7 @@ mod tests {
             let tree = ts_parser_parse_string(
                 parser,
                 std::ptr::null(),
-                source.as_ptr(),
+                source.as_ptr().cast(),
                 source.len().try_into().unwrap(),
             );
             assert!(!tree.is_null());
