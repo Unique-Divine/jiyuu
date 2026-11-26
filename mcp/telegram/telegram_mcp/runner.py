@@ -8,7 +8,7 @@ except UnsafeInstallationError as exc:
     raise SystemExit(str(exc)) from None
 
 from telegram_mcp import runtime as _runtime
-from telegram_mcp import server_info
+from telegram_mcp import call_history, server_info
 from telegram_mcp.runtime import *
 import telegram_mcp.tools  # noqa: F401 - registers MCP tools via decorators
 
@@ -78,6 +78,7 @@ def main() -> None:
     # Read the latest release in the background; the first tool result after
     # it lands carries a one-line notice if this version is behind.
     server_info.update_notifier().start()
+    call_history.configure(version=server_info.current_identity().version, transport="stdio")
     nest_asyncio.apply()
     asyncio.run(_main())
 
