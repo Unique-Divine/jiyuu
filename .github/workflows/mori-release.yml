@@ -18,7 +18,7 @@ on:
         type: boolean
         default: false
       daily_check:
-        description: Run the four cold daily checks on main without filing issues
+        description: Run the four daily checks on main without filing issues
         type: boolean
         default: false
 
