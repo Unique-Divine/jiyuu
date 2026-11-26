@@ -20,6 +20,7 @@
 #include "foundation/hash_table.h"
 #include "foundation/log.h"
 #include "foundation/mem_core.h"
+#include "foundation/path_syntax_internal.h"
 #include "foundation/platform.h"
 #include "foundation/str_util.h"
 #include "foundation/win_utf8.h"

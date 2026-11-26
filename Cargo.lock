@@ -1473,6 +1473,7 @@ name = "jiyuu-mori"
 version = "0.14.0-dev"
 dependencies = [
  "libc",
+ "mori-native-sys",
  "rusqlite",
  "serde",
  "serde_json",
@@ -1603,6 +1604,13 @@ dependencies = [
  "libc",
  "wasi",
  "windows-sys",
+]
+
+[[package]]
+name = "mori-native-sys"
+version = "0.14.0-dev"
+dependencies = [
+ "serde_json",
 ]
 
 [[package]]
