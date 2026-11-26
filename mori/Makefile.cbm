@@ -51,8 +51,9 @@ TS_INCLUDE = $(CBM_DIR)/vendored/ts_runtime/include
 TS_SRC = $(CBM_DIR)/vendored/ts_runtime/src
 
 # GCC-only warning suppressions (Clang rejects unknown -Wno-* with -Werror).
-# Detect GCC by checking for __GNUC__ without __clang__ — handles all versions.
-IS_GCC := $(shell echo | $(CC) -dM -E - 2>/dev/null | grep -q '__GNUC__' && ! echo | $(CC) -dM -E - 2>/dev/null | grep -q '__clang__' && echo yes || echo no)
+# Clang defines __GNUC__ as well, so check its own macro first.
+IS_CLANG := $(shell echo | $(CC) -dM -E - 2>/dev/null | grep -q '__clang__' && echo yes || echo no)
+IS_GCC := $(if $(filter yes,$(IS_CLANG)),no,$(shell echo | $(CC) -dM -E - 2>/dev/null | grep -q '__GNUC__' && echo yes || echo no))
 GCC_ONLY_FLAGS :=
 ifeq ($(IS_GCC),yes)
 GCC_ONLY_FLAGS := -Wno-format-truncation -Wno-unused-result \
@@ -1272,6 +1273,9 @@ TEST_RUNNER_TEST_OBJS := $(call test-runner-objects,$(ALL_TEST_SRCS))
 TEST_RUNNER_PROD_OBJS := $(call test-runner-objects,$(PROD_SRCS))
 TEST_RUNNER_EXTRACT_OBJS := $(call test-runner-objects,$(EXTRACTION_SRCS) $(AC_LZ4_SRCS) $(ZSTD_SRCS) $(SQLITE_WRITER_SRC))
 TEST_RUNNER_OBJS := $(TEST_RUNNER_TEST_OBJS) $(TEST_RUNNER_PROD_OBJS) $(TEST_RUNNER_EXTRACT_OBJS)
+# Both stages receive the original driver flags. Clang treats a flag intended
+# for the other stage as unused when it sees only sources or only objects.
+TEST_RUNNER_DRIVER_FLAGS = $(CFLAGS_TEST) -Itests -Itests/repro $(if $(filter yes,$(IS_CLANG)),-Qunused-arguments)
 TEST_RUNNER_CONFIG = $(BUILD_DIR)/.test-build-config
 TEST_RUNNER_CONFIG_SIG := CC=$(CC)|CXX=$(CXX)|CFLAGS_TEST=$(CFLAGS_TEST)|CXXFLAGS_TEST=$(CXXFLAGS_TEST)|\
                           LDFLAGS_TEST=$(LDFLAGS_TEST)|NATIVE_LIBS=$(NATIVE_ENGINE_TEST_SYSTEM_LIBS)|\
@@ -1281,6 +1285,7 @@ TEST_RUNNER_CONFIG_SIG := CC=$(CC)|CXX=$(CXX)|CFLAGS_TEST=$(CFLAGS_TEST)|CXXFLAG
 # Reuse the same directory for the documented SANITIZE= repeat without
 # retaining any vendor instrumentation built for the previous settings.
 # The shared assembly data blob is built without sanitizer flags.
+$(OBJS_VENDORED_TEST): Makefile.cbm
 $(filter-out $(UNIXCODER_OBJ),$(OBJS_VENDORED_TEST)): $(TEST_RUNNER_CONFIG)
 
 .PHONY: test-build-config-check
@@ -1290,9 +1295,9 @@ $(TEST_RUNNER_CONFIG): test-build-config-check | $(BUILD_DIR)
 	@if cmp -s $@.tmp $@; then rm -f $@.tmp; else mv -f $@.tmp $@; fi
 
 # Publish the object only after its dependency file.
-$(TEST_RUNNER_OBJS): $(TEST_RUNNER_DIR)/%.o: %.c $(TEST_RUNNER_CONFIG) | $(BUILD_DIR)
+$(TEST_RUNNER_OBJS): $(TEST_RUNNER_DIR)/%.o: %.c Makefile.cbm $(TEST_RUNNER_CONFIG) | $(BUILD_DIR)
 	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS_TEST) -Itests -Itests/repro -MMD -MP -MQ $@ -MF $(@:.o=.d).tmp -c -o $@.tmp $<
+	$(CC) $(TEST_RUNNER_DRIVER_FLAGS) -MMD -MP -MQ $@ -MF $(@:.o=.d).tmp -c -o $@.tmp $<
 	@rm -f $@
 	@mv -f $(@:.o=.d).tmp $(@:.o=.d)
 	@mv -f $@.tmp $@
@@ -1320,7 +1325,7 @@ endif
 
 $(BUILD_DIR)/test-runner: $(TEST_RUNNER_OBJS) $(OBJS_VENDORED_TEST) $(NATIVE_ENGINE_TEST_ARCHIVE) Makefile.cbm | $(BUILD_DIR)
 	$(test-runner-link-inputs)
-	$(CC) -g $(filter -fprofile-instr-generate%,$(TEST_COVERAGE_FLAGS)) -o $@ \
+	$(CC) $(TEST_RUNNER_DRIVER_FLAGS) -o $@ \
 		$(TEST_RUNNER_LINK_INPUTS) \
 		$(LDFLAGS_TEST) $(NATIVE_ENGINE_TEST_SYSTEM_LIBS)
 

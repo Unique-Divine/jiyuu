@@ -26,6 +26,18 @@ TARGETS=(
 
 cd "$ROOT"
 
+# The config stamps check their settings on every build. Exclude them from these
+# probes so the exit code measures only file dependencies.
+make_query=(make -f Makefile.cbm -q -o "$BUILD_DIR/.test-build-config"
+            -o "$BUILD_DIR/.build-config" "BUILD_DIR=$BUILD_DIR")
+for target in "${TARGETS[@]}"; do
+    touch "$target"
+    if ! "${make_query[@]}" "$target"; then
+        echo "FAIL: $target should be current before changing any dependency"
+        exit 1
+    fi
+done
+
 for dependency in "${DEPENDENCIES[@]}"; do
     if [[ ! -f "$dependency" ]]; then
         echo "FAIL: expected tree-sitter runtime dependency is missing: $dependency"
@@ -39,8 +51,7 @@ for dependency in "${DEPENDENCIES[@]}"; do
         touch "$target"
 
         status=0
-        make -f Makefile.cbm -q -W "$dependency" \
-            BUILD_DIR="$BUILD_DIR" "$target" || status=$?
+        "${make_query[@]}" -W "$dependency" "$target" || status=$?
 
         if [[ $status -eq 0 ]]; then
             echo "FAIL: $target would stay stale after changing $dependency"
