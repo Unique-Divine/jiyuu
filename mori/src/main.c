@@ -33,7 +33,6 @@
 #include "daemon/version_cohort.h"
 #include "mcp/mcp.h"
 #include "mcp/index_supervisor.h"
-#include "mcp/test_impact_engine.h"
 #include "cli/cli.h"
 #include "cli/runtime_settings.h"
 #include "foundation/platform.h"
@@ -1337,6 +1336,8 @@ void cbm_linked_startup_print_help(void) {
 }
 #endif
 
+extern int cbm_rust_test_impact_cli(int argc, char **argv, FILE *out, FILE *err);
+
 static int handle_subcommand(int argc, char **argv, cbm_project_lock_manager_t *project_locks,
                              main_local_maintenance_context_t *maintenance_context) {
     main_enable_requested_profile(argc, argv);
@@ -1362,7 +1363,7 @@ static int handle_subcommand(int argc, char **argv, cbm_project_lock_manager_t *
         return cbm_cmd_hook_augment(argc, argv);
     case MAIN_SUBCOMMAND_TEST_IMPACT:
         cbm_mem_init(cbm_mem_ram_fraction_for_total(cbm_system_info().total_ram));
-        return cbm_test_impact_cli(argc, argv);
+        return cbm_rust_test_impact_cli(argc, argv, stdout, stderr);
     case MAIN_SUBCOMMAND_INSTALL:
         return cbm_cmd_install(argc, argv);
     case MAIN_SUBCOMMAND_UNINSTALL:

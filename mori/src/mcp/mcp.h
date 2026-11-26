@@ -503,8 +503,6 @@ char *mori_snippet_captured_source(const cbm_mcp_snippet_window_t *window, bool 
                                   const uint8_t *bytes, size_t len);
 char *mori_snippet_source_text(const char *source);
 void mori_snippet_free_source(char *source);
-int mori_snippet_source_line_count(const char *source);
-size_t mori_snippet_source_prefix_len(const uint8_t *source, size_t len, int lines);
 
 typedef bool (*cbm_mcp_ingest_trace_normalizer_fn)(const char *const *hops, size_t hop_count,
                                                    int64_t *count);
