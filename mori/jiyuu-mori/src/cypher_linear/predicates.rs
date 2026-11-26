@@ -818,29 +818,39 @@ mod tests {
 
     #[test]
     fn where_scans_long_chains_and_bounds_nesting() {
-        let clause = "n.name = 'one' OR ".repeat(4096);
-        assert_rows(
-            &fixture(),
-            &format!("MATCH (n) WHERE {clause} n.name = 'five' RETURN n.name"),
-            &["one", "five"],
-        );
-        for depth in [MAX_DEPTH, MAX_DEPTH + 1] {
-            for (open, close) in [("(", ")"), ("NOT ", "")] {
-                let source = format!(
-                    "MATCH (n) WHERE {}n.name = 'one'{} RETURN n.name",
-                    open.repeat(depth),
-                    close.repeat(depth),
+        // Match the native worker stack for recursion-heavy debug builds.
+        std::thread::Builder::new()
+            .stack_size(8 * 1024 * 1024)
+            .spawn(|| {
+                let clause = "n.name = 'one' OR ".repeat(4096);
+                assert_rows(
+                    &fixture(),
+                    &format!(
+                        "MATCH (n) WHERE {clause} n.name = 'five' RETURN n.name"
+                    ),
+                    &["one", "five"],
                 );
-                if depth == MAX_DEPTH {
-                    assert!(classify(&source).is_ok());
-                } else {
-                    assert_eq!(
-                        classify(&source).unwrap_err(),
-                        ParseError::Depth
-                    );
+                for depth in [MAX_DEPTH, MAX_DEPTH + 1] {
+                    for (open, close) in [("(", ")"), ("NOT ", "")] {
+                        let source = format!(
+                            "MATCH (n) WHERE {}n.name = 'one'{} RETURN n.name",
+                            open.repeat(depth),
+                            close.repeat(depth),
+                        );
+                        if depth == MAX_DEPTH {
+                            assert!(classify(&source).is_ok());
+                        } else {
+                            assert_eq!(
+                                classify(&source).unwrap_err(),
+                                ParseError::Depth
+                            );
+                        }
+                    }
                 }
-            }
-        }
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 
     #[test]

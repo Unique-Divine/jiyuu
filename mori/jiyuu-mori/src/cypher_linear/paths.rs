@@ -217,6 +217,10 @@ impl<'a> Plan<'a> {
         })
     }
 
+    pub(super) fn has_ranged_hops(&self) -> bool {
+        self.ranged
+    }
+
     pub(super) fn into_optional(self) -> Result<Option<Self>, Unsupported> {
         if self.first_optional
             || self.clauses.iter().any(|clause| clause.optional)
@@ -233,23 +237,33 @@ impl<'a> Plan<'a> {
             };
         }
 
-        // Widen mandatory MATCH only to a pair of fixed single hops joined
-        // on a written node alias. The C evaluator still handles cross joins.
-        let [clause] = self.clauses.as_slice() else {
-            return Err(Unsupported);
-        };
-        let [tail] = clause.tails.as_slice() else {
-            return Err(Unsupported);
-        };
-        let shared = |endpoint: &Endpoint<'_>| {
-            endpoint.pattern.named && self.first_slots.contains(&endpoint.slot)
-        };
+        // Each mandatory single hop must attach to a written node alias
+        // from the preceding binding, which includes every earlier clause.
         if self.ranged
-            || clause.first_edge != 1
+            || self.clauses.len() > 2
+            || self.clauses[0].first_edge != 1
             || !self.unique_first_bindings()
-            || !(shared(&clause.head) || shared(tail))
         {
             return Err(Unsupported);
+        }
+        let mut bound = [false; NODE_SLOTS];
+        for &slot in &self.first_slots {
+            bound[slot] = true;
+        }
+        for clause in &self.clauses {
+            let [tail] = clause.tails.as_slice() else {
+                return Err(Unsupported);
+            };
+            let endpoints = [&clause.head, tail];
+            if !endpoints
+                .iter()
+                .any(|node| node.pattern.named && bound[node.slot])
+            {
+                return Err(Unsupported);
+            }
+            for node in endpoints {
+                bound[node.slot] = true;
+            }
         }
         Ok(Some(self))
     }
@@ -561,6 +575,7 @@ impl<'plan, 'query, 'db> Walk<'plan, 'query, 'db> {
              node: &Node,
              edge: Option<&Edge>,
              budget: &mut ExecutionBudget<'_>| {
+                budget.step()?;
                 if bound.is_none_or(|id| id == node.id)
                     && target.matches(node, this.context)
                 {
@@ -854,7 +869,13 @@ mod tests {
     }
 
     #[test]
-    fn mandatory_joins_outside_two_connected_fixed_hops_use_c() {
+    fn mandatory_joins_outside_connected_fixed_hops_use_c() {
+        assert!(
+            classify(
+                "MATCH (a)-[]->(b) MATCH (b)-[]->(c) MATCH (c)-[]->(d) RETURN d.name"
+            )
+            .is_ok()
+        );
         for pattern in [
             "MATCH (a)-[:CALLS]->(b) MATCH (c)-[:CALLS]->(d)",
             "MATCH (a)-[:CALLS]->() MATCH (c)-[:CALLS]->()",
@@ -864,8 +885,15 @@ mod tests {
             "MATCH (a)-[:CALLS]->(b) MATCH (b)",
             "MATCH (a)-[:CALLS]->(b)-[:CALLS]->(c) MATCH (c)-[:CALLS]->(d)",
             "MATCH (a)-[:CALLS]->(b) MATCH (b)-[:CALLS]->(c)-[:CALLS]->(d)",
-            "MATCH (a)-[:CALLS]->(b) MATCH (b)-[:CALLS]->(c) MATCH (c)-[:CALLS]->(d)",
+            "MATCH (a)-[]->(b) MATCH (b)-[]->(c) MATCH (d)-[]->(e)",
+            "MATCH (a)-[]->(b) MATCH (c)-[]->(d) MATCH (b)-[]->(c)",
+            "MATCH (a)-[]->(b) MATCH (b)-[]->(c) MATCH (c)-[:CALLS*1]->(d)",
+            "MATCH (a)-[]->(b) MATCH (b)-[]->(c) MATCH (c)-[]->(d)-[]->(e)",
+            "MATCH (a)-[]->(b) MATCH (b)-[]->(c) MATCH (c)",
+            "MATCH (a)-[]->(b) MATCH (b)-[]->(c) MATCH (c)-[]->(d) MATCH (d)-[]->(e)",
+            "MATCH (a)-[]-> (b) MATCH (b)-[]->() MATCH ()-[]->(d)",
             "MATCH (a)-[r:CALLS]->(b) MATCH (b)-[r:CALLS]->(c)",
+            "MATCH (a)-[r:CALLS]->(b) MATCH (b)-[]->(c) MATCH (c)-[r:CALLS]->(d)",
         ] {
             let source = format!("{pattern} RETURN a.name");
             assert_eq!(
@@ -876,11 +904,145 @@ mod tests {
         }
         assert_eq!(
             classify(
-                "MATCH (a)-->(b) MATCH (b)-->(c) RETURN c.name LIMIT 100001"
+                "MATCH (a)-[]->(b) MATCH (b)-[]->(c) RETURN c.name LIMIT 100001"
             )
             .unwrap_err(),
             ParseError::Unsupported,
         );
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    fn three_match_replay_meters_rejected_neighbors_after_overflow() {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch(GRAPH).unwrap();
+        db.execute_batch(
+            "INSERT INTO nodes VALUES
+                (4, 'p', 'Leaf', 'one', 'a', '', 1, 2, '{}'),
+                (5, 'p', 'Leaf', 'two', 'b', '', 1, 2, '{}'),
+                (6, 'p', 'Leaf', 'three', 'c', '', 1, 2, '{}'),
+                (7, 'p', 'Rejected', 'ignored', 'd', '', 1, 2, '{}');
+             INSERT INTO edges VALUES
+                (2, 'p', 3, 2, 'NEXT', '{}'),
+                (3, 'p', 2, 4, 'LAST', '{}'),
+                (4, 'p', 2, 5, 'LAST', '{}'),
+                (5, 'p', 2, 6, 'LAST', '{}');",
+        )
+        .unwrap();
+        let query = classify(
+            "MATCH (s:Start)-[:CALLS]->(hub)
+             MATCH (hub)-[:NEXT]->(middle)
+             MATCH (middle)-[:LAST]->(leaf:Leaf)
+             RETURN leaf.name, count(*) AS total ORDER BY leaf.name LIMIT 1",
+        )
+        .unwrap();
+        let now = Instant::now();
+        let clock = || now;
+        let remaining_steps = || {
+            let mut budget = ExecutionBudget::new(&clock, &|| false);
+            budget.set_ordered_count_group_limit_for_tests(2);
+            let result =
+                query.execute_with_budget(&db, "p", &mut budget).unwrap();
+            assert_eq!(result.rows, [[b"one".to_vec(), b"1".to_vec()]]);
+            budget.ordered_count_replay.unwrap().remaining_steps
+        };
+        let before = remaining_steps();
+        const REJECTED: usize = 16;
+        for id in 6..6 + REJECTED as i64 {
+            db.execute(
+                "INSERT INTO edges VALUES (?1, 'p', 2, 7, 'LAST', '{}')",
+                [id],
+            )
+            .unwrap();
+        }
+        // The suffix has already been loaded when the first scan overflows.
+        // Loading it on the second scan alone costs only REJECTED steps.
+        assert!(before - remaining_steps() >= 2 * REJECTED);
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    fn ranged_count_hands_off_at_first_overflow() {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch(GRAPH).unwrap();
+        db.execute_batch(
+            "INSERT INTO nodes VALUES
+                (4, 'p', 'Target', 'four', 'four', '', 1, 2, '{}'),
+                (5, 'p', 'Target', 'five', 'five', '', 1, 2, '{}');
+             INSERT INTO edges VALUES
+                (2, 'p', 1, 4, 'CALLS', '{}'),
+                (3, 'p', 1, 5, 'CALLS', '{}');",
+        )
+        .unwrap();
+        let query = classify(
+            "MATCH (s:Start)-[:CALLS*1..2]->(leaf:Target)
+             RETURN leaf.name, count(*) AS total ORDER BY leaf.name LIMIT 1",
+        )
+        .unwrap();
+        let mut budget = ExecutionBudget::new(&Instant::now, &|| false);
+        budget.set_ordered_count_group_limit_for_tests(2);
+        assert!(matches!(
+            query.execute_with_budget(&db, "p", &mut budget),
+            Err(ExecutionError::Unsupported)
+        ));
+        assert!(budget.ordered_count_replay.is_none());
+        assert!(db.is_autocommit());
+    }
+
+    #[test]
+    fn three_match_cancellation_interrupts_the_final_adjacency_scan() {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch(GRAPH).unwrap();
+        db.execute_batch(
+            "INSERT INTO edges VALUES (2, 'p', 3, 1, 'NEXT', '{}');
+             WITH RECURSIVE ids(i) AS (
+                 SELECT 3 UNION ALL SELECT i + 1 FROM ids WHERE i < 1100
+             )
+             INSERT INTO edges SELECT i, 'p', 1, 2, 'LAST', '{}' FROM ids;",
+        )
+        .unwrap();
+        let query = classify(
+            "MATCH (s:Start)-[:CALLS]->(hub)
+             MATCH (hub)-[:NEXT]->(again)
+             MATCH (again)-[:LAST]->(leaf)
+             RETURN leaf.name LIMIT 1",
+        )
+        .unwrap();
+        assert_eq!(
+            query.execute_on(&db, "p").unwrap().rows,
+            [[b"two".to_vec()]]
+        );
+
+        // The last edge reaches a node that raises a SQLite read error. The
+        // unindexed edge scan reads it after the valid low-ID edges, before
+        // the walker emits a row or performs its final cancellation check.
+        db.execute_batch(
+            "INSERT INTO nodes VALUES
+                (4, 'p', 'Tail', 'bad', 'bad', '', 1, 2, '{}');
+             INSERT INTO edges VALUES (1101, 'p', 1, 4, 'LAST', '{}');
+             CREATE TEMP VIEW nodes AS
+             SELECT id, project, label, name, qualified_name, file_path, start_line, end_line,
+                    CASE WHEN id = 4 THEN abs(-9223372036854775808) ELSE properties END AS properties
+             FROM main.nodes;",
+        )
+        .unwrap();
+        assert!(matches!(
+            query.execute_on(&db, "p"),
+            Err(ExecutionError::Storage(rusqlite::Error::SqliteFailure(_, Some(message))))
+                if message == "integer overflow"
+        ));
+
+        let polls = Cell::new(0);
+        let cancelled = || {
+            polls.set(polls.get() + 1);
+            polls.get() == 2
+        };
+        let mut budget = ExecutionBudget::new(&Instant::now, &cancelled);
+        assert!(matches!(
+            query.execute_with_budget(&db, "p", &mut budget),
+            Err(ExecutionError::Cancelled)
+        ));
+        assert_eq!(polls.get(), 2);
     }
 
     #[test]

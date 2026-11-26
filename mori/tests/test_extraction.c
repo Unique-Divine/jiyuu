@@ -7,6 +7,7 @@
  */
 #include "test_framework.h"
 #include "cbm.h"
+#include "doclink.h"
 #include "foundation/platform.h"
 #include "foundation/constants.h"     /* CBM_SZ_* */
 #include "preprocessor.h"             /* cbm_export_macro_candidates (#1989) */
@@ -6982,6 +6983,54 @@ TEST(markdown_heading_content) {
     ASSERT(has_def(r, "Section", "Prerequisites"));
     ASSERT(has_def(r, "Section", "Setup"));
     cbm_free_result(r);
+    PASS();
+}
+
+TEST(markdown_segment_allocation_failure_keeps_reference_owner) {
+    enum { LONG_TITLE = 1024, RESULT_CAPACITY = 512 };
+    static const char tail[] = "\n\n## Shared title\n\nSee `src/ledger.py::balance`.\n\n"
+                               "# B\n\n## Shared title\n";
+    char source[2 + LONG_TITLE + sizeof(tail)] = "# ";
+    memset(source + 2, 'a', LONG_TITLE);
+    memcpy(source + 2 + LONG_TITLE, tail, sizeof(tail));
+    TSParser *parser = ts_parser_new();
+    ASSERT_NOT_NULL(parser);
+    ASSERT_TRUE(ts_parser_set_language(parser, cbm_ts_language(CBM_LANG_MARKDOWN)));
+    TSTree *tree = ts_parser_parse_string(parser, NULL, source, sizeof(source) - 1);
+    ts_parser_delete(parser);
+    ASSERT_NOT_NULL(tree);
+
+    CBMDefinition defs[4] = {0};
+    CBMFileResult result = {.defs = {.items = defs, .cap = 4}};
+    cbm_arena_init_exact(&result.arena, RESULT_CAPACITY);
+    CBMExtractCtx ctx = {
+        .arena = &result.arena, .result = &result, .root = ts_tree_root_node(tree),
+        .language = CBM_LANG_MARKDOWN, .source = source, .source_len = sizeof(source) - 1,
+        .rel_path = "doc.md", .project = "t", .module_qn = "t.doc",
+    };
+    /* The long parent qualifies the first Shared title, but the combined
+     * segment will not fit. Disable growth only during section emission. */
+    int blocks = result.arena.nblocks;
+    result.arena.nblocks = CBM_ARENA_MAX_BLOCKS;
+    cbm_extract_definitions_without_module(&ctx);
+    result.arena.nblocks = blocks;
+    cbm_doclink_md_scan_file(&ctx);
+
+    bool has_section = false;
+    for (int i = 0; i < result.defs.count; i++) {
+        const char *qn = defs[i].qualified_name;
+        has_section |= qn && strcmp(qn, "t.doc.Shared title") == 0;
+    }
+    bool owns_reference = false;
+    for (int i = 0; i < result.doc_links.count; i++) {
+        const CBMDocLink *link = &result.doc_links.items[i];
+        owns_reference |= link->source_qn && strcmp(link->source_qn, "t.doc.Shared title") == 0 &&
+                          strcmp(link->raw, "src/ledger.py::balance") == 0;
+    }
+    cbm_arena_destroy(&result.arena);
+    ts_tree_delete(tree);
+    ASSERT_TRUE(has_section);
+    ASSERT_TRUE(owns_reference);
     PASS();
 }
 
@@ -16235,6 +16284,7 @@ SUITE(extraction) {
     RUN_TEST(markdown_atx_headings);
     RUN_TEST(markdown_setext_headings);
     RUN_TEST(markdown_heading_content);
+    RUN_TEST(markdown_segment_allocation_failure_keeps_reference_owner);
     RUN_TEST(markdown_no_headings);
 
     /* __init__.py / index.ts Module QN collision regression */

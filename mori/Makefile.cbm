@@ -453,6 +453,7 @@ LSP_UNITY_DEPS = $(CBM_DIR)/lsp_all.c \
 TS_RUNTIME_SRC = $(CBM_DIR)/ts_runtime.c
 TS_RUNTIME_DEPS = \
 	$(TS_RUNTIME_SRC) \
+	$(CBM_DIR)/native_tree_ffi.h src/foundation/sanitized.h \
 	$(wildcard $(CBM_DIR)/vendored/ts_runtime/include/tree_sitter/*.h) \
 	$(wildcard $(CBM_DIR)/vendored/ts_runtime/src/*.c) \
 	$(wildcard $(CBM_DIR)/vendored/ts_runtime/src/*.h) \

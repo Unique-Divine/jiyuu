@@ -286,11 +286,6 @@ pub unsafe extern "C" fn main(argc: c_int, argv: *mut *mut c_char) -> c_int {
         {
             jiyuu_mori::mori_register_rust_use_imports();
         }
-        if std::env::var_os("MORI_IMPL_MARKDOWN_EXTRACT").as_deref()
-            == Some(OsStr::new("rust"))
-        {
-            jiyuu_mori::mori_register_markdown_extractor();
-        }
         #[cfg(unix)]
         jiyuu_mori::mori_register_staged_graph_writer();
         c_transport::register();
