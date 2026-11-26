@@ -1,5 +1,9 @@
 //! Rust implementations and registration for the C graph engine.
 
+// Attach the dependency's native linker inputs without exporting it in our API.
+#[cfg(feature = "c-backend")]
+extern crate mori_native_sys as _;
+
 pub mod ipc;
 
 #[cfg(feature = "native-engine-abi")]

@@ -20,7 +20,7 @@ path = "src/main.rs"
 # default so `cargo test --workspace` and the pure-Rust CI job build without
 # the C toolchain or the 1.3 GB grammar tree. Without it, `mori` only reports
 # that it was built without the C backend.
-c-backend = ["native-engine-abi"]
+c-backend = ["native-engine-abi", "dep:mori-native-sys"]
 # Native C binaries link these exports without re-entering Make from Cargo.
 native-engine-abi = [
     "graphql-callbacks",
@@ -37,6 +37,7 @@ native-graphql-fixtures = ["native-engine-abi"]
 native-engine-test-seams = ["native-graphql-fixtures"]
 
 [dependencies]
+mori-native-sys = { path = "../mori-native-sys", features = ["link-native"], optional = true }
 libc = { version = "0.2", optional = true }
 # The whole-archive link of libmori-c supplies every SQLite symbol before the
 # linker considers rusqlite's bundled archive. Keep the bundled feature so
@@ -57,9 +58,6 @@ windows-sys = { version = "0.61", optional = true, features = [
     "Win32_Storage_FileSystem",
     "Win32_System_Threading",
 ] }
-
-[build-dependencies]
-serde_json = "1.0.151"
 
 [dev-dependencies]
 serde = { version = "1", features = ["derive"] }

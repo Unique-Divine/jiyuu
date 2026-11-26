@@ -4,6 +4,7 @@ members = [
   "gh-rev",
   "jiyuu-abi",
   "mori/jiyuu-mori",
+  "mori/mori-native-sys",
   "tmux-agent-watch",
 ]
 resolver = "3"
