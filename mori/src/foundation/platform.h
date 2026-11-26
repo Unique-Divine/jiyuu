@@ -17,6 +17,12 @@
 
 /* ── Safe memory ──────────────────────────────────────────────── */
 
+/* Keep Rust-assembled result rows in the same allocator domain as the C
+ * destructors, including builds using linker allocator wrappers. */
+void *cbm_result_realloc(void *block, size_t bytes);
+char *cbm_result_strdup(const char *text);
+void cbm_result_free(void *block);
+
 /* Safe realloc: frees old pointer on failure instead of leaking it.
  * Returns NULL on allocation failure (old memory is freed). */
 static inline void *safe_realloc(void *ptr, size_t size) {

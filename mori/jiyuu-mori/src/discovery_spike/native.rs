@@ -3,6 +3,7 @@
 mod budget;
 mod selection;
 
+use crate::abi_rows::write_optional;
 use budget::{BOUNDED_COUNT, Budget, Limits, Violation};
 use selection::{Check, Decision};
 use std::borrow::Cow;
@@ -100,16 +101,12 @@ unsafe extern "C" fn mori_discover_count_bounded(
     // SAFETY: The C ABI shim lends initialized limits and the caller's
     // options and output slots for this synchronous call.
     unsafe {
-        if !count_out.is_null() {
-            count_out.write(-1);
-        }
+        write_optional(count_out, -1);
         let limits = limits.read();
         if repo.is_null() || count_out.is_null() || limits.max_files < 0 {
             return ERROR;
         }
-        if !violation_out.is_null() {
-            violation_out.write(Violation::default());
-        }
+        write_optional(violation_out, Violation::default());
         let mut state = WalkState::new(limits);
         let completed = cbm_discover_run_bounded(
             repo,
@@ -120,15 +117,14 @@ unsafe extern "C" fn mori_discover_count_bounded(
         let refused = state.refusal.is_some();
         if let Some(violation) = state.refusal
             && violation.resource != BOUNDED_COUNT
-            && !violation_out.is_null()
         {
-            violation_out.write(violation);
+            write_optional(violation_out, violation);
         }
         if !completed {
             return ERROR;
         }
         // Admission stops before the count can exceed max_files, a c_int.
-        count_out.write(state.budget.count() as c_int);
+        write_optional(count_out, state.budget.count() as c_int);
         if refused { LIMIT_EXCEEDED } else { OK }
     }
 }
@@ -353,7 +349,7 @@ unsafe extern "C" fn admit(
             if violation.is_null() {
                 state.refusal = Some(reason);
             } else {
-                unsafe { violation.write(reason) };
+                unsafe { write_optional(violation, reason) };
             }
             false
         }

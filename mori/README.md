@@ -475,8 +475,7 @@ selects no-op, closure repair, full rebuild, or fatal failure. The
 
 Set `MORI_IMPL_INDEX_ROUTE=c` before starting the daemon to use the C
 selector. C owns the proofs and executes the selected route with either
-selector. Set `MORI_IMPL_INDEX_MANIFEST=rust` to select the Rust exact
-manifest comparison independently.
+selector. Both routes compare the semantic manifest in Rust.
 
 ### Full-Build Scheduling
 

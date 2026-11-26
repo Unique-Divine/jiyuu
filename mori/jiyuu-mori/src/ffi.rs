@@ -291,7 +291,6 @@ pub unsafe extern "C" fn main(argc: c_int, argv: *mut *mut c_char) -> c_int {
         c_transport::register();
         crate::repair_recovery::register();
         crate::named_watch::register();
-        crate::index_manifest::register();
         crate::index_route::register();
         if std::env::var_os("MORI_IMPL_TS_STATIC_IMPORTS").as_deref()
             == Some(OsStr::new("rust"))
