@@ -193,6 +193,34 @@ Errors are not covered yet. Most are plain text, such as `Error: ...` or
 `An error occurred (code: ...)`, and some repeat caller input, such as an
 invalid ID. Rate limits and timeouts return a JSON object under key `error`.
 
+## Inspect Tool Call History
+
+On Linux and macOS, the server appends metadata for each `tools/call` to
+`$BOKU_HOME/telegram-mcp/logs`. If `BOKU_HOME` is unset, the base directory
+is `~/.boku`. Files are partitioned by UTC day as `mcp-YYYY-MM-DD.jsonl`
+and may have a numbered segment suffix. The server keeps up to 30 UTC days
+and 100 MiB of history per log directory.
+
+`call.start` and `call.end` share a `requestId`. Each record has a schema
+version, UTC timestamp, process run ID, and sequence number. The end record
+includes duration, the MCP outcome, and a typed failure code when available.
+A resolved Telegram account appears as `accountId`, or as `accountIds`
+when a tool uses more than one account. Tool payloads and exception text
+stay out of the history.
+
+To inspect a call and any linked requests by ID, run:
+
+```sh
+find "${BOKU_HOME:-$HOME/.boku}/telegram-mcp/logs" -maxdepth 1 -type f \
+  -name '*.jsonl' -exec jq -c --arg id REQUEST_ID \
+  'select(.requestId == $id or .parentId == $id or .event == "log.gap")' {} +
+```
+
+History is diagnostic. Queue pressure and disk failures can lose records.
+The next successful write reports known gaps. A process crash can leave a
+call without an end record or drop queued records. A missing record cannot
+establish whether Telegram performed an operation.
+
 ## Develop and Troubleshoot
 
 ```sh
