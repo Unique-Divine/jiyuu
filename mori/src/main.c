@@ -1306,14 +1306,40 @@ typedef enum {
 
 extern main_subcommand_t cbm_rust_main_subcommand(int argc, char *const argv[], int *next_arg);
 
-static int handle_subcommand(int argc, char **argv, cbm_project_lock_manager_t *project_locks,
-                             main_local_maintenance_context_t *maintenance_context) {
+static void main_init_diagnostics(bool quiet_by_default, bool worker) {
+    cbm_cli_set_version(CBM_VERSION);
+    cbm_profile_init();
+    cbm_log_init_for_process(quiet_by_default, worker);
+}
+
+static void main_enable_requested_profile(int argc, char **argv) {
     /* Apply --profile even when it follows the selected command. */
     for (int i = SKIP_ONE; i < argc; i++) {
         if (strcmp(argv[i], "--profile") == 0) {
             cbm_profile_enable();
         }
     }
+}
+
+#ifdef CBM_AS_LIBRARY
+/* Called only for the informational role, before any database or parser use. */
+const char *cbm_linked_startup_prepare_info(int argc, char **argv);
+const char *cbm_linked_startup_prepare_info(int argc, char **argv) {
+    cbm_alloc_init();
+    main_init_diagnostics(true, false);
+    main_enable_requested_profile(argc, argv);
+    return CBM_VERSION;
+}
+
+void cbm_linked_startup_print_help(void);
+void cbm_linked_startup_print_help(void) {
+    print_help();
+}
+#endif
+
+static int handle_subcommand(int argc, char **argv, cbm_project_lock_manager_t *project_locks,
+                             main_local_maintenance_context_t *maintenance_context) {
+    main_enable_requested_profile(argc, argv);
     int next_arg;
     main_subcommand_t subcommand = cbm_rust_main_subcommand(argc, argv, &next_arg);
     argc -= next_arg;
@@ -2879,8 +2905,6 @@ int main(int argc, char **argv) {
             return EXIT_FAILURE;
         }
     }
-    cbm_cli_set_version(CBM_VERSION);
-    cbm_profile_init();
     /* The library default stays INFO (embedders and the test runner observe
      * INFO records through the sink); the process policy is applied here, as
      * early as argv can be classified: thin frontends go quiet, detached
@@ -2888,7 +2912,7 @@ int main(int argc, char **argv) {
      * INFO because those records are their supervisor's quiet-timeout
      * heartbeat. */
     bool quiet_log_default = role != CBM_DAEMON_PROCESS_DAEMON && role != CBM_DAEMON_PROCESS_WORKER;
-    cbm_log_init_for_process(quiet_log_default, role == CBM_DAEMON_PROCESS_WORKER);
+    main_init_diagnostics(quiet_log_default, role == CBM_DAEMON_PROCESS_WORKER);
     if (role == CBM_DAEMON_PROCESS_LOCAL_CLI && main_cli_flag_present(argc, argv, "--quiet")) {
         /* Apply quiet before local coordination begins, not only once tool
          * dispatch is reached, so pre-dispatch WARN chatter is suppressed. */
