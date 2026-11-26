@@ -135,13 +135,9 @@ fn worker_args_exact<'a>(mut args: impl Iterator<Item = &'a [u8]>) -> bool {
     flags.next().is_none()
 }
 
-#[unsafe(no_mangle)]
-unsafe extern "C" fn cbm_daemon_process_role(
-    argc: c_int,
-    argv: *const *mut c_char,
+fn process_role<'a>(
+    mut args: impl Iterator<Item = &'a [u8]> + Clone,
 ) -> ProcessRole {
-    // SAFETY: C passes a live argv vector or NULL.
-    let mut args = unsafe { argv_bytes(argc, argv) };
     if args.next().is_none_or(<[u8]>::is_empty) {
         return ProcessRole::Invalid;
     }
@@ -189,6 +185,44 @@ unsafe extern "C" fn cbm_daemon_process_role(
     ProcessRole::McpClient
 }
 
+fn select_subcommand<'a>(
+    args: impl Iterator<Item = &'a [u8]>,
+) -> Option<(usize, Subcommand)> {
+    args.skip(1).enumerate().find_map(|(index, arg)| {
+        let command = Subcommand::parse(arg);
+        (!matches!(command, Subcommand::None)).then_some((index + 2, command))
+    })
+}
+
+/// The informational commands dispatched directly by the linked product.
+#[derive(Debug, PartialEq, Eq)]
+pub enum InformationalCommand {
+    Version,
+    Help,
+}
+
+/// Select an informational command using the same role and subcommand rules
+/// as the native entry point.
+pub fn informational_command<'a>(
+    args: impl Iterator<Item = &'a [u8]> + Clone,
+) -> Option<InformationalCommand> {
+    let command = match select_subcommand(args.clone())?.1 {
+        Subcommand::Version => InformationalCommand::Version,
+        Subcommand::Help => InformationalCommand::Help,
+        _ => return None,
+    };
+    matches!(process_role(args), ProcessRole::Stateless).then_some(command)
+}
+
+#[unsafe(no_mangle)]
+unsafe extern "C" fn cbm_daemon_process_role(
+    argc: c_int,
+    argv: *const *mut c_char,
+) -> ProcessRole {
+    // SAFETY: C passes a live argv vector or NULL.
+    process_role(unsafe { argv_bytes(argc, argv) })
+}
+
 #[unsafe(no_mangle)]
 unsafe extern "C" fn cbm_rust_main_subcommand(
     argc: c_int,
@@ -197,15 +231,46 @@ unsafe extern "C" fn cbm_rust_main_subcommand(
 ) -> Subcommand {
     // SAFETY: C passes a live argv vector or NULL.
     let args = unsafe { argv_bytes(argc, argv) };
-    for (index, arg) in (1..argc).zip(args.skip(1)) {
-        let command = Subcommand::parse(arg);
-        if !matches!(command, Subcommand::None) {
-            // SAFETY: C supplies a writable int slot for the argument offset.
-            unsafe { next_arg.write(index + 1) };
-            return command;
+    let (offset, command) = select_subcommand(args)
+        .map_or((argc, Subcommand::None), |(offset, command)| {
+            (offset as c_int, command)
+        });
+    // SAFETY: C supplies a writable int slot for the argument offset. The
+    // selected offset is bounded by argc.
+    unsafe { next_arg.write(offset) };
+    command
+}
+
+#[cfg(test)]
+mod tests {
+    use super::InformationalCommand::{Help, Version};
+    use super::informational_command;
+
+    #[test]
+    fn informational_dispatch_respects_role_and_command_precedence() {
+        let cases: &[(&[&[u8]], _)] = &[
+            (&[b"mori", b"--profile", b"--help", b"cli"], Some(Help)),
+            (&[b"mori", b"--version", b"--help"], Some(Version)),
+            (&[b"mori", b"\xff", b"-h"], Some(Help)),
+            (
+                &[b"mori", b"daemon", b"--version", b"--help"],
+                Some(Version),
+            ),
+            (&[b"mori", b"daemon", b"--help"], Some(Help)),
+            (&[b"mori", b"daemon", b"--version"], None),
+            (&[b"mori", b"config", b"--help"], None),
+            (&[b"mori", b"cli", b"list_projects", b"--help"], None),
+            (&[b"mori", b"allow-root", b"--help"], None),
+            (&[b"mori", b"--help", b"--index-worker"], None),
+            (&[b"mori", b"--version", b"--cbm-daemon-internal"], None),
+            (&[b"mori"], None),
+        ];
+        for (args, expected) in cases {
+            assert_eq!(
+                &informational_command(args.iter().copied()),
+                expected,
+                "{args:?}"
+            );
         }
     }
-    // SAFETY: Same output slot as above.
-    unsafe { next_arg.write(argc) };
-    Subcommand::None
 }

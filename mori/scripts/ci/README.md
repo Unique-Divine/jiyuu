@@ -22,3 +22,18 @@ CI and the local infrastructure — both of which the venue-parity contract
 | `select-release-candidates.py` | Apply the reviewed tuple-local VT truth table, or the explicit dry-run stripped default, and atomically copy one content-bound binary per target. | `_build.yml` |
 | `verify-release-selection.py` | Recompute the selection policy and prove every executable member in all 14 public containers equals its selected SHA-256. | `_build.yml`, `release.yml` final draft verification |
 | `check-virustotal.sh` | Poll and validate the exact candidate scan set, enforce engine coverage and the narrow documented Microsoft `!ml` policy, and emit content-bound results evidence. | `_build.yml` |
+
+## Mori PR Executable Smoke
+
+For Mori pull requests, the linked job smoke-tests the binary already built
+for CLI parity. Script `smoke-built-binary.sh` runs the same fixture index and
+symbol checks as the standalone candidate. Native jobs still run the sanitizer
+suites, the GraphQL seam tests, and the native contracts. Pushes and manual CI
+runs still build and smoke-test the standalone executable.
+
+Both forms passed on Linux x64 and arm64 in two hosted stack comparisons.
+The second comparison took 142s on x64 and 161s on arm64
+for standalone build and smoke, compared with 5s and 5s
+for linked smoke.
+[First paired run](https://github.com/Unique-Divine/jiyuu/actions/runs/45831979136)
+[Second paired run](https://github.com/Unique-Divine/jiyuu/actions/runs/45842566555)
