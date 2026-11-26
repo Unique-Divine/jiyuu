@@ -4,8 +4,10 @@
 //
 // Usage (from mori/):
 //   bun scripts/release.ts validate [mori/vX.Y.Z]
+//   bun scripts/release.ts plan <event> <ref> <repo> <dry-run> <prewarm> <daily-check>
 //   bun scripts/release.ts asset-name <version> <target>
 //   bun scripts/release.ts prepare <version> <dir> [--tag T] [--commit SHA]
+//   bun scripts/release.ts prepare-preview <version> <dir> [--commit SHA]
 //   bun scripts/release.ts publish <mori/vX.Y.Z> <dir> --repo OWNER/NAME
 //
 // `validate` checks that a tag matches the VERSION file and prints the
@@ -22,13 +24,47 @@ import { join, resolve } from "node:path"
 
 export const BINARY = "mori"
 export const TAG_PREFIX = "mori/v"
-export const TARGETS = [
-  "linux-x64",
-  "linux-arm64",
-  "darwin-arm64",
-  "darwin-x64",
+const PLATFORMS = [
+  {
+    target: "linux-x64",
+    goos: "linux",
+    goarch: "amd64",
+    rust_target: "x86_64-unknown-linux-gnu",
+    runner: "ubuntu-latest",
+    c_reference_sha256: "ba3cbc562e6c41585144e78857a54a51badae99bdb5e6050cedc79089817ed07",
+  },
+  {
+    target: "linux-arm64",
+    goos: "linux",
+    goarch: "arm64",
+    rust_target: "aarch64-unknown-linux-gnu",
+    runner: "ubuntu-24.04-arm",
+    c_reference_sha256: "a4984606e39dcdf6e5d4a86f31ceea4d0f49761fe4dc3eb91544cdc86e26e1bb",
+  },
+  {
+    target: "darwin-arm64",
+    goos: "darwin",
+    goarch: "arm64",
+    arch: "arm64",
+    rust_target: "aarch64-apple-darwin",
+    runner: "macos-15",
+    c_reference_sha256: "3fb0ebdf5416fbabfb81e48754275b5f01088faac3dc5f015cbe6a84d743e837",
+  },
+  {
+    target: "darwin-x64",
+    goos: "darwin",
+    goarch: "amd64",
+    arch: "x86_64",
+    rust_target: "x86_64-apple-darwin",
+    runner: "macos-15-intel",
+    c_reference_sha256: "",
+  },
 ] as const
-export type Target = (typeof TARGETS)[number]
+export type Target = (typeof PLATFORMS)[number]["target"]
+export const TARGETS: readonly Target[] = PLATFORMS.map(({ target }) => target)
+const PREVIEW_PLATFORMS = PLATFORMS.filter(({ target }) => target !== "darwin-x64")
+const PREVIEW_TARGETS = PREVIEW_PLATFORMS.map(({ target }) => target)
+type ReleaseMode = "daily" | "prewarm" | "preview" | "tag"
 
 const SEMVER =
   /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(-[0-9A-Za-z.-]+)?$/
@@ -93,6 +129,57 @@ export function checkTag(tag: string, fileVersion: string): string {
   return version
 }
 
+interface ReleaseRequest {
+  event: string
+  ref: string
+  repo: string
+  dryRun: boolean
+  prewarm: boolean
+  dailyCheck: boolean
+}
+
+export function releasePlan(request: ReleaseRequest, version: string) {
+  const { event, ref, repo, dryRun, prewarm, dailyCheck } = request
+  const tagRef = "refs/tags/"
+  const tag = ref.startsWith(tagRef + TAG_PREFIX) ? ref.slice(tagRef.length) : ""
+  const trustedMain = repo === "Unique-Divine/jiyuu" && ref === "refs/heads/main"
+  let mode: ReleaseMode
+  if (event === "schedule") {
+    if (!trustedMain) {
+      throw new Error("Scheduled package checks require main in Unique-Divine/jiyuu")
+    }
+    mode = "daily"
+  } else if (event === "workflow_dispatch" && dailyCheck) {
+    if (!trustedMain || !dryRun || prewarm) {
+      throw new Error(
+        "daily_check requires a dry run on main in Unique-Divine/jiyuu with prewarm_oracle=false",
+      )
+    }
+    mode = "daily"
+  } else if (event === "workflow_dispatch" && prewarm) {
+    if (ref !== "refs/heads/main" || !dryRun) {
+      throw new Error("prewarm_oracle requires a manual dry run on main")
+    }
+    mode = "prewarm"
+  } else if (tag && (event === "push" || event === "workflow_dispatch")) {
+    checkTag(tag, version)
+    mode = "tag"
+  } else if (event === "workflow_dispatch" && dryRun && ref.startsWith("refs/heads/")) {
+    mode = "preview"
+  } else {
+    throw new Error("Expected a Mori tag or a branch dry run")
+  }
+  return {
+    mode,
+    version,
+    tag: tagFor(version),
+    publish: mode === "tag" && (event === "push" || !dryRun),
+    matrix: {
+      include: mode === "preview" || mode === "prewarm" ? PREVIEW_PLATFORMS : PLATFORMS,
+    },
+  }
+}
+
 export function assetName(version: string, target: string): string {
   if (!(TARGETS as readonly string[]).includes(target)) {
     throw new Error(
@@ -130,8 +217,10 @@ export function releaseNotes(meta: ReleaseMetadata): string {
     "",
     `[Install and upgrade instructions](https://github.com/Unique-Divine/jiyuu/blob/${meta.commit}/mori/README.md#install).`,
     "",
-    "Static Linux builds for x64 and arm64, and macOS builds for Apple",
-    "silicon (arm64) and Intel (x64), for macOS 14 or later. Each archive",
+    meta.targets.includes("darwin-x64")
+      ? "Static Linux builds for x64 and arm64, and macOS builds for Apple Silicon and Intel, for macOS 14 or later."
+      : "Preview builds for Linux x64 and arm64 and for Apple Silicon on macOS 14 or later.",
+    "Each archive",
     "holds the binary, LICENSE, NOTICE and THIRD_PARTY_NOTICES.md.",
     "",
     "The macOS binaries are ad-hoc signed but not notarized. If macOS blocks",
@@ -150,15 +239,23 @@ export async function prepare(
   version: string,
   tag: string,
   commit: string,
+  preview = false,
 ): Promise<ReleaseMetadata> {
   if (!/^[0-9a-f]{40}$/.test(commit)) {
     throw new Error(`Invalid source commit '${commit}'`)
   }
-  const expected = releaseAssets(version)
+  const targets = preview ? PREVIEW_TARGETS : TARGETS
+  const expected = targets.map((target) => assetName(version, target))
   const present = new Set(await readdir(dir))
   const missing = expected.filter((name) => !present.has(name))
   if (missing.length > 0) {
     throw new Error(`Missing release archives: ${missing.join(", ")}`)
+  }
+  const unexpected = [...present].filter(
+    (name) => name.endsWith(".tar.gz") && !expected.includes(name),
+  )
+  if (unexpected.length > 0) {
+    throw new Error(`Unexpected package archives: ${unexpected.sort().join(", ")}`)
   }
   const assets: Record<string, string> = {}
   for (const name of expected) assets[name] = await sha256File(join(dir, name))
@@ -169,7 +266,7 @@ export async function prepare(
     tag,
     commit,
     assets,
-    targets: [...TARGETS],
+    targets: [...targets],
   }
   await writeFile(join(dir, "checksums.txt"), formatChecksums(assets))
   await writeFile(
@@ -298,12 +395,31 @@ export async function main(argv: string[], root: string): Promise<string> {
     const tag = args[0]
     return tag ? checkTag(tag, fileVersion) : fileVersion
   }
+  if (command === "plan") {
+    const [event, ref, repo, dryRun, prewarm, dailyCheck] = args
+    if (args.length !== 6 || !event || !ref || !repo) {
+      throw new Error("plan <event> <ref> <repo> <dry-run> <prewarm> <daily-check>")
+    }
+    return JSON.stringify(
+      releasePlan(
+        {
+          event,
+          ref,
+          repo,
+          dryRun: dryRun === "true",
+          prewarm: prewarm === "true",
+          dailyCheck: dailyCheck === "true",
+        },
+        await readVersionFile(root),
+      ),
+    )
+  }
   if (command === "asset-name") {
     const [version, target] = args
     if (!version || !target) throw new Error("asset-name <version> <target>")
     return assetName(version, target)
   }
-  if (command === "prepare") {
+  if (command === "prepare" || command === "prepare-preview") {
     const tagArg = flag(args, "--tag")
     const commitArg = flag(args, "--commit")
     const [versionArg, dir] = args
@@ -312,7 +428,7 @@ export async function main(argv: string[], root: string): Promise<string> {
     const commit =
       commitArg ??
       runChecked(spawnRunner, ["git", "rev-parse", "HEAD"]).trim()
-    await prepare(resolve(dir), version, tagArg ?? tagFor(version), commit)
+    await prepare(resolve(dir), version, tagArg ?? tagFor(version), commit, command === "prepare-preview")
     return `prepared ${dir}`
   }
   if (command === "publish") {
@@ -325,7 +441,7 @@ export async function main(argv: string[], root: string): Promise<string> {
     publish(resolve(dir), tag, repo)
     return `draft release ${tag} ready in ${repo}`
   }
-  throw new Error("Expected validate, asset-name, prepare or publish")
+  throw new Error("Expected validate, plan, asset-name, prepare, prepare-preview or publish")
 }
 
 if (import.meta.main) {

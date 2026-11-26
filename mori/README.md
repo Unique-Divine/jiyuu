@@ -15,9 +15,40 @@ Indexing and queries run on your machine. They need no hosted service, API
 key, or language runtime, and the parser grammars are compiled into the
 binary.
 
+[Install Mori](#install) · [Open the Graph UI](#graph-ui)
+
+## See Mori in Action
+
+Explore the source tree in the **Architecture** workspace. This recording
+opens `src/foundation` and shows the source of `arena.c` beside the map.
+
 <p align="center">
-  <img src="docs/images/lens-overview.gif" alt="Graph UI architecture walkthrough: open src/foundation, select arena.c and read its source beside the map" width="1000">
+  <img src="docs/images/lens-overview.gif" alt="The Architecture workspace opens src/foundation and displays arena.c beside the folder map." width="1000">
 </p>
+
+<details>
+<summary>Watch Galaxy Follow a Call Path</summary>
+
+The **Galaxy** workspace follows the call path from function
+`cbm_arena_alloc` through `arena_grow` to `cbm_alloc`.
+[Galaxy screenshot](docs/images/lens-galaxy.jpg)
+
+<p align="center">
+  <img src="docs/images/lens-galaxy.gif" alt="Galaxy expands cbm_arena_alloc and follows calls through arena_grow to cbm_alloc." width="1000">
+</p>
+
+</details>
+
+The **Explore** workspace shows the source for `limits.c` beside its file
+impact summary and direct dependencies.
+
+<p align="center">
+  <img src="docs/images/lens-explore.jpg" alt="Explore shows the source for limits.c beside its file impact summary and dependencies." width="1000">
+</p>
+
+See [Graph UI](#graph-ui) for more architecture views and
+[Local Chat](#local-chat) for a caller and callee demo. These captures use
+the upstream CBM Lens UI and public source. [Capture notes](docs/images/README.md)
 
 - [What Mori Answers](#what-mori-answers)
 - [Install](#install)
@@ -666,18 +697,8 @@ Bookmark a view with `?project=<name>&workspace=<workspace>`:
 | `coverage` | Indexed, partially parsed, skipped, and excluded paths, with freshness. |
 | `system` | Daemon activity, indexes, and logs, filterable by project, severity, or text. |
 
-**Galaxy.** The recording follows the outgoing relationships of
-`cbm_arena_alloc` one layer further, switches to the hierarchy, and shows
-the two-hop call path to `cbm_alloc`. Edge pulses show direction, not live
-execution. [Still image](docs/images/lens-galaxy.jpg).
-
-<p align="center">
-  <img src="docs/images/lens-galaxy.gif" alt="Galaxy view: expand cbm_arena_alloc, switch to the hierarchy and follow its call path through arena_grow to cbm_alloc" width="1000">
-</p>
-
-**Explore.** Source in Monaco with the graph alongside.
-
-<p align="center"><img src="docs/images/lens-explore.jpg" alt="Explore: limits.c in the source reader beside its file impact summary and direct graph dependencies" width="1000"></p>
+In **Galaxy**, edge pulses show the direction of indexed relationships.
+See the [Galaxy and Explore demos](#see-mori-in-action).
 
 **Repos.** The Repos workspace reads every project index in the cache
 directory through two read-only endpoints, `GET /api/xrepo/summary` and
@@ -729,8 +750,6 @@ tools, and the small default model words things loosely.
 
 <p align="center"><img src="docs/images/lens-chat.gif" alt="Local chat: callers and callees of arena_grow answered directly from the indexed graph" width="1000"></p>
 
-The recordings show the UI on upstream's own source in October 2026;
-[docs/images/README.md](docs/images/README.md) records each capture.
 For logs, frontend development, and the experimental agent-activity view,
 see [graph-ui/README.md](graph-ui/README.md).
 
@@ -1391,23 +1410,10 @@ gh release edit mori/v0.14.0 --draft=false --latest=false
 Rerunning the workflow refills a draft but never changes a published
 release.
 
-To build without releasing, run the workflow by hand on any branch; the
-`dry_run` input defaults to true and uploads the archives and checksums as
-workflow artifacts. [scripts/release.ts](scripts/release.ts) holds the tag
-check, asset names, checksums and the draft step; test it with
-`bun test scripts/release.test.ts`. Run the parity check locally with
-`just --justfile jiyuu-mori/justfile parity`.
-
-To warm the four release C reference caches after merging a version bump,
-dispatch the release workflow on `main` with both inputs enabled.
-
-```bash
-gh workflow run mori-release.yml --ref main -f dry_run=true -f prewarm_oracle=true
-```
-
-The workflow validates the release version and verifies or builds the four C
-references. A later release can reuse those caches when the version and build
-environment match.
+A workflow dry run on a branch uploads Linux x64, Linux arm64, and Apple
+Silicon packages and their checksums in artifact `mori-preview-<version>-<sha>`.
+A dry run on a `mori/v*` tag checks and packages all four release targets,
+including Intel macOS.
 
 ## Credits
 
