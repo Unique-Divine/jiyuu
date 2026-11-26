@@ -7,6 +7,9 @@ use std::{panic, ptr};
 use crate::stdio::c_transport;
 use crate::store::Store;
 use crate::tools;
+use jiyuu_mori::startup::{
+    InformationalCommand, argv_bytes, informational_command,
+};
 use rusqlite::{Connection, ffi::sqlite3};
 
 type ReadOverride = unsafe extern "C" fn(
@@ -61,6 +64,11 @@ unsafe extern "C" {
     fn cbm_c_main(argc: c_int, argv: *mut *mut c_char) -> c_int;
 
     fn cbm_alloc_init();
+    fn cbm_linked_startup_prepare_info(
+        argc: c_int,
+        argv: *mut *mut c_char,
+    ) -> *const c_char;
+    fn cbm_linked_startup_print_help();
     fn cbm_mcp_set_read_override(handle: ReadOverride, release: ReleasePayload);
     fn cbm_mcp_set_project_readers(
         identity: ProjectIdentityReader,
@@ -222,8 +230,8 @@ unsafe extern "C" fn release_payload(payload: *mut c_char) {
     drop(unsafe { CString::from_raw(payload) });
 }
 
-/// The C runtime calls this entry point. Rust handles developer export and
-/// standalone UI here. Other commands enter C startup and use the Rust selectors.
+/// The C runtime calls this entry point. Rust dispatches developer export,
+/// standalone UI, and top-level help and version here.
 /// Returning hands the exit code to the C runtime.
 ///
 /// # Safety
@@ -233,14 +241,31 @@ unsafe extern "C" fn release_payload(payload: *mut c_char) {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn main(argc: c_int, argv: *mut *mut c_char) -> c_int {
     // SAFETY: the C runtime provides argc initialized, non-null argv slots.
-    let mut args =
-        unsafe { jiyuu_mori::startup::argv_bytes(argc, argv) }.skip(1);
+    let argv_bytes = unsafe { argv_bytes(argc, argv) };
+    let mut args = argv_bytes.clone().skip(1);
     let command = args.next();
     if command == Some(b"dev") {
         // SAFETY: SQLite has not been used yet. Initialize the same
         // allocator as C main before the exporter opens the database.
         unsafe { cbm_alloc_init() };
         return crate::export::run(args.map(OsStr::from_bytes));
+    }
+    // Standalone UI owns its own help and flag parsing.
+    if command != Some(b"ui")
+        && let Some(info) = informational_command(argv_bytes)
+    {
+        // SAFETY: The C runtime's argv is still live. Native setup returns a
+        // static NUL-terminated version and prepares the shared help renderer.
+        unsafe {
+            let version = cbm_linked_startup_prepare_info(argc, argv);
+            match info {
+                InformationalCommand::Version => {
+                    libc::printf(c"mori %s\n".as_ptr(), version);
+                }
+                InformationalCommand::Help => cbm_linked_startup_print_help(),
+            }
+        }
+        return 0;
     }
     // SAFETY: C has not started any indexing threads and the function pointer
     // stays valid for the process lifetime, including each worker's own main.

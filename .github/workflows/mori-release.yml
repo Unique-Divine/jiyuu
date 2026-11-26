@@ -9,6 +9,7 @@
 #   attests and creates a draft release that is not marked latest.
 # - workflow_dispatch: dry_run (default true) builds and uploads workflow
 #   artifacts only. dry_run=false publishes only when run on a mori/v* tag.
+# - prewarm_oracle=true on a main dry run populates the four C reference caches.
 name: Mori release
 
 on:
@@ -20,6 +21,10 @@ on:
         description: Build and upload artifacts only; create no release
         type: boolean
         default: true
+      prewarm_oracle:
+        description: Populate only the release C reference caches on main
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -36,6 +41,7 @@ jobs:
       tag: ${{ steps.version.outputs.tag }}
       publish: ${{ steps.version.outputs.publish }}
       source_sha: ${{ steps.version.outputs.source_sha }}
+      prewarm_oracle: ${{ steps.version.outputs.prewarm_oracle }}
     defaults:
       run:
         working-directory: mori
@@ -55,8 +61,17 @@ jobs:
           REF: ${{ github.ref }}
           REF_NAME: ${{ github.ref_name }}
           DRY_RUN: ${{ inputs.dry_run }}
+          PREWARM_ORACLE: ${{ inputs.prewarm_oracle }}
         run: |
           set -euo pipefail
+          prewarm_oracle=false
+          if [[ "$PREWARM_ORACLE" == true ]]; then
+            if [[ "$EVENT_NAME" != workflow_dispatch || "$REF" != refs/heads/main || "$DRY_RUN" != true ]]; then
+              echo "::error::prewarm_oracle=true requires a manual dry run on main."
+              exit 1
+            fi
+            prewarm_oracle=true
+          fi
           publish=false
           if [[ "$REF" == refs/tags/mori/v* ]]; then
             version="$(bun scripts/release.ts validate "$REF_NAME")"
@@ -75,11 +90,13 @@ jobs:
             echo "tag=mori/v$version"
             echo "publish=$publish"
             echo "source_sha=$(git rev-parse HEAD)"
+            echo "prewarm_oracle=$prewarm_oracle"
           } >> "$GITHUB_OUTPUT"
-          echo "Mori $version, publish=$publish" >> "$GITHUB_STEP_SUMMARY"
+          echo "Mori $version, publish=$publish, prewarm_oracle=$prewarm_oracle" >> "$GITHUB_STEP_SUMMARY"
 
   build:
     needs: validate
+    if: needs.validate.outputs.prewarm_oracle == 'false'
     strategy: &release-targets
       fail-fast: false
       matrix:
@@ -437,6 +454,7 @@ jobs:
           export MORI_MAKE_JOBS
           python3 scripts/c_reference_cache.py ensure "$RUST_TARGET" "$RUNNER_TEMP/mori-release-c-reference"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: needs.validate.outputs.prewarm_oracle == 'false'
         with:
           name: mori-oracle-${{ matrix.target }}
           path: ${{ runner.temp }}/mori-release-c-reference/
