@@ -2328,18 +2328,21 @@ int cbm_gbuf_delete_edges(cbm_gbuf_t *gb, const cbm_gbuf_edge_t **edges, int n) 
 
 /* ── Merge ───────────────────────────────────────────────────────── */
 
-/* Free remap hash table entries (key = heap string, value = heap int64_t*) */
-static void free_remap_entry(const char *key, void *val, void *ud) {
-    (void)ud;
-    cbm_free(CBM_MEM_CLASS_GBUF_INDEX, (void *)key);
-    cbm_free(CBM_MEM_CLASS_GBUF_INDEX, val);
-}
+typedef int64_t (*gb_merge_node_fn)(cbm_gbuf_t *, const cbm_gbuf_t *,
+                                    const cbm_gbuf_node_t *);
+typedef int64_t (*gb_merge_edge_fn)(cbm_gbuf_t *, int64_t, int64_t, const char *,
+                                    const char *);
 
-/* Handle QN collision: update dst node fields (src wins), record remap if IDs differ.
- * label/file_path are re-interned into dst's pool (sn's pointers belong to src). */
+extern bool mori_gbuf_source_wins(const cbm_gbuf_node_t *existing, int existing_rank,
+                                 const cbm_gbuf_node_t *source, int source_rank);
+extern int mori_gbuf_merge_rows(cbm_gbuf_t *dst, const cbm_gbuf_t *src,
+                               cbm_gbuf_node_t *const *nodes, int node_count,
+                               cbm_gbuf_edge_t *const *edges, int edge_count,
+                               gb_merge_node_fn merge_node, gb_merge_edge_fn insert_edge);
+
+/* Apply the winning definition using the destination buffer's allocator and indexes. */
 static void merge_update_existing(cbm_gbuf_t *dst, cbm_gbuf_node_t *existing,
-                                  const cbm_gbuf_node_t *sn, const gb_span_vec_t *sn_spans,
-                                  CBMHashTable **remap) {
+                                  const cbm_gbuf_node_t *sn, const gb_span_vec_t *sn_spans) {
     /* Same guard as cbm_gbuf_upsert_node: a per-file "Module" def coming from a
      * worker-local gbuf must not touch the structural directory node ("Project"
      * root or "Folder") that shares its QN in a directory-based-module language
@@ -2348,37 +2351,15 @@ static void merge_update_existing(cbm_gbuf_t *dst, cbm_gbuf_node_t *existing,
      * for that package collides here; unconditional "src wins" relabelled the
      * directory node to Module and set its file_path to whichever worker merged
      * LAST — the nondeterministic USAGE-source misattribution of #787. Keep the
-     * structural node intact; the ID remap below still redirects the worker's
+     * structural node intact; the ID remap still redirects the worker's
      * edges onto the canonical node. */
     bool module_on_container =
         existing->label && sn->label && strcmp(sn->label, "Module") == 0 &&
         (strcmp(existing->label, "Project") == 0 || strcmp(existing->label, "Folder") == 0);
     if (!module_on_container) {
-        /* Canonical collision winner (determinism) — mirrors
-         * cbm_gbuf_upsert_node exactly. Distinct source entities can share a
-         * QN (C: struct/function/macro with one name); unconditional "src
-         * wins" made the survivor depend on worker merge order, flickering
-         * the node set (and every downstream consumer) run to run. Winner =
-         * smallest file_path, then LARGEST start_line, then largest
-         * name/label — one total order, commutative, scheduling-free; a full
-         * tie is the same entity → refresh from src. A definition beats a
-         * macro ahead of all of these (gb_qn_claim_rank). */
-        int c = gb_qn_claim_rank(existing->label, existing->properties_json) -
-                gb_qn_claim_rank(sn->label, sn->properties_json);
-        if (c == 0) {
-            c = strcmp(sn->file_path ? sn->file_path : "",
-                       existing->file_path ? existing->file_path : "");
-        }
-        if (c == 0) {
-            c = existing->start_line - sn->start_line;
-        }
-        if (c == 0) {
-            c = strcmp(existing->name ? existing->name : "", sn->name ? sn->name : "");
-        }
-        if (c == 0) {
-            c = strcmp(existing->label ? existing->label : "", sn->label ? sn->label : "");
-        }
-        bool sn_wins = c <= 0;
+        bool sn_wins = mori_gbuf_source_wins(
+            existing, gb_qn_claim_rank(existing->label, existing->properties_json),
+            sn, gb_qn_claim_rank(sn->label, sn->properties_json));
         gb_def_t src_def = {sn->label, sn->properties_json, sn->file_path, sn->start_line,
                             sn->end_line};
         gb_note_collision(dst, existing, &src_def, sn_spans);
@@ -2425,17 +2406,6 @@ static void merge_update_existing(cbm_gbuf_t *dst, cbm_gbuf_node_t *existing,
             }
         }
     }
-
-    if (sn->id != existing->id) {
-        if (!*remap) {
-            *remap = cbm_ht_create(CBM_SZ_32);
-        }
-        char key[CBM_SZ_32];
-        make_id_key(key, sizeof(key), sn->id);
-        int64_t *val = cbm_alloc(CBM_MEM_CLASS_GBUF_INDEX, sizeof(int64_t));
-        *val = existing->id;
-        cbm_ht_set(*remap, cbm_mem_strdup(CBM_MEM_CLASS_GBUF_INDEX, key), val);
-    }
 }
 
 /* Copy a non-colliding src node into dst with its original ID. */
@@ -2462,78 +2432,36 @@ static void merge_copy_new_node(cbm_gbuf_t *dst, const cbm_gbuf_node_t *sn) {
     }
 }
 
-/* Remap edge IDs using the collision remap table and insert into dst. */
-static void merge_remap_edges(cbm_gbuf_t *dst, cbm_gbuf_t *src, CBMHashTable *remap) {
-    for (int i = 0; i < src->edges.count; i++) {
-        cbm_gbuf_edge_t *se = src->edges.items[i];
-
-        int64_t new_src = se->source_id;
-        int64_t new_tgt = se->target_id;
-
-        if (remap) {
-            char key[CBM_SZ_32];
-            make_id_key(key, sizeof(key), se->source_id);
-            int64_t *remapped = cbm_ht_get(remap, key);
-            if (remapped) {
-                new_src = *remapped;
-            }
-
-            make_id_key(key, sizeof(key), se->target_id);
-            remapped = cbm_ht_get(remap, key);
-            if (remapped) {
-                new_tgt = *remapped;
-            }
-        }
-
-        cbm_gbuf_insert_edge(dst, new_src, new_tgt, se->type, se->properties_json);
+static int64_t merge_node(cbm_gbuf_t *dst, const cbm_gbuf_t *src,
+                          const cbm_gbuf_node_t *node) {
+    const char *qn = node->qualified_name;
+    if (!qn || !cbm_ht_get(src->node_by_qn, qn)) {
+        return 0;
     }
+
+    const gb_span_vec_t *spans =
+        src->variant_spans ? cbm_ht_get(src->variant_spans, qn) : NULL;
+    cbm_gbuf_node_t *existing = cbm_ht_get(dst->node_by_qn, qn);
+    if (existing) {
+        merge_update_existing(dst, existing, node, spans);
+        return existing->id;
+    }
+
+    merge_copy_new_node(dst, node);
+    gb_adopt_spans(dst, cbm_ht_get(dst->node_by_qn, qn), spans);
+    return node->id;
 }
 
 int cbm_gbuf_merge(cbm_gbuf_t *dst, cbm_gbuf_t *src) {
     if (!dst || !src) {
         return CBM_NOT_FOUND;
     }
-    if (src->nodes.count == 0 && src->edges.count == 0) {
+    if (dst == src) {
         return 0;
     }
-
-    /* ID remap for QN-colliding nodes: "src_id" → (int64_t*) dst_id.
-     * Only populated when a src node's QN already exists in dst. */
-    CBMHashTable *remap = NULL;
-
-    for (int i = 0; i < src->nodes.count; i++) {
-        cbm_gbuf_node_t *sn = src->nodes.items[i];
-        if (!sn->qualified_name) {
-            continue;
-        }
-
-        /* Skip nodes deleted from QN index */
-        if (!cbm_ht_get(src->node_by_qn, sn->qualified_name)) {
-            continue;
-        }
-
-        /* The spans src gathered for this node travel with it; they are
-         * written once, when dst is exported. */
-        const gb_span_vec_t *spans =
-            src->variant_spans ? cbm_ht_get(src->variant_spans, sn->qualified_name) : NULL;
-        cbm_gbuf_node_t *existing = cbm_ht_get(dst->node_by_qn, sn->qualified_name);
-        if (existing) {
-            merge_update_existing(dst, existing, sn, spans, &remap);
-        } else {
-            merge_copy_new_node(dst, sn);
-            gb_adopt_spans(dst, cbm_ht_get(dst->node_by_qn, sn->qualified_name), spans);
-        }
-    }
-
-    /* Merge edges with optional ID remapping */
-    merge_remap_edges(dst, src, remap);
-
-    if (remap) {
-        cbm_ht_foreach(remap, free_remap_entry, NULL);
-        cbm_ht_free(remap);
-    }
-
-    return 0;
+    return mori_gbuf_merge_rows(dst, src, src->nodes.items, src->nodes.count,
+                               src->edges.items, src->edges.count, merge_node,
+                               cbm_gbuf_insert_edge);
 }
 
 /* ── Dump / Flush ────────────────────────────────────────────────── */

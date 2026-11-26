@@ -1245,6 +1245,52 @@ TEST(gbuf_merge_empty_src_into_populated_dst) {
     PASS();
 }
 
+TEST(gbuf_worker_merge_keeps_canonical_ids_and_edge_order) {
+    _Atomic int64_t shared = 1;
+    cbm_gbuf_t *dst = cbm_gbuf_new_shared_ids("test", "/tmp", &shared);
+    cbm_gbuf_t *src = cbm_gbuf_new_worker("test", "/tmp", &shared);
+
+    int64_t folder = cbm_gbuf_upsert_node(dst, "Folder", "pkg", "pkg", "pkg", 0, 0, "{}");
+    int64_t fn = cbm_gbuf_upsert_node(dst, "Function", "f", "pkg.f", "z.go", 1, 4, "{}");
+    int64_t module = cbm_gbuf_upsert_node(src, "Module", "pkg", "pkg", "a.go", 1, 4, "{}");
+    int64_t worker_fn = cbm_gbuf_upsert_node(src, "Function", "f", "pkg.f", "a.go", 1, 4,
+                                            "{\"worker\":true}");
+    int64_t new_fn = cbm_gbuf_upsert_node(src, "Function", "g", "pkg.g", "a.go", 6, 8, "{}");
+    cbm_gbuf_insert_edge(src, module, worker_fn, "CALLS", "{\"ordinal\":1}");
+    cbm_gbuf_insert_edge(src, worker_fn, new_fn, "CALLS", "{\"ordinal\":2}");
+
+    ASSERT_EQ(cbm_gbuf_merge(dst, src), 0);
+    cbm_gbuf_free(src);
+    ASSERT_EQ(cbm_gbuf_merge(dst, dst), 0);
+
+    const cbm_gbuf_node_t *container = cbm_gbuf_find_by_qn(dst, "pkg");
+    ASSERT_NOT_NULL(container);
+    ASSERT_EQ(container->id, folder);
+    ASSERT_STR_EQ(container->label, "Folder");
+    const cbm_gbuf_node_t *updated = cbm_gbuf_find_by_qn(dst, "pkg.f");
+    ASSERT_NOT_NULL(updated);
+    ASSERT_EQ(updated->id, fn);
+    ASSERT_STR_EQ(updated->file_path, "a.go");
+    ASSERT_STR_EQ(updated->properties_json, "{\"worker\":true}");
+    const cbm_gbuf_node_t *copied = cbm_gbuf_find_by_qn(dst, "pkg.g");
+    ASSERT_NOT_NULL(copied);
+    ASSERT_EQ(copied->id, new_fn);
+
+    const cbm_gbuf_edge_t **edges = NULL;
+    int count = 0;
+    ASSERT_EQ(cbm_gbuf_find_edges_by_type(dst, "CALLS", &edges, &count), 0);
+    ASSERT_EQ(count, 2);
+    ASSERT_EQ(edges[0]->source_id, folder);
+    ASSERT_EQ(edges[0]->target_id, fn);
+    ASSERT_STR_EQ(edges[0]->properties_json, "{\"ordinal\":1}");
+    ASSERT_EQ(edges[1]->source_id, fn);
+    ASSERT_EQ(edges[1]->target_id, new_fn);
+    ASSERT_STR_EQ(edges[1]->properties_json, "{\"ordinal\":2}");
+
+    cbm_gbuf_free(dst);
+    PASS();
+}
+
 TEST(gbuf_merge_populated_src_into_empty_dst) {
     cbm_gbuf_t *dst = cbm_gbuf_new("test", "/tmp");
     cbm_gbuf_t *src = cbm_gbuf_new("test", "/tmp");
@@ -1688,6 +1734,7 @@ SUITE(graph_buffer) {
     /* Merge tests */
     RUN_TEST(gbuf_merge_overlapping_qns);
     RUN_TEST(gbuf_merge_edge_dedup);
+    RUN_TEST(gbuf_worker_merge_keeps_canonical_ids_and_edge_order);
     RUN_TEST(gbuf_merge_empty_src_into_populated_dst);
     RUN_TEST(gbuf_merge_populated_src_into_empty_dst);
     RUN_TEST(gbuf_merge_null_args);

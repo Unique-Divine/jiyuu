@@ -21,6 +21,8 @@ mod explicit_override;
 #[cfg(any(feature = "native-engine-abi", test))]
 mod ffi_output;
 #[cfg(feature = "native-engine-abi")]
+mod graph_buffer_merge;
+#[cfg(feature = "native-engine-abi")]
 mod jvm_doc_links;
 #[cfg(feature = "native-engine-abi")]
 mod kubernetes;
