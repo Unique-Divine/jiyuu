@@ -1292,6 +1292,39 @@ TEST(gbuf_worker_merge_keeps_canonical_ids_and_edge_order) {
 }
 
 #if defined(CBM_MEM_TEST_API) && CBM_MEM_TEST_API
+TEST(gbuf_merge_keeps_collision_fields_on_property_failure) {
+    const char *properties = "{\"provenance\":\"winning worker definition\"}";
+    _Atomic int64_t shared = 1;
+    cbm_gbuf_t *dst = cbm_gbuf_new_shared_ids("test", "/tmp", &shared);
+    cbm_gbuf_t *src = cbm_gbuf_new_worker("test", "/tmp", &shared);
+    ASSERT_NOT_NULL(dst);
+    ASSERT_NOT_NULL(src);
+    int64_t canonical =
+        cbm_gbuf_upsert_node(dst, "Function", "original", "pkg.f", "z.go", 1, 4, "{}");
+    ASSERT_GT(canonical, 0);
+    ASSERT_GT(cbm_gbuf_upsert_node(src, "Method", "winner", "pkg.f", "a.go", 2, 8, properties), 0);
+
+    cbm_mem_test_fail_alloc_size(CBM_MEM_CLASS_GBUF_STRING, strlen(properties) + 1);
+    int rc = cbm_gbuf_merge(dst, src);
+    bool injected = cbm_mem_test_reset_alloc_failure();
+
+    ASSERT(injected);
+    ASSERT_EQ(rc, -1);
+    const cbm_gbuf_node_t *node = cbm_gbuf_find_by_qn(dst, "pkg.f");
+    ASSERT_NOT_NULL(node);
+    ASSERT_EQ(node->id, canonical);
+    ASSERT_STR_EQ(node->label, "Function");
+    ASSERT_STR_EQ(node->name, "original");
+    ASSERT_STR_EQ(node->file_path, "z.go");
+    ASSERT_EQ(node->start_line, 1);
+    ASSERT_EQ(node->end_line, 4);
+    ASSERT_STR_EQ(node->properties_json, "{}");
+
+    cbm_gbuf_free(src);
+    cbm_gbuf_free(dst);
+    PASS();
+}
+
 TEST(gbuf_merge_reports_node_append_failure) {
     cbm_gbuf_t *dst = cbm_gbuf_new("test", "/tmp");
     cbm_gbuf_t *src = cbm_gbuf_new_worker("test", "/tmp", NULL);
@@ -1783,6 +1816,7 @@ SUITE(graph_buffer) {
     RUN_TEST(gbuf_merge_edge_dedup);
     RUN_TEST(gbuf_worker_merge_keeps_canonical_ids_and_edge_order);
 #if defined(CBM_MEM_TEST_API) && CBM_MEM_TEST_API
+    RUN_TEST(gbuf_merge_keeps_collision_fields_on_property_failure);
     RUN_TEST(gbuf_merge_reports_node_append_failure);
     RUN_TEST(gbuf_merge_reports_edge_append_failure);
 #endif

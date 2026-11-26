@@ -2351,7 +2351,7 @@ static void merge_account_remap(size_t bytes, bool add) {
 }
 
 /* Apply the winning definition using the destination buffer's allocator and indexes. */
-static void merge_update_existing(cbm_gbuf_t *dst, cbm_gbuf_node_t *existing,
+static bool merge_update_existing(cbm_gbuf_t *dst, cbm_gbuf_node_t *existing,
                                   const cbm_gbuf_node_t *sn, const gb_span_vec_t *sn_spans) {
     /* Same guard as cbm_gbuf_upsert_node: a per-file "Module" def coming from a
      * worker-local gbuf must not touch the structural directory node ("Project"
@@ -2366,56 +2366,65 @@ static void merge_update_existing(cbm_gbuf_t *dst, cbm_gbuf_node_t *existing,
     bool module_on_container =
         existing->label && sn->label && strcmp(sn->label, "Module") == 0 &&
         (strcmp(existing->label, "Project") == 0 || strcmp(existing->label, "Folder") == 0);
-    if (!module_on_container) {
-        bool sn_wins = mori_gbuf_source_wins(
-            existing, gb_qn_claim_rank(existing->label, existing->properties_json),
-            sn, gb_qn_claim_rank(sn->label, sn->properties_json));
-        gb_def_t src_def = {sn->label, sn->properties_json, sn->file_path, sn->start_line,
-                            sn->end_line};
-        gb_note_collision(dst, existing, &src_def, sn_spans);
-        const char *properties = gb_swift_merge_node_props(existing, sn->properties_json, sn_wins);
-        if (sn_wins) {
-            /* src's properties; the variant spans both carry are written on
-             * export (cbm_gbuf_settle_variants). */
-            /* Keep the secondary indexes consistent when the surviving
-             * label/name changes (the old code left the node listed under its
-             * original label/name, so find_by_label/name mis-listed it). */
-            const char *new_label = gb_intern(dst, sn->label);
-            bool label_changed =
-                !existing->label || !new_label || strcmp(existing->label, new_label) != 0;
-            bool name_changed =
-                !existing->name || !sn->name || strcmp(existing->name, sn->name) != 0;
-            if (label_changed) {
-                remove_node_from_ptr_array(
-                    cbm_ht_get(dst->nodes_by_label, existing->label ? existing->label : ""),
-                    existing->id);
-            }
-            if (name_changed) {
-                remove_node_from_ptr_array(
-                    cbm_ht_get(dst->nodes_by_name, existing->name ? existing->name : ""),
-                    existing->id);
-            }
-            existing->label = (char *)new_label;
-            cbm_free(CBM_MEM_CLASS_GBUF_STRING, existing->name);
-            existing->name = heap_strdup(sn->name);
-            existing->file_path = (char *)gb_intern(dst, sn->file_path);
-            existing->start_line = sn->start_line;
-            existing->end_line = sn->end_line;
-            if (sn->properties_json) {
-                (void)cbm_gbuf_node_set_properties_json(existing, properties);
-            }
-            if (label_changed) {
-                node_ptr_array_t *by_label = get_or_create_node_array(
-                    dst->nodes_by_label, existing->label ? existing->label : "");
-                node_array_push(by_label, existing);
-            }
-            if (name_changed) {
-                node_ptr_array_t *by_name = get_or_create_node_array(
-                    dst->nodes_by_name, existing->name ? existing->name : "");
-                node_array_push(by_name, existing);
-            }
-        }
+    if (module_on_container) {
+        return true;
     }
+    bool sn_wins = mori_gbuf_source_wins(
+        existing, gb_qn_claim_rank(existing->label, existing->properties_json), sn,
+        gb_qn_claim_rank(sn->label, sn->properties_json));
+    gb_def_t src_def = {sn->label, sn->properties_json, sn->file_path, sn->start_line,
+                        sn->end_line};
+    if (!sn_wins) {
+        gb_note_collision(dst, existing, &src_def, sn_spans);
+        (void)gb_swift_merge_node_props(existing, sn->properties_json, false);
+        return true;
+    }
+
+    /* Prepare all required fields before changing the canonical definition. */
+    const char *new_label = gb_intern(dst, sn->label);
+    char *new_name = heap_strdup(sn->name);
+    const char *new_path = gb_intern(dst, sn->file_path);
+    char *new_properties = gb_swift_type_props(sn->properties_json, existing->properties_json);
+    if (!new_properties && sn->properties_json) {
+        new_properties = heap_strdup(sn->properties_json);
+    }
+    if (!new_label || !new_name || !new_path || (sn->properties_json && !new_properties)) {
+        cbm_free(CBM_MEM_CLASS_GBUF_STRING, new_name);
+        cbm_free(CBM_MEM_CLASS_GBUF_STRING, new_properties);
+        return false;
+    }
+
+    /* Record both definitions' spans before replacing the winner's fields. */
+    gb_note_collision(dst, existing, &src_def, sn_spans);
+    bool label_changed = !existing->label || strcmp(existing->label, new_label) != 0;
+    bool name_changed = !existing->name || !sn->name || strcmp(existing->name, sn->name) != 0;
+    if (label_changed) {
+        remove_node_from_ptr_array(
+            cbm_ht_get(dst->nodes_by_label, existing->label ? existing->label : ""), existing->id);
+    }
+    if (name_changed) {
+        remove_node_from_ptr_array(
+            cbm_ht_get(dst->nodes_by_name, existing->name ? existing->name : ""), existing->id);
+    }
+    existing->label = (char *)new_label;
+    cbm_free(CBM_MEM_CLASS_GBUF_STRING, existing->name);
+    existing->name = new_name;
+    existing->file_path = (char *)new_path;
+    existing->start_line = sn->start_line;
+    existing->end_line = sn->end_line;
+    if (new_properties) {
+        cbm_free(CBM_MEM_CLASS_GBUF_STRING, existing->properties_json);
+        existing->properties_json = new_properties;
+    }
+    if (label_changed) {
+        node_ptr_array_t *by_label = get_or_create_node_array(dst->nodes_by_label, new_label);
+        node_array_push(by_label, existing);
+    }
+    if (name_changed) {
+        node_ptr_array_t *by_name = get_or_create_node_array(dst->nodes_by_name, new_name);
+        node_array_push(by_name, existing);
+    }
+    return true;
 }
 
 /* Copy a non-colliding src node into dst with its original ID. */
@@ -2469,8 +2478,7 @@ static int64_t merge_node(cbm_gbuf_t *dst, const cbm_gbuf_t *src, const cbm_gbuf
     const gb_span_vec_t *spans = src->variant_spans ? cbm_ht_get(src->variant_spans, qn) : NULL;
     cbm_gbuf_node_t *existing = cbm_ht_get(dst->node_by_qn, qn);
     if (existing) {
-        merge_update_existing(dst, existing, node, spans);
-        return existing->id;
+        return merge_update_existing(dst, existing, node, spans) ? existing->id : CBM_NOT_FOUND;
     }
 
     cbm_gbuf_node_t *copied = merge_copy_new_node(dst, node);
