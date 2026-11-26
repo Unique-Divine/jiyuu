@@ -50,9 +50,6 @@ mod repair_recovery;
 mod named_watch;
 
 #[cfg(any(feature = "c-backend", test))]
-mod stdio;
-
-#[cfg(any(feature = "c-backend", test))]
 mod query_cli;
 
 #[cfg(any(feature = "c-backend", test))]

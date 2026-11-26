@@ -1,4 +1,4 @@
-//! Queue and cancellation routing for the C daemon's stdio frontend.
+//! Bounded admission and cancellation routing for the daemon stdio frontend.
 //! The frontend mutex serializes calls and keeps the active worker item alive.
 
 use std::collections::VecDeque;
@@ -8,7 +8,6 @@ use std::mem::MaybeUninit;
 const CAPACITY: usize = 8;
 const BYTES_MAX: usize = 12 * 1024 * 1024;
 
-// Matches FRONTEND_CANCELLATION_* in frontend_session.h.
 #[repr(i32)]
 enum CancellationRoute {
     Stale = 1,
@@ -55,6 +54,17 @@ struct Queue {
     free_buffer: FreeBuffer,
 }
 
+impl Queue {
+    fn new(free_buffer: FreeBuffer) -> Self {
+        Self {
+            items: VecDeque::with_capacity(CAPACITY),
+            queued_bytes: 0,
+            active_id: None,
+            free_buffer,
+        }
+    }
+}
+
 impl Drop for Queue {
     fn drop(&mut self) {
         for item in self.items.drain(..) {
@@ -69,12 +79,7 @@ impl Drop for Queue {
 
 #[unsafe(no_mangle)]
 extern "C" fn mori_frontend_queue_new(free_buffer: FreeBuffer) -> *mut Queue {
-    Box::into_raw(Box::new(Queue {
-        items: VecDeque::with_capacity(CAPACITY),
-        queued_bytes: 0,
-        active_id: None,
-        free_buffer,
-    }))
+    Box::into_raw(Box::new(Queue::new(free_buffer)))
 }
 
 #[unsafe(no_mangle)]
@@ -153,6 +158,8 @@ unsafe extern "C" fn mori_frontend_queue_cancel(
     }
     CancellationRoute::Stale as c_int
 }
+
+mod session;
 
 #[cfg(test)]
 mod tests;

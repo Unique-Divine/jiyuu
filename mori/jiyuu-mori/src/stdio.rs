@@ -150,35 +150,41 @@ fn write_response(
     written.and(flushed)
 }
 
-#[cfg(any(feature = "c-backend", test))]
-mod frontend_receive {
+pub(crate) mod frontend_receive {
     use std::ffi::{c_char, c_int, c_void};
     use std::ptr;
 
     use super::{Framing, Read, read_message};
 
+    #[cfg(all(feature = "native-engine-abi", not(test)))]
+    unsafe extern "C" {
+        // C's MemorySanitizer cannot see storage initialized by Rust.
+        fn cbm_ffi_mark_written(address: *const c_void, size: usize);
+    }
+
     #[repr(C)]
-    pub(super) struct FrontendState {
+    pub(crate) struct FrontendState {
         _opaque: [u8; 0],
     }
 
-    /// Mirrors frontend_receive_ops_t in frontend.c.
+    /// Admission callbacks borrow the session. Enqueue takes the buffer on success.
     #[repr(C)]
-    pub(super) struct ReceiveOps {
-        alloc_message: unsafe extern "C" fn(usize) -> *mut c_void,
-        free_message: unsafe extern "C" fn(*mut c_void),
-        route_cancellation: unsafe extern "C" fn(
+    pub(crate) struct ReceiveOps {
+        pub(crate) alloc_message: unsafe extern "C" fn(usize) -> *mut c_void,
+        pub(crate) free_message: unsafe extern "C" fn(*mut c_void),
+        pub(crate) route_cancellation: unsafe extern "C" fn(
             *mut FrontendState,
             *const c_char,
             *mut bool,
         ) -> bool,
-        cancel_active: unsafe extern "C" fn(*mut FrontendState) -> bool,
-        enqueue:
+        pub(crate) cancel_active:
+            unsafe extern "C" fn(*mut FrontendState) -> bool,
+        pub(crate) enqueue:
             unsafe extern "C" fn(*mut FrontendState, *mut c_char, bool) -> bool,
-        stop_begin: unsafe extern "C" fn(*mut FrontendState) -> bool,
+        pub(crate) stop_begin: unsafe extern "C" fn(*mut FrontendState) -> bool,
     }
 
-    pub(super) unsafe fn receive_loop(
+    pub(crate) unsafe fn receive_loop(
         input: &mut impl Read,
         state: *mut FrontendState,
         ops: &ReceiveOps,
@@ -201,6 +207,8 @@ mod frontend_receive {
                 }
                 ptr::copy_nonoverlapping(bytes.as_ptr(), message, bytes.len());
                 *message.add(bytes.len()) = 0;
+                #[cfg(all(feature = "native-engine-abi", not(test)))]
+                cbm_ffi_mark_written(message.cast(), bytes.len() + 1);
                 drop(bytes);
 
                 // Route cancellation before enqueue can block on a full queue.
@@ -230,109 +238,65 @@ mod frontend_receive {
     mod tests;
 }
 
-#[cfg(all(feature = "c-backend", not(test)))]
+#[cfg(feature = "native-engine-abi")]
 pub(crate) mod c_transport {
-    use std::ffi::{c_int, c_void};
-    use std::slice;
+    use std::ffi::c_void;
 
-    use super::frontend_receive::{FrontendState, ReceiveOps, receive_loop};
     use super::*;
 
-    type Stream = *mut c_void;
-    type Receive = unsafe extern "C" fn(
-        Stream,
-        *mut FrontendState,
-        *const ReceiveOps,
-        *mut bool,
-    ) -> c_int;
-    type WriteResponse =
-        unsafe extern "C" fn(Stream, *const u8, u32, bool) -> bool;
-
     unsafe extern "C" {
-        fn cbm_daemon_frontend_set_stdio(receive: Receive, write: WriteResponse);
-        fn fgetc(stream: Stream) -> c_int;
-        fn fread(
-            buf: *mut c_void,
+        fn mori_frontend_read_bytes(
+            stream: *mut c_void,
+            bytes: *mut u8,
             size: usize,
-            count: usize,
-            stream: Stream,
-        ) -> usize;
-        fn fwrite(
-            buf: *const c_void,
+        ) -> isize;
+        fn mori_frontend_write_bytes(
+            stream: *mut c_void,
+            bytes: *const u8,
             size: usize,
-            count: usize,
-            stream: Stream,
-        ) -> usize;
-        fn ferror(stream: Stream) -> c_int;
-        fn fflush(stream: Stream) -> c_int;
+        ) -> bool;
+        fn mori_frontend_flush(stream: *mut c_void) -> bool;
     }
 
-    // C owns the FILE and gives each callback exclusive access for its duration.
-    struct FileStream(Stream);
+    // C lends the FILE for the call and performs I/O with its own CRT.
+    pub(crate) struct FileStream(pub(crate) *mut c_void);
 
     impl Read for FileStream {
         fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-            // SAFETY: self.0 is the live C stream. Reads stay within buf.
-            let count = unsafe {
-                if let [byte] = buf {
-                    let next = fgetc(self.0);
-                    if next < 0 {
-                        0
-                    } else {
-                        *byte = next as u8;
-                        1
-                    }
-                } else {
-                    fread(buf.as_mut_ptr().cast(), 1, buf.len(), self.0)
-                }
-            };
-            // SAFETY: the stream remains valid until the callback returns.
-            if count == 0 && unsafe { ferror(self.0) } != 0 {
-                Err(io::Error::other("reading MCP stdio failed"))
-            } else {
-                Ok(count)
+            if buf.is_empty() {
+                return Ok(0);
             }
+            let count = unsafe {
+                mori_frontend_read_bytes(self.0, buf.as_mut_ptr(), buf.len())
+            };
+            usize::try_from(count)
+                .map_err(|_| io::Error::other("reading MCP stdio failed"))
         }
     }
 
     impl Write for FileStream {
         fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-            // SAFETY: C borrowed this live stream and the byte range is valid.
-            let count =
-                unsafe { fwrite(bytes.as_ptr().cast(), 1, bytes.len(), self.0) };
-            if count != bytes.len() {
-                Err(io::Error::other("writing MCP stdio failed"))
+            if unsafe {
+                mori_frontend_write_bytes(self.0, bytes.as_ptr(), bytes.len())
+            } {
+                Ok(bytes.len())
             } else {
-                Ok(count)
+                Err(io::Error::other("writing MCP stdio failed"))
             }
         }
 
         fn flush(&mut self) -> io::Result<()> {
-            // SAFETY: C borrowed this live stream.
-            if unsafe { fflush(self.0) } != 0 {
-                Err(io::Error::other("flushing MCP stdio failed"))
-            } else {
+            if unsafe { mori_frontend_flush(self.0) } {
                 Ok(())
+            } else {
+                Err(io::Error::other("flushing MCP stdio failed"))
             }
         }
     }
 
-    unsafe extern "C" fn receive(
-        stream: Stream,
-        state: *mut FrontendState,
-        ops: *const ReceiveOps,
-        stop_begun: *mut bool,
-    ) -> c_int {
-        let mut input = FileStream(stream);
-        // SAFETY: C lends the live FILE, state, table, and writable close
-        // flag for the duration of this synchronous call.
-        unsafe { receive_loop(&mut input, state, &*ops, &mut *stop_begun) }
-    }
-
-    unsafe extern "C" fn write(
-        stream: Stream,
-        response: *const u8,
-        length: u32,
+    pub(crate) fn write_frame(
+        stream: *mut c_void,
+        response: &[u8],
         framed: bool,
     ) -> bool {
         let framing = if framed {
@@ -340,15 +304,7 @@ pub(crate) mod c_transport {
         } else {
             Framing::Line
         };
-        // SAFETY: C gives its writer the full response range for this callback.
-        let response =
-            unsafe { slice::from_raw_parts(response, length as usize) };
         write_response(&mut FileStream(stream), response, framing).is_ok()
-    }
-
-    pub(crate) unsafe fn register() {
-        // SAFETY: caller registers once before any C frontend thread exists.
-        unsafe { cbm_daemon_frontend_set_stdio(receive, write) };
     }
 }
 

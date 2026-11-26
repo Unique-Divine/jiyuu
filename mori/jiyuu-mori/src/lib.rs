@@ -2,6 +2,9 @@
 
 pub mod ipc;
 
+#[cfg(any(feature = "native-engine-abi", test))]
+mod stdio;
+
 #[cfg(feature = "native-engine-abi")]
 mod ansible;
 #[cfg(feature = "native-engine-abi")]
