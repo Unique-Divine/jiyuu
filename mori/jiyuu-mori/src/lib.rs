@@ -21,6 +21,8 @@ mod jvm_doc_links;
 #[cfg(feature = "native-engine-abi")]
 mod kubernetes;
 #[cfg(feature = "native-engine-abi")]
+mod msbuild_condition;
+#[cfg(feature = "native-engine-abi")]
 mod native_graph_buffer;
 #[cfg(feature = "native-engine-abi")]
 mod native_hash_table;
