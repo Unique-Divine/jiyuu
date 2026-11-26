@@ -968,71 +968,29 @@ static bool socket_peer_is_current_user(int fd) {
 #endif
 }
 
-static int connection_read_full(cbm_daemon_ipc_connection_t *connection, void *buffer,
-                                size_t length, uint64_t deadline_ms) {
-    if (!connection || atomic_load_explicit(&connection->poisoned, memory_order_acquire)) {
-        return -1;
+static int connection_io_once(cbm_daemon_ipc_connection_t *connection, void *buffer,
+                              size_t length, uint64_t deadline_ms, bool writing) {
+    int ready = poll_until(connection->fd, writing ? POLLOUT : POLLIN, deadline_ms);
+    if (ready != 1) {
+        return ready;
     }
-    size_t offset = 0;
-    while (offset < length) {
-        int ready = poll_until(connection->fd, POLLIN, deadline_ms);
-        if (ready != 1) {
-            /* Framing is fail-stop across platforms.  Even at offset zero a
-             * deadline may race transport progress (notably OVERLAPPED I/O on
-             * Windows), so callers must reconnect instead of reusing a stream
-             * whose next byte boundary is uncertain. */
-            atomic_store_explicit(&connection->poisoned, true, memory_order_release);
-            return ready;
-        }
-        ssize_t received = recv(connection->fd, (uint8_t *)buffer + offset, length - offset, 0);
-        if (received > 0) {
-            offset += (size_t)received;
-            continue;
-        }
-        if (received == 0) {
-            atomic_store_explicit(&connection->poisoned, true, memory_order_release);
-            return -1;
-        }
-        if (errno != EINTR && errno != EAGAIN && errno != EWOULDBLOCK) {
-            atomic_store_explicit(&connection->poisoned, true, memory_order_release);
-            return -1;
-        }
-    }
-    return 1;
-}
-
-static int connection_write_full(cbm_daemon_ipc_connection_t *connection, const void *buffer,
-                                 size_t length, uint64_t deadline_ms) {
-    if (!connection || atomic_load_explicit(&connection->poisoned, memory_order_acquire)) {
-        return -1;
-    }
-    size_t offset = 0;
-    while (offset < length) {
-        int ready = poll_until(connection->fd, POLLOUT, deadline_ms);
-        if (ready != 1) {
-            atomic_store_explicit(&connection->poisoned, true, memory_order_release);
-            return ready;
-        }
+    ssize_t transferred;
+    if (writing) {
 #ifdef MSG_NOSIGNAL
-        ssize_t sent =
-            send(connection->fd, (const uint8_t *)buffer + offset, length - offset, MSG_NOSIGNAL);
+        transferred = send(connection->fd, buffer, length, MSG_NOSIGNAL);
 #else
-        ssize_t sent = send(connection->fd, (const uint8_t *)buffer + offset, length - offset, 0);
+        transferred = send(connection->fd, buffer, length, 0);
 #endif
-        if (sent > 0) {
-            offset += (size_t)sent;
-            continue;
-        }
-        if (sent == 0) {
-            atomic_store_explicit(&connection->poisoned, true, memory_order_release);
-            return -1;
-        }
-        if (errno != EINTR && errno != EAGAIN && errno != EWOULDBLOCK) {
-            atomic_store_explicit(&connection->poisoned, true, memory_order_release);
-            return -1;
-        }
+    } else {
+        transferred = recv(connection->fd, buffer, length, 0);
     }
-    return 1;
+    if (transferred > 0) {
+        return (int)transferred;
+    }
+    if (transferred < 0 && (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK)) {
+        return MORI_IPC_IO_RETRY;
+    }
+    return -1;
 }
 
 cbm_daemon_ipc_endpoint_t *cbm_daemon_ipc_endpoint_new(const char *instance_key,
@@ -6939,52 +6897,11 @@ static int win_io_once(cbm_daemon_ipc_connection_t *connection, void *buffer, DW
     return result;
 }
 
-static int connection_read_full(cbm_daemon_ipc_connection_t *connection, void *buffer,
-                                size_t length, uint64_t deadline_ms) {
-    if (!connection || atomic_load_explicit(&connection->poisoned, memory_order_acquire)) {
-        return -1;
-    }
-    size_t offset = 0;
-    while (offset < length) {
-        DWORD chunk = length - offset > MAXDWORD ? MAXDWORD : (DWORD)(length - offset);
-        DWORD transferred = 0;
-        int result = win_io_once(connection, (uint8_t *)buffer + offset, chunk, false, deadline_ms,
-                                 &transferred);
-        if (result != 1) {
-            atomic_store_explicit(&connection->poisoned, true, memory_order_release);
-            return result;
-        }
-        if (transferred == 0) {
-            atomic_store_explicit(&connection->poisoned, true, memory_order_release);
-            return -1;
-        }
-        offset += transferred;
-    }
-    return 1;
-}
-
-static int connection_write_full(cbm_daemon_ipc_connection_t *connection, const void *buffer,
-                                 size_t length, uint64_t deadline_ms) {
-    if (!connection || atomic_load_explicit(&connection->poisoned, memory_order_acquire)) {
-        return -1;
-    }
-    size_t offset = 0;
-    while (offset < length) {
-        DWORD chunk = length - offset > MAXDWORD ? MAXDWORD : (DWORD)(length - offset);
-        DWORD transferred = 0;
-        int result = win_io_once(connection, (void *)((const uint8_t *)buffer + offset), chunk,
-                                 true, deadline_ms, &transferred);
-        if (result != 1) {
-            atomic_store_explicit(&connection->poisoned, true, memory_order_release);
-            return result;
-        }
-        if (transferred == 0) {
-            atomic_store_explicit(&connection->poisoned, true, memory_order_release);
-            return -1;
-        }
-        offset += transferred;
-    }
-    return 1;
+static int connection_io_once(cbm_daemon_ipc_connection_t *connection, void *buffer,
+                              size_t length, uint64_t deadline_ms, bool writing) {
+    DWORD transferred = 0;
+    int result = win_io_once(connection, buffer, (DWORD)length, writing, deadline_ms, &transferred);
+    return result == 1 ? (transferred > 0 ? (int)transferred : -1) : result;
 }
 
 int cbm_daemon_ipc_startup_lock_try_acquire(const cbm_daemon_ipc_endpoint_t *endpoint,
@@ -7303,70 +7220,68 @@ bool cbm_daemon_ipc_local_transition_release(cbm_daemon_ipc_local_transition_t *
            CBM_DAEMON_IPC_RELEASE_COMPLETE;
 }
 
+static void connection_poison(cbm_daemon_ipc_connection_t *connection) {
+    atomic_store_explicit(&connection->poisoned, true, memory_order_release);
+}
+
+static bool connection_is_poisoned(cbm_daemon_ipc_connection_t *connection) {
+    return atomic_load_explicit(&connection->poisoned, memory_order_acquire);
+}
+
+static void connection_mark_written(const void *buffer, size_t length) {
+    (void)buffer;
+    (void)length;
+    CBM_MSAN_WRITTEN(buffer, length);
+}
+
+static const mori_ipc_transfer_ops_t transfer_ops = {
+    .io_once = connection_io_once,
+    .is_poisoned = connection_is_poisoned,
+    .mark_written = connection_mark_written,
+    .poison = connection_poison,
+    .alloc = malloc,
+    .free = free,
+};
+
 bool cbm_daemon_ipc_send_frame(cbm_daemon_ipc_connection_t *connection,
                                cbm_daemon_frame_type_t type, uint16_t flags, const void *payload,
                                uint32_t length) {
-    if (!connection || atomic_load_explicit(&connection->poisoned, memory_order_acquire) ||
-        (length > 0 && !payload)) {
-        return false;
+    return connection &&
+           mori_ipc_send(connection, &transfer_ops, ipc_deadline_after(CBM_DAEMON_IPC_SEND_TIMEOUT_MS),
+                         (int)type, flags, payload, length);
+}
+
+static int ipc_receive(cbm_daemon_ipc_connection_t *connection, uint32_t timeout_ms,
+                       uint32_t max_payload_length, bool after_failed_send,
+                       cbm_daemon_frame_t *frame_out, uint8_t **payload_out) {
+    if (payload_out) {
+        *payload_out = NULL;
     }
-    uint8_t header[CBM_DAEMON_FRAME_HEADER_SIZE];
-    if (!cbm_daemon_frame_header_encode(header, type, flags, length)) {
-        return false;
+    if (!connection || !frame_out || !payload_out ||
+        (!after_failed_send && connection_is_poisoned(connection))) {
+        return -1;
     }
-    uint64_t deadline_ms = ipc_deadline_after(CBM_DAEMON_IPC_SEND_TIMEOUT_MS);
-    if (connection_write_full(connection, header, sizeof(header), deadline_ms) != 1) {
-        return false;
+    if (after_failed_send) {
+        connection_poison(connection);
     }
-    if (length > 0 && connection_write_full(connection, payload, length, deadline_ms) != 1) {
-        /* The peer has already received a complete header and will interpret
-         * subsequent bytes as this payload, so this stream cannot be reused. */
-        atomic_store_explicit(&connection->poisoned, true, memory_order_release);
-        return false;
+    memset(frame_out, 0, sizeof(*frame_out));
+    mori_ipc_received_frame_t frame;
+    int result = mori_ipc_receive(connection, &transfer_ops, ipc_deadline_after(timeout_ms),
+                                  max_payload_length, after_failed_send, &frame);
+    if (result == 1) {
+        CBM_MSAN_WRITTEN(&frame, sizeof(frame));
+        frame_out->type = (cbm_daemon_frame_type_t)frame.kind;
+        frame_out->flags = frame.flags;
+        frame_out->length = frame.length;
+        *payload_out = frame.payload;
     }
-    return true;
+    return result;
 }
 
 int cbm_daemon_ipc_receive_frame_bounded(cbm_daemon_ipc_connection_t *connection,
                                          uint32_t timeout_ms, uint32_t max_payload_length,
                                          cbm_daemon_frame_t *frame_out, uint8_t **payload_out) {
-    if (payload_out) {
-        *payload_out = NULL;
-    }
-    if (!connection || atomic_load_explicit(&connection->poisoned, memory_order_acquire) ||
-        !frame_out || !payload_out) {
-        return -1;
-    }
-    memset(frame_out, 0, sizeof(*frame_out));
-    uint64_t deadline_ms = ipc_deadline_after(timeout_ms);
-    uint8_t header[CBM_DAEMON_FRAME_HEADER_SIZE];
-    int result = connection_read_full(connection, header, sizeof(header), deadline_ms);
-    if (result != 1) {
-        return result;
-    }
-    cbm_daemon_frame_t frame;
-    /* Enforce the caller's limit before allocating or reading payload bytes. */
-    if (!cbm_daemon_frame_header_decode_bounded(header, max_payload_length, &frame)) {
-        atomic_store_explicit(&connection->poisoned, true, memory_order_release);
-        return -1;
-    }
-    uint8_t *payload = NULL;
-    if (frame.length > 0) {
-        payload = malloc(frame.length);
-        if (!payload) {
-            atomic_store_explicit(&connection->poisoned, true, memory_order_release);
-            return -1;
-        }
-        result = connection_read_full(connection, payload, frame.length, deadline_ms);
-        if (result != 1) {
-            atomic_store_explicit(&connection->poisoned, true, memory_order_release);
-            free(payload);
-            return result;
-        }
-    }
-    *frame_out = frame;
-    *payload_out = payload;
-    return 1;
+    return ipc_receive(connection, timeout_ms, max_payload_length, false, frame_out, payload_out);
 }
 
 int cbm_daemon_ipc_receive_frame(cbm_daemon_ipc_connection_t *connection, uint32_t timeout_ms,
@@ -7379,16 +7294,5 @@ int cbm_daemon_ipc_receive_frame_after_failed_send(cbm_daemon_ipc_connection_t *
                                                    uint32_t timeout_ms, uint32_t max_payload_length,
                                                    cbm_daemon_frame_t *frame_out,
                                                    uint8_t **payload_out) {
-    if (!connection) {
-        return cbm_daemon_ipc_receive_frame_bounded(NULL, timeout_ms, max_payload_length, frame_out,
-                                                    payload_out);
-    }
-    /* The poison came from the failed send alone (nothing was read yet), and it
-     * guards the OUTBOUND frame boundary; the inbound one is intact. Lift it for
-     * this one receive, then restore it so no later send can reuse the stream. */
-    atomic_store_explicit(&connection->poisoned, false, memory_order_release);
-    int received = cbm_daemon_ipc_receive_frame_bounded(connection, timeout_ms, max_payload_length,
-                                                        frame_out, payload_out);
-    atomic_store_explicit(&connection->poisoned, true, memory_order_release);
-    return received;
+    return ipc_receive(connection, timeout_ms, max_payload_length, true, frame_out, payload_out);
 }
