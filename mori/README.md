@@ -46,8 +46,9 @@ impact summary and direct dependencies.
   <img src="docs/images/lens-explore.jpg" alt="Explore shows the source for limits.c beside its file impact summary and dependencies." width="1000">
 </p>
 
-See [Local Chat](#local-chat) for a caller and callee demo. These captures
-use the upstream CBM Lens UI and public source. [Capture notes](docs/images/README.md)
+See [Graph UI](#graph-ui) for more architecture views and
+[Local Chat](#local-chat) for a caller and callee demo. These captures use
+the upstream CBM Lens UI and public source. [Capture notes](docs/images/README.md)
 
 - [What Mori Answers](#what-mori-answers)
 - [Install](#install)

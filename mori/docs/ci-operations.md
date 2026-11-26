@@ -10,6 +10,7 @@ builds and tests the Mori packages.
 | Branch dry run | Linux x64, Linux arm64, Apple Silicon | Workflow artifact `mori-preview-<version>-<sha>` with archives and checksums |
 | Manual reference prewarm on `main` | Linux x64, Linux arm64, Apple Silicon | Frozen C reference caches |
 | Daily check | All four release targets | Build, download, smoke, and CLI parity results |
+| Manual daily check on `main` | All four release targets | Cold build and parity results, with issue reporting disabled |
 | Tagged release or tagged dry run | All four release targets | Archives and checksums for the exact tag commit |
 
 GitHub schedules the daily check for 04:23 UTC on the commit it selects
@@ -18,12 +19,13 @@ without restoring their caches. This exercises download and build steps
 even when routine previews use cached inputs. The tagged run builds and
 checks Intel macOS on the tag's commit before creating a draft release.
 
-For a branch preview, dispatch the workflow with the branch name. For a
-cache prewarm, dispatch it on `main` with the input `prewarm_oracle` enabled.
+Use the branch ref for a preview. Use `main` for a cache prewarm or a
+manual run of the daily checks.
 
 ```sh
 gh workflow run mori-release.yml --repo Unique-Divine/jiyuu --ref <branch> -f dry_run=true
 gh workflow run mori-release.yml --repo Unique-Divine/jiyuu --ref main -f dry_run=true -f prewarm_oracle=true
+gh workflow run mori-release.yml --repo Unique-Divine/jiyuu --ref main -f dry_run=true -f daily_check=true
 ```
 
 For a new stack's branch preview gate, require the three per-target
@@ -47,7 +49,7 @@ reproduction, diagnosis, and the fix.
 
 1. Open the linked job and read the first meaningful diagnostic in the
    failed step. When a job timed out, check the last completed step and the
-   last lines of output.
+   last lines of output. Use `--log` if `--log-failed` returns nothing.
 2. Rerun the failed jobs on the same commit. Save both attempt links in the
    issue so a passing retry does not erase the original failure.
 3. Check the failure against the categories below. If a source change is

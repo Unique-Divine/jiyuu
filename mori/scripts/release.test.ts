@@ -161,6 +161,29 @@ describe("workflow modes", () => {
   })
 })
 
+describe("workflow dependencies", () => {
+  test("each target can run parity when a different target fails", async () => {
+    const packageWorkflow = ".github/workflows/mori-package-target.yml"
+    const { YAML } = Bun as typeof Bun & { YAML: { parse(text: string): unknown } }
+    const readWorkflow = async (path: string) =>
+      YAML.parse(await Bun.file(new URL(`../../${path}`, import.meta.url)).text()) as {
+        jobs: Record<string, { needs?: string[] }>
+      }
+    const release = await readWorkflow(".github/workflows/mori-release.yml")
+    const target = await readWorkflow(packageWorkflow)
+
+    expect(release.jobs.platform).toMatchObject({
+      uses: `./${packageWorkflow}`,
+      strategy: { "fail-fast": false },
+    })
+    expect(target.jobs.build).toBeDefined()
+    expect(target.jobs.build?.needs).toBeUndefined()
+    expect(target.jobs["build-reference"]).toBeDefined()
+    expect(target.jobs["build-reference"]?.needs).toBeUndefined()
+    expect(target.jobs["cli-parity"]?.needs).toEqual(["build", "build-reference"])
+  })
+})
+
 describe("prepare", () => {
   test("writes checksums, metadata and notes", async () => {
     await withDir(async (dir) => {
