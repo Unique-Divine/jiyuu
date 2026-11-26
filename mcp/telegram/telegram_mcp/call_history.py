@@ -11,10 +11,11 @@ import sys
 from collections.abc import Generator, Iterator
 from contextlib import contextmanager, suppress
 from contextvars import ContextVar
+from functools import wraps
 from datetime import date, datetime, timedelta, timezone
 from itertools import count
 from pathlib import Path
-from queue import Full, Queue
+from queue import Empty, Full, Queue
 from threading import Lock, Thread
 from time import monotonic
 from typing import TYPE_CHECKING, Any
@@ -40,6 +41,7 @@ TRANSPORTS = frozenset({"stdio", "http", "unix"})
 OUTCOMES = frozenset(
     {
         "ok",
+        "completed",
         "error",
         "denied",
         "timeout",
@@ -90,6 +92,8 @@ CODES = frozenset(
         "slow_mode",
         "timeout",
         "tool_error",
+        "telegram_admin_required",
+        "telegram_privacy_restricted",
         "transport_error",
         "trial_attempt_limit",
         "trial_flood_stop",
@@ -116,12 +120,13 @@ def default_root() -> Path:
 def configure(
     root: Path | None = None, *, version: str = "unknown", transport: str | None = None
 ) -> History:
-    """Set up the process history without touching disk until the first event."""
+    """Set up the process history and prune expired records off the caller path."""
     global _history
     _history = History(
         default_root() if root is None else root, version=version, transport=transport
     )
     atexit.register(_history.flush, EXIT_FLUSH_SECONDS)
+    _history.start()
     return _history
 
 
@@ -319,20 +324,36 @@ class History:
             **{key: value for key, value in fields.items() if value is not None},
         }
 
+    def start(self) -> None:
+        with self._lock:
+            self._start_locked()
+
+    def _start_locked(self) -> None:
+        if self._worker is None:
+            worker = Thread(target=self._drain, name="telegram-call-history", daemon=True)
+            worker.start()
+            self._worker = worker
+
     def _enqueue(self, row: dict[str, Any]) -> None:
         with self._lock:
             try:
-                if self._worker is None:
-                    worker = Thread(target=self._drain, name="telegram-call-history", daemon=True)
-                    worker.start()
-                    self._worker = worker
+                self._start_locked()
                 self._queue.put_nowait(row)
             except (Full, RuntimeError):
                 self._dropped += 1
 
     def _drain(self) -> None:
+        last_prune = 0.0
         while True:
-            row = self._queue.get()
+            now = monotonic()
+            if last_prune == 0.0 or now - last_prune >= 60:
+                last_prune = now
+                with suppress(OSError):
+                    self._prune_expired()
+            try:
+                row = self._queue.get(timeout=60)
+            except Empty:
+                continue
             try:
                 self._repaired += self._write(row)
                 with self._lock:
@@ -375,6 +396,22 @@ class History:
         finally:
             os.close(root)
 
+    def _prune_expired(self) -> None:
+        root = _open_root(self.root)
+        try:
+            guard = _open_file(root, ".history.lock", os.O_RDWR | os.O_CREAT)
+            try:
+                assert fcntl is not None
+                fcntl.flock(guard, fcntl.LOCK_EX)
+                cutoff = _date_now().date() - timedelta(days=self._keep_days - 1)
+                for name, _, day, _, _ in _segments(root):
+                    if day < cutoff:
+                        os.unlink(name, dir_fd=root)
+            finally:
+                os.close(guard)
+        finally:
+            os.close(root)
+
     def _write_locked(self, root: int, row: dict[str, Any]) -> int:
         data = _encode(row)
         today = _date_now().date()
@@ -385,6 +422,20 @@ class History:
 
         surface = row["surface"]
         segments = sorted(_segments(root), key=lambda x: (x[2], x[4].st_mtime_ns, x[0]))
+        latest = max(
+            (segment for segment in segments if segment[1] == surface and segment[2] >= cutoff),
+            key=lambda x: (x[2], x[3]),
+            default=None,
+        )
+        repaired = 0
+        if latest is not None:
+            candidate = _open_file(root, latest[0], os.O_RDWR)
+            try:
+                repaired = _repair_tail(candidate)
+            finally:
+                os.close(candidate)
+            if repaired:
+                segments = sorted(_segments(root), key=lambda x: (x[2], x[4].st_mtime_ns, x[0]))
         active = max(
             (segment for segment in segments if segment[1:3] == (surface, day)),
             key=lambda x: x[3],
@@ -408,7 +459,7 @@ class History:
 
         fd = _open_file(root, name, os.O_RDWR | os.O_CREAT | os.O_APPEND)
         try:
-            repaired = _repair_tail(fd)
+            repaired += _repair_tail(fd)
             _append(fd, data)
             return repaired
         finally:
@@ -456,7 +507,7 @@ class Call:
         if self._finished:
             return
         self._finished = True
-        if outcome in {"ok", "error"} and self._failure is not None:
+        if outcome in {"ok", "completed", "error"} and self._failure is not None:
             outcome, code, wait_s = self._failure
         if len(self._accounts) == 1 and self._fields["accountId"] is None:
             self._fields["accountId"] = next(iter(self._accounts))
@@ -527,11 +578,27 @@ def install_mcp_hook(server: FastMCP) -> None:
 
     original_handler = server._mcp_server.request_handlers[CallToolRequest]
 
+    def instrument_tool(tool: Any) -> None:
+        original = tool.fn
+        if getattr(original, "_telegram_history_dispatch", False):
+            return
+
+        @wraps(original)
+        def dispatch(*args: Any, **kwargs: Any) -> Any:
+            if (call := _active_call.get()) is not None:
+                call.dispatch()
+            return original(*args, **kwargs)
+
+        setattr(dispatch, "_telegram_history_dispatch", True)
+        tool.fn = dispatch
+
     async def handle(req: CallToolRequest) -> ServerResult:
         history = current()
         if history is None:
             return await original_handler(req)
         tool = server._tool_manager.get_tool(req.params.name)
+        if tool is not None:
+            instrument_tool(tool)
         call = history.call("mcp", tool.name if tool is not None else "unknown")
         with tool_call(call):
             try:
@@ -551,7 +618,7 @@ def install_mcp_hook(server: FastMCP) -> None:
         elif protocol == "error":
             call.finish("error", code="tool_error", protocol_outcome=protocol)
         else:
-            call.finish("ok", protocol_outcome=protocol)
+            call.finish("completed", protocol_outcome=protocol)
         return response
 
     server._mcp_server.request_handlers[CallToolRequest] = handle

@@ -261,12 +261,21 @@ class Journal:
                    ON CONFLICT(account) DO UPDATE SET trial_id=excluded.trial_id,
                      generation=excluded.generation, state=excluded.state, cap=excluded.cap,
                      activate_ms=excluded.activate_ms, expires_ms=excluded.expires_ms,
-                     attempt_limit=excluded.attempt_limit, next_resume_ms=excluded.next_resume_ms
+                     attempt_limit=excluded.attempt_limit,
+                     next_resume_ms=CASE
+                         WHEN pool_trial_v1.trial_id=excluded.trial_id
+                          AND pool_trial_v1.generation=excluded.generation
+                         THEN NULLIF(MAX(COALESCE(pool_trial_v1.next_resume_ms,0),
+                                         COALESCE(excluded.next_resume_ms,0)),0)
+                         ELSE excluded.next_resume_ms END
                    WHERE pool_trial_v1.trial_id != excluded.trial_id
                       OR pool_trial_v1.generation < excluded.generation
                       OR (pool_trial_v1.generation = excluded.generation
                           AND pool_trial_v1.state != 'ended'
-                          AND (pool_trial_v1.state != 'paused' OR excluded.state IN ('paused','ended')))""",
+                          AND (pool_trial_v1.state != 'paused' OR excluded.state IN ('paused','ended')))
+                      OR (pool_trial_v1.trial_id=excluded.trial_id
+                          AND pool_trial_v1.generation=excluded.generation
+                          AND pool_trial_v1.state='ended' AND excluded.state='ended')""",
                 (
                     self.account,
                     trial_id,
@@ -743,6 +752,8 @@ class PoolTransport:
         except BrokerError:
             raise
         except Exception as error:
+            if self.record_read_wait(error) is not None:
+                raise BrokerError("hold") from None
             frame = traceback.extract_tb(error.__traceback__)[-1]
             print(
                 f"Chat pool capacity read failed ({type(error).__name__} at "

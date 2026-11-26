@@ -94,6 +94,13 @@ def test_trial_records_a_short_premium_wait_and_stops_across_restart(monkeypatch
     assert restarted.guard(action, now, reserve=False) is not None
     restarted.configure_trial(trial | {"generation": 2, "cap": 16})
     assert restarted.guard(action, now, reserve=False) is None
+    stopped = trial | {"generation": 2, "cap": 16, "state": "ended", "nextResumeAtMs": now + 50}
+    restarted.configure_trial(stopped)
+    restarted.configure_trial(stopped | {"nextResumeAtMs": now + 200})
+    restarted.configure_trial(stopped | {"nextResumeAtMs": None})
+    assert restarted.manual_trial_blocked()
+    now += 200
+    assert not restarted.manual_trial_blocked()
 
 
 @pytest.mark.asyncio
@@ -162,6 +169,43 @@ async def test_trial_socket_replays_flood_and_correlates_dispatch_history(monkey
     assert [event["event"] for event in trace] == ["call.start", "call.dispatch", "call.end"]
     assert trace[-1]["fillId"] == create["action"]["fillId"]
     assert trace[-1]["code"] == "hold"
+
+
+@pytest.mark.asyncio
+async def test_required_snapshot_wait_is_replayable(monkeypatch, tmp_path):
+    class Client:
+        async def get_me(self):
+            raise errors.FloodPremiumWaitError(
+                request=functions.users.GetUsersRequest([]), capture=2
+            )
+
+        async def iter_dialogs(self, *, limit):
+            if False:
+                yield
+
+    owner = PoolTransport(
+        cast(TelegramClient, Client()), fixture_state(monkeypatch, tmp_path), "42", b""
+    )
+    now = now_ms()
+    trial_id = "2d0a9c4b-32a4-42c3-9568-cc934bbc77d0"
+    owner.journal.configure_trial(
+        {
+            "id": trial_id,
+            "state": "running",
+            "generation": 1,
+            "cap": 32,
+            "activateAtMs": now - 1,
+            "expiresAtMs": now + fill_module.DAY_MS,
+            "attemptLimit": 120,
+        }
+    )
+    await owner.read_inventory()
+    with pytest.raises(BrokerError, match="hold"):
+        await owner.broker_snapshot()
+    replay = owner.journal.trial_events(trial_id, 0)
+    assert replay[0]["method"] == "users.getUsers"
+    assert replay[0]["source"] == "required_read"
+    assert replay[0]["outcome"] == "flood_premium_wait"
 
 
 @pytest.mark.asyncio
