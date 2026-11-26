@@ -46,6 +46,12 @@ inside the `nibiru` checkout. Do not recreate the retired `wasm-go-wasmvm`
 or `nibi-wasm` checkouts for maintained Nibiru work. The standalone Nibiru forks
 are public archives; use them only when historical source or releases are needed.
 
+## Upstream Developer Tools
+
+```bash
+git clone git@github.com:openai/codex.git "$HOME/codex"
+```
+
 ## Personal repos (examples)
 
 These are **outside** `NibiruChain`; URLs follow your forks.
