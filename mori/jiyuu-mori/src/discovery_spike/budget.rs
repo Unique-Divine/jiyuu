@@ -17,7 +17,7 @@ pub(super) struct Limits {
     pub resource_bytes: Limit,
 }
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Default, Debug, Eq, PartialEq)]
 #[repr(C)]
 pub(super) struct Violation {
     pub resource: c_int,
@@ -26,7 +26,7 @@ pub(super) struct Violation {
 }
 
 // cbm_index_resource_t. A zero resource means the bounded count ceiling.
-const BOUNDED_COUNT: c_int = 0;
+pub(super) const BOUNDED_COUNT: c_int = 0;
 const RESOURCE_FILES: c_int = 1;
 const RESOURCE_SOURCE_BYTES: c_int = 2;
 
@@ -49,6 +49,10 @@ impl Budget {
 
     pub fn deadline_expired(&self, now_ms: impl FnOnce() -> u64) -> bool {
         self.limits.deadline_ms != 0 && now_ms() >= self.limits.deadline_ms
+    }
+
+    pub fn count(&self) -> u64 {
+        self.count
     }
 
     pub fn admit(

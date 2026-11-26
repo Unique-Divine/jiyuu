@@ -528,8 +528,6 @@ typedef struct {
     cbm_file_info_t *files;
     int count;
     int capacity;
-    int max_files;
-    uint64_t deadline_ms;
     const cbm_index_resource_policy_t *resource_policy;
     cbm_index_resource_violation_t *resource_violation;
     bool count_only;
@@ -638,10 +636,6 @@ static int64_t discover_stat_mtime_ns(const struct stat *st) {
 
 static void fl_append(file_list_t *fl, const char *abs_path, const char *rel_path, CBMLanguage lang,
                       const struct stat *st) {
-    if (fl->count_only) {
-        fl->count++;
-        return;
-    }
     if (fl->count >= fl->capacity) {
         int new_cap = fl->capacity ? fl->capacity * PAIR_LEN : CBM_SZ_256;
         cbm_file_info_t *new_files = realloc(fl->files, new_cap * sizeof(cbm_file_info_t));
@@ -1149,14 +1143,13 @@ static void walk_dir_process_file(const cbm_discover_selection_t *entry,
     if (lang == CBM_LANG_COUNT) {
         return;
     }
+    if (out->count_only) {
+        ops->admit(state, (int64_t)entry->st->st_size, NULL);
+        return;
+    }
     cbm_index_resource_violation_t violation = {0};
     if (!ops->admit(state, (int64_t)entry->st->st_size, &violation)) {
-        if (violation.resource == CBM_INDEX_RESOURCE_NONE) {
-            out->limit_exceeded = true;
-        } else {
-            file_list_resource_violation(out, violation.resource, violation.observed,
-                                         violation.limit);
-        }
+        file_list_resource_violation(out, violation.resource, violation.observed, violation.limit);
         return;
     }
     fl_append(out, entry->abs_path, rel, lang, entry->st);
@@ -1315,20 +1308,23 @@ bool cbm_discover_walk_stopped(cbm_discover_walk_t *walk) {
     return walk->out->failed || walk->out->limit_exceeded;
 }
 
-void cbm_discover_walk_limits(const cbm_discover_walk_t *walk, cbm_discover_walk_limits_t *limits) {
-    const file_list_t *out = walk->out;
-    *limits = (cbm_discover_walk_limits_t){.deadline_ms = out->deadline_ms,
-                                          .max_files = out->max_files};
-    if (out->resource_policy) {
-        limits->resource_files = out->resource_policy->max_files;
-        limits->resource_bytes = out->resource_policy->max_source_bytes;
+static void discover_resource_limits(const cbm_index_resource_policy_t *policy,
+                                     cbm_discover_walk_limits_t *limits) {
+    if (policy) {
+        limits->resource_files = policy->max_files;
+        limits->resource_bytes = policy->max_source_bytes;
     }
+}
+
+void cbm_discover_walk_limits(const cbm_discover_walk_t *walk, cbm_discover_walk_limits_t *limits) {
+    *limits = (cbm_discover_walk_limits_t){.max_files = -1};
+    discover_resource_limits(walk->out->resource_policy, limits);
 }
 
 static void walk_dir(const char *dir_path, const cbm_discover_opts_t *opts,
                      const cbm_gitignore_t *gitignore, const gitignore_link_t *ancestors,
                      const cbm_gitignore_t *global_gi, const cbm_gitignore_t *cbmignore,
-                     file_list_t *out) {
+                     file_list_t *out, cbm_discover_bounded_walk_fn bounded_walk, void *state) {
     walk_frame_t root = {.ignore_chain = ancestors};
     int length = snprintf(root.dir, sizeof(root.dir), "%s", dir_path);
     if (length <= 0 || (size_t)length >= sizeof(root.dir)) {
@@ -1344,10 +1340,7 @@ static void walk_dir(const char *dir_path, const cbm_discover_opts_t *opts,
             return;
         }
     }
-    if (out->count_only) {
-        cbm_log_debug("discover.admission_backend", "implementation", "rust");
-    }
-    if (!mori_discover_walk(&walk, &root)) {
+    if (!(bounded_walk ? bounded_walk(&walk, &root, state) : mori_discover_walk(&walk, &root))) {
         out->failed = true;
     }
     walk_owned_gitignore_free(walk.owned_gis, walk.owned_count);
@@ -1721,41 +1714,13 @@ int cbm_discover_ex(const char *repo_path, const cbm_discover_opts_t *opts, cbm_
                             NULL, NULL);
 }
 
-static cbm_discover_status_t discover_impl(const char *repo_path, const cbm_discover_opts_t *opts,
-                                           cbm_file_info_t **out, int *count, char ***excluded_out,
-                                           int *excluded_count_out,
-                                           cbm_ignored_file_t **ignored_out, int *ignored_count_out,
-                                           int *ignored_total_out, bool count_only, int max_files,
-                                           uint64_t deadline_ms) {
-    if (excluded_out) {
-        *excluded_out = NULL;
-    }
-    if (excluded_count_out) {
-        *excluded_count_out = 0;
-    }
-    if (ignored_out) {
-        *ignored_out = NULL;
-    }
-    if (ignored_count_out) {
-        *ignored_count_out = 0;
-    }
-    if (ignored_total_out) {
-        *ignored_total_out = 0;
-    }
-    if (opts && opts->resource_violation) {
-        *opts->resource_violation = (cbm_index_resource_violation_t){0};
-    }
-    if (!repo_path || !out || !count || (count_only && max_files < 0)) {
-        return CBM_DISCOVER_ERROR;
-    }
-
-    *out = NULL;
-    *count = 0;
-
+static bool discover_walk_repo(const char *repo_path, const cbm_discover_opts_t *opts,
+                               file_list_t *out, cbm_discover_bounded_walk_fn bounded_walk,
+                               void *state) {
     /* Verify directory exists */
     struct stat st;
     if (wide_stat(repo_path, &st) != 0 || !S_ISDIR(st.st_mode)) {
-        return CBM_DISCOVER_ERROR;
+        return false;
     }
 
     /* Load gitignore sources for ordinary repos AND linked worktrees.
@@ -1820,7 +1785,7 @@ static cbm_discover_status_t discover_impl(const char *repo_path, const cbm_disc
             if (!ancestor_ignores_build(&ancestors, enclosing_root, canonical_repo, git_exclude)) {
                 ancestor_ignores_free(&ancestors);
                 cbm_gitignore_free(gitignore);
-                return CBM_DISCOVER_ERROR;
+                return false;
             }
         } else if (git_exclude) {
             if (!gitignore) {
@@ -1850,41 +1815,61 @@ static cbm_discover_status_t discover_impl(const char *repo_path, const cbm_disc
     }
 
     /* Walk */
-    file_list_t fl = {
-        .max_files = count_only ? max_files : -1,
-        .deadline_ms = count_only ? deadline_ms : 0,
-        .resource_policy = opts ? opts->resource_policy : NULL,
-        .resource_violation = opts ? opts->resource_violation : NULL,
-        .count_only = count_only,
-        .collect_excluded = !count_only && excluded_out != NULL,
-        .collect_ignored = !count_only && ignored_out != NULL,
-    };
     discover_tracked_t tracked = {0};
     if (is_git_repo) {
         tracked_load(&tracked, repo_path);
-        fl.tracked = &tracked;
+        out->tracked = &tracked;
     }
     walk_cache_dir_snapshot();
-    walk_dir(repo_path, opts, gitignore, ancestors.chain, global_gi, cbmignore, &fl);
+    walk_dir(repo_path, opts, gitignore, ancestors.chain, global_gi, cbmignore, out, bounded_walk,
+             state);
 
     /* Cleanup */
+    out->tracked = NULL;
     tracked_free(&tracked);
     ancestor_ignores_free(&ancestors);
     cbm_gitignore_free(gitignore);
     cbm_gitignore_free(global_gi);
     cbm_gitignore_free(cbmignore);
 
-    if (count_only) {
-        cbm_discover_free(fl.files, fl.count);
-        cbm_discover_free_excluded(fl.excluded, fl.excluded_count);
-        cbm_discover_free_ignored(fl.ignored, fl.ignored_count);
-        *count = fl.count;
-        if (fl.failed) {
-            return CBM_DISCOVER_ERROR;
-        }
-        return fl.limit_exceeded ? CBM_DISCOVER_LIMIT_EXCEEDED : CBM_DISCOVER_OK;
+    return !out->failed;
+}
+
+int cbm_discover_ex2(const char *repo_path, const cbm_discover_opts_t *opts, cbm_file_info_t **out,
+                     int *count, char ***excluded_out, int *excluded_count_out,
+                     cbm_ignored_file_t **ignored_out, int *ignored_count_out,
+                     int *ignored_total_out) {
+    if (excluded_out) {
+        *excluded_out = NULL;
     }
-    if (fl.failed || fl.limit_exceeded) {
+    if (excluded_count_out) {
+        *excluded_count_out = 0;
+    }
+    if (ignored_out) {
+        *ignored_out = NULL;
+    }
+    if (ignored_count_out) {
+        *ignored_count_out = 0;
+    }
+    if (ignored_total_out) {
+        *ignored_total_out = 0;
+    }
+    if (opts && opts->resource_violation) {
+        *opts->resource_violation = (cbm_index_resource_violation_t){0};
+    }
+    if (!repo_path || !out || !count) {
+        return CBM_DISCOVER_ERROR;
+    }
+
+    *out = NULL;
+    *count = 0;
+    file_list_t fl = {
+        .resource_policy = opts ? opts->resource_policy : NULL,
+        .resource_violation = opts ? opts->resource_violation : NULL,
+        .collect_excluded = excluded_out != NULL,
+        .collect_ignored = ignored_out != NULL,
+    };
+    if (!discover_walk_repo(repo_path, opts, &fl, NULL, NULL) || fl.limit_exceeded) {
         cbm_discover_free(fl.files, fl.count);
         cbm_discover_free_excluded(fl.excluded, fl.excluded_count);
         cbm_discover_free_ignored(fl.ignored, fl.ignored_count);
@@ -1919,30 +1904,19 @@ static cbm_discover_status_t discover_impl(const char *repo_path, const cbm_disc
     return CBM_DISCOVER_OK;
 }
 
-int cbm_discover_ex2(const char *repo_path, const cbm_discover_opts_t *opts, cbm_file_info_t **out,
-                     int *count, char ***excluded_out, int *excluded_count_out,
-                     cbm_ignored_file_t **ignored_out, int *ignored_count_out,
-                     int *ignored_total_out) {
-    return discover_impl(repo_path, opts, out, count, excluded_out, excluded_count_out, ignored_out,
-                         ignored_count_out, ignored_total_out, false, 0, 0);
+bool cbm_discover_run_bounded(const char *repo_path, const cbm_discover_opts_t *opts,
+                              cbm_discover_bounded_walk_fn walk, void *state) {
+    file_list_t native_state = {.count_only = true};
+    return discover_walk_repo(repo_path, opts, &native_state, walk, state);
 }
 
 cbm_discover_status_t cbm_discover_count_bounded(const char *repo_path,
                                                  const cbm_discover_opts_t *opts, int max_files,
                                                  uint64_t deadline_ms, int *count_out) {
-    if (count_out) {
-        *count_out = -1;
-    }
-    if (!repo_path || !count_out || max_files < 0) {
-        return CBM_DISCOVER_ERROR;
-    }
-    cbm_file_info_t *files = NULL;
-    int count = 0;
-    cbm_discover_status_t status = discover_impl(repo_path, opts, &files, &count, NULL, NULL, NULL,
-                                                 NULL, NULL, true, max_files, deadline_ms);
-    cbm_discover_free(files, count);
-    *count_out = status == CBM_DISCOVER_ERROR ? -1 : count;
-    return status;
+    cbm_discover_walk_limits_t limits = {.deadline_ms = deadline_ms, .max_files = max_files};
+    discover_resource_limits(opts ? opts->resource_policy : NULL, &limits);
+    return mori_discover_count_bounded(repo_path, opts, &limits,
+                                       opts ? opts->resource_violation : NULL, count_out);
 }
 
 void cbm_discover_free(cbm_file_info_t *files, int count) {

@@ -1,18 +1,20 @@
 # Rust Directory Walk
 
-The C entry points `cbm_discover_ex2` and
-`cbm_discover_count_bounded` call the exported Rust function
-`mori_discover_walk` directly. Mori and the candidate C test runners
-link the same implementation through feature `native-engine-abi`.
-Compare the candidate with the standalone oracle built from `8bdd8fc`.
+The C entry point `cbm_discover_count_bounded` calls the Rust function
+`mori_discover_count_bounded`, which runs the shared walker, writes the
+count and resource diagnostic, and returns the status. The C manifest entry point
+`cbm_discover_ex2` calls `mori_discover_walk` and owns the result arrays.
+Mori and the candidate C test runners link both Rust functions through
+feature `native-engine-abi`. The pinned oracle at `8bdd8fc` runs the C walk
+by default.
 
 Rust scans a directory before visiting its children in reverse enumeration
 order. It decides which directories to descend into, applies ignore
 precedence and tracked-path exceptions, and checks the bounded count,
 aggregate file and byte limits, and monotonic deadline. C provides the
-ignore rules and tracked paths, performs native metadata and language
-probes, and owns the result arrays. The Windows walker uses the existing
-UTF-8 Win32 enumeration helpers. Path capacity, symlink and reparse-point
+ignore rules and tracked paths and performs native metadata and language
+probes. The Windows walker uses the existing UTF-8 Win32 enumeration
+helpers. Path capacity, symlink and reparse-point
 handling, and native mtimes follow the existing C metadata probes.
 
 Initial discovery, fresh manifest validation, and stored-depth

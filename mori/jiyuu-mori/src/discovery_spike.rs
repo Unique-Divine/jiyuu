@@ -894,6 +894,55 @@ fn admission_reports_resource_limit_details() {
 }
 
 #[test]
+fn admission_publishes_count_and_resets_diagnostic_at_the_abi() {
+    let scratch = Scratch::new();
+    let root = c_path(&scratch.0);
+    let missing = c_path(&scratch.0.join("missing"));
+    let mut violation = ResourceViolation {
+        resource: 1,
+        observed: 2,
+        limit: 1,
+    };
+    let opts = Options {
+        mode: Mode::Full,
+        ignore_file: null(),
+        max_file_size: 0,
+        resource_policy: null(),
+        resource_violation: std::ptr::from_mut(&mut violation).cast(),
+    };
+    let mut count = 42;
+
+    // SAFETY: All non-null arguments refer to live ABI inputs and outputs.
+    unsafe {
+        assert_eq!(
+            cbm_discover_count_bounded(root.as_ptr(), &opts, -1, 0, &mut count),
+            -1
+        );
+        assert_eq!(count, -1);
+        assert_eq!(violation.resource, 1);
+
+        assert_eq!(
+            cbm_discover_count_bounded(
+                missing.as_ptr(),
+                &opts,
+                0,
+                0,
+                &mut count
+            ),
+            -1
+        );
+        assert_eq!(count, -1);
+        assert_eq!(violation, ResourceViolation::default());
+
+        assert_eq!(
+            cbm_discover_count_bounded(root.as_ptr(), null(), 0, 0, &mut count),
+            0
+        );
+        assert_eq!(count, 0);
+    }
+}
+
+#[test]
 fn ordinary_discovery_discards_partial_results_on_resource_refusal() {
     let scratch = Scratch::new();
     let body = "fn entry() {}\n";
