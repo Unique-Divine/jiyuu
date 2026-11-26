@@ -15,6 +15,30 @@ GRAMMARS = "965435e26af6b1a3f13433100d9d60b91176f35f03b6b2fe248695b096378270"
 BUILDER = Path(__file__).with_name("build-c-reference.sh")
 EXECUTABLE = "codebase-memory-mcp"
 MANIFEST = "manifest.json"
+BUILD_ENV = (
+    "CC",
+    "CXX",
+    "CFLAGS_EXTRA",
+    "CPPFLAGS",
+    "LDFLAGS",
+    "SDKROOT",
+    "MACOSX_DEPLOYMENT_TARGET",
+    "MORI_REFERENCE_VERSION",
+    "MORI_WITH_UI",
+    "TEST_SEAMS",
+)
+PROCESS_ENV = (
+    "PATH",
+    "HOME",
+    "TMPDIR",
+    "MORI_MAKE_JOBS",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "NO_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "no_proxy",
+)
 
 
 def digest(path: Path) -> str:
@@ -59,21 +83,9 @@ def identity(target: str) -> dict[str, str]:
         "bun": output("bun", "--version"),
         "builder": digest(BUILDER),
         "cache_tool": digest(Path(__file__)),
-        **{
-            name: os.environ.get(name, "")
-            for name in (
-                "CC",
-                "CXX",
-                "CFLAGS_EXTRA",
-                "CPPFLAGS",
-                "LDFLAGS",
-                "SDKROOT",
-                "MACOSX_DEPLOYMENT_TARGET",
-                "MORI_REFERENCE_VERSION",
-                "MORI_WITH_UI",
-                "TEST_SEAMS",
-            )
-        },
+        "runner_image": os.environ.get("ImageVersion", ""),
+        "make": output("make", "--version"),
+        **{name: os.environ.get(name, "") for name in BUILD_ENV},
     }
 
 
@@ -103,7 +115,17 @@ def build_or_verify(directory: Path, inputs: dict[str, str]) -> None:
     with tempfile.TemporaryDirectory(dir=directory.parent) as scratch:
         staged = Path(scratch) / "reference"
         staged.mkdir()
-        subprocess.run(["bash", str(BUILDER), str(staged / EXECUTABLE)], check=True)
+        environment = {
+            name: os.environ[name]
+            for name in (*BUILD_ENV, *PROCESS_ENV)
+            if name in os.environ
+        }
+        environment.update(LC_ALL="C", GIT_TERMINAL_PROMPT="0")
+        subprocess.run(
+            ["bash", str(BUILDER), str(staged / EXECUTABLE)],
+            check=True,
+            env=environment,
+        )
         (staged / MANIFEST).write_text(
             json.dumps(
                 {"inputs": inputs, "sha256": digest(staged / EXECUTABLE)},
