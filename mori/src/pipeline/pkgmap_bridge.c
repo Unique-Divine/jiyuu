@@ -13,6 +13,10 @@ void *cbm_pkgmap_tracked_calloc(size_t size) {
     return cbm_calloc(CBM_MEM_CLASS_OTHER, size);
 }
 
+void *cbm_pkgmap_binding_scratch_alloc(size_t size) {
+    return cbm_alloc(CBM_MEM_CLASS_OTHER, size);
+}
+
 char *cbm_pkgmap_tracked_strdup(const char *value) {
     return cbm_mem_strdup(CBM_MEM_CLASS_OTHER, value);
 }
