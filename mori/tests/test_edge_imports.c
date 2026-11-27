@@ -52,6 +52,7 @@
 #include <pipeline/pipeline.h>
 #include <pipeline/pipeline_internal.h>
 #include <foundation/log.h>
+#include <foundation/mem_core.h>
 
 #include <string.h>
 #include <stdlib.h>
@@ -2342,10 +2343,39 @@ TEST(ei_php_binding_snapshot_groups_kinds_and_invalidates_failed_rebuild) {
     ASSERT_NOT_NULL(ns);
     cbm_pipeline_ctx_t ctx = {.project_name = "p", .gbuf = gb};
     CBMHashTable *saved = cbm_pipeline_get_pkgmap();
+#if defined(CBM_MEM_TEST_API) && CBM_MEM_TEST_API
+    const char *namespace_names[] = {"Local", "Lib\\Pkg\\SharedBindings"};
+    cbm_mem_test_fail_alloc_size(CBM_MEM_CLASS_OTHER, strlen(namespace_names[1]) + 1);
+    CBMHashTable *failed_namespaces =
+        cbm_pipeline_namespace_map_build_names("p", namespace_names, rels, 2);
+    ASSERT_TRUE(cbm_mem_test_reset_alloc_failure());
+    ASSERT_NULL(failed_namespaces);
+
+    const size_t target_bytes = (size_t)r->imports.count * sizeof(cbm_gbuf_node_t *);
+    cbm_pipeline_set_pkgmap(NULL);
+    cbm_mem_test_fail_alloc_size(CBM_MEM_CLASS_OTHER, target_bytes);
+    int failed_write = cbm_pipeline_php_create_import_edges(&ctx, r, "main.php", file_qn, file, ns);
+    bool write_fault = cbm_mem_test_reset_alloc_failure();
+    cbm_pipeline_set_pkgmap(saved);
+    ASSERT_TRUE(write_fault);
+    ASSERT_EQ(failed_write, 0);
+#endif
     cbm_pipeline_set_pkgmap(NULL);
     cbm_pipeline_php_create_import_edges(&ctx, r, "main.php", file_qn, file, ns);
     cbm_pipeline_set_pkgmap(saved);
     cbm_php_vendor_names_t names = {0};
+#if defined(CBM_MEM_TEST_API) && CBM_MEM_TEST_API
+    const size_t scratch_sizes[] = {
+        (size_t)r->imports.count * sizeof(char *),
+        (size_t)r->imports.count * sizeof(int),
+    };
+    for (size_t i = 0; i < sizeof(scratch_sizes) / sizeof(scratch_sizes[0]); i++) {
+        cbm_mem_test_fail_alloc_size(CBM_MEM_CLASS_OTHER, scratch_sizes[i]);
+        cbm_pipeline_php_vendor_names_build(gb, "p", "main.php", r, &names);
+        ASSERT_TRUE(cbm_mem_test_reset_alloc_failure());
+        ASSERT_NULL(names.targets);
+    }
+#endif
     cbm_pipeline_php_vendor_names_build(gb, "p", "main.php", r, &names);
     ASSERT_NOT_NULL(names.targets);
     for (int i = 0; i < r->imports.count; i++)
