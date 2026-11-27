@@ -16,6 +16,16 @@ pub(super) struct Node {
 }
 
 unsafe extern "C" {
+    pub(super) fn cbm_gbuf_find_by_qn(
+        graph: *const c_void,
+        qn: *const c_char,
+    ) -> *const Node;
+
+    pub(super) fn cbm_gbuf_node_set_properties_json(
+        node: *mut Node,
+        props: *const c_char,
+    ) -> c_int;
+
     pub(super) fn cbm_gbuf_find_by_id(
         graph: *const c_void,
         id: i64,

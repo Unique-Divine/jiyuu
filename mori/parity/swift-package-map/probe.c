@@ -13,6 +13,72 @@ static void print_entries(const char *scan, int manifests, cbm_pkg_entries_t *en
     cbm_pkg_entries_free(entries);
 }
 
+static char *file_qn(cbm_pipeline_ctx_t *ctx, const char *path, const char *name) {
+    char *qn = cbm_pipeline_fqn_compute(ctx->project_name, path, "__file__");
+    assert(qn);
+    assert(cbm_gbuf_upsert_node(ctx->gbuf, "File", name, qn, path, 1, 1, "{}"));
+    return qn;
+}
+
+static void check_import_selection(cbm_pipeline_ctx_t *ctx) {
+    char *go_module = cbm_pipeline_resolve_module(ctx, "app.go", "example.com/demo/lib/tools");
+    assert(go_module);
+    const size_t project_len = strlen(ctx->project_name);
+    assert(strncmp(go_module, ctx->project_name, project_len) == 0);
+    assert(strcmp(go_module + project_len, ".lib.tools") == 0);
+    printf("module\t%s\n", go_module);
+    free(go_module);
+
+    const char *php_source = "Php/Client.php";
+    const char *php_provider = "Php/src/Thing.php";
+    char *php_source_qn = file_qn(ctx, php_source, "Client.php");
+    char *php_provider_qn = file_qn(ctx, php_provider, "Thing.php");
+    const char *namespace_names[] = {"Z", "Z"};
+    const char *namespace_paths[] = {php_source, php_provider};
+    CBMHashTable *namespace_map = cbm_pipeline_namespace_map_build_names(
+        ctx->project_name, namespace_names, namespace_paths, 2);
+    assert(namespace_map);
+    const char *bucket = cbm_ht_get(namespace_map, "Z");
+    assert(bucket && strstr(bucket, php_source_qn) == bucket);
+    const char *other = strchr(bucket, '\n');
+    assert(other && strcmp(other + 1, php_provider_qn) == 0);
+
+    CBMImport php[] = {
+        {.module_path = "Z\\Thing", .local_name = "Thing"},
+        {.module_path = "Z\\Missing", .local_name = "Missing"},
+    };
+    const cbm_gbuf_node_t *hit =
+        cbm_pipeline_resolve_import_node(ctx, php_source, php_source_qn, &php[0], namespace_map);
+    assert(hit && strcmp(hit->qualified_name, php_provider_qn) == 0);
+    assert(
+        !cbm_pipeline_resolve_import_node(ctx, php_source, php_source_qn, &php[1], namespace_map));
+    printf("psr4\t%s\t%s\n", php_source_qn, hit->qualified_name);
+    cbm_pipeline_namespace_map_free(namespace_map);
+    free(php_source_qn);
+    free(php_provider_qn);
+
+    char *cargo = file_qn(ctx, "Workspace/Cargo.toml", "Cargo.toml");
+    char *rust_source_qn = file_qn(ctx, "Workspace/src/lib.rs", "lib.rs");
+    char *rust_target =
+        cbm_pipeline_fqn_compute(ctx->project_name, "Workspace/src/known.rs", "known");
+    assert(rust_target);
+    assert(cbm_gbuf_upsert_node(ctx->gbuf, "Function", "known", rust_target,
+                                "Workspace/src/known.rs", 1, 1, "{}"));
+    CBMImport rust[] = {
+        {.module_path = "crate::known", .local_name = "known"},
+        {.module_path = "dependency::known", .local_name = "known"},
+    };
+    hit = cbm_pipeline_resolve_import_node(ctx, "Workspace/src/lib.rs", rust_source_qn, &rust[0],
+                                           NULL);
+    assert(hit && strcmp(hit->qualified_name, rust_target) == 0);
+    assert(!cbm_pipeline_resolve_import_node(ctx, "Workspace/src/lib.rs", rust_source_qn, &rust[1],
+                                             NULL));
+    printf("rust\t%s\t%s\n", rust_source_qn, hit->qualified_name);
+    free(cargo);
+    free(rust_source_qn);
+    free(rust_target);
+}
+
 int main(int argc, char **argv) {
     assert(argc == 2);
     cbm_log_set_level(CBM_LOG_NONE);
@@ -81,6 +147,8 @@ int main(int argc, char **argv) {
     assert(count == 1 && edges[0]->target_id == target);
     printf("edge\t%s\t%s\t%s\t%s\n", source_qn, edges[0]->type, target_qn,
            edges[0]->properties_json);
+
+    check_import_selection(&ctx);
 
     free(source_qn);
     free(target_qn);

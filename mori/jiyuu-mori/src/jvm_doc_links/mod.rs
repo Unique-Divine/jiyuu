@@ -118,6 +118,7 @@ use std::sync::atomic::{AtomicI64, Ordering};
 mod java;
 mod kotlin;
 
+use super::native_graph_buffer::{Node as GraphNode, cbm_gbuf_find_by_qn};
 use super::native_hash_table::{
     HashTable, cbm_ht_count, cbm_ht_create, cbm_ht_free, cbm_ht_get, cbm_ht_set,
 };
@@ -129,18 +130,6 @@ use kotlin::{ext_key, kotlin_resolve, kotlin_type_path};
 enum Graph {}
 enum PipelineContext {}
 enum Arena {}
-
-#[repr(C)]
-struct GraphNode {
-    id: i64,
-    label: *mut c_char,
-    name: *mut c_char,
-    qualified_name: *mut c_char,
-    file_path: *mut c_char,
-    start_line: i32,
-    end_line: i32,
-    properties_json: *mut c_char,
-}
 
 #[repr(C)]
 struct DocLink {
@@ -281,10 +270,6 @@ unsafe extern "C" {
         a3: i32,
     ) -> *mut c_char;
     fn cbm_free(a0: i32, a1: *mut c_void);
-    fn cbm_gbuf_find_by_qn(
-        a0: *const Graph,
-        a1: *const c_char,
-    ) -> *const GraphNode;
     fn cbm_label_is_type_like(a0: *const c_char) -> bool;
     fn cbm_log(a0: i32, a1: *const c_char, ...);
     fn mori_jvm_doclinks_should_skip_dir(a0: *const c_char, a1: i32) -> bool;
@@ -2495,11 +2480,11 @@ unsafe fn node_at(
         return ptr::null();
     }
     let n: *const GraphNode = cbm_gbuf_find_by_qn(
-        c.g,
+        c.g.cast(),
         (addr_of_mut!(qn).cast::<c_char>()) as *const c_char,
     );
     if ((!(n).is_null()) && (!((*n).file_path).is_null()))
-        && (strcmp(((*n).file_path) as *const c_char, (*f).rel_path) == 0)
+        && (strcmp((*n).file_path, (*f).rel_path) == 0)
     {
         n
     } else {
@@ -2527,9 +2512,7 @@ unsafe fn type_node(c: &ResolveContext, d: Decl) -> *const GraphNode {
             (*t).slot
         },
     );
-    if (!(n).is_null())
-        && (cbm_label_is_type_like(((*n).label) as *const c_char))
-    {
+    if (!(n).is_null()) && (cbm_label_is_type_like((*n).label)) {
         n
     } else {
         ptr::null()
@@ -2569,9 +2552,9 @@ unsafe fn member_node(
         return ptr::null();
     }
     if (if (((*o).kind) as i32) == b'c' as i32 {
-        i32::from(label_callable(((*n).label) as *const c_char))
+        i32::from(label_callable((*n).label))
     } else {
-        i32::from(label_value(((*n).label) as *const c_char))
+        i32::from(label_value((*n).label))
     }) != 0
     {
         n
@@ -4789,12 +4772,12 @@ unsafe fn source_has_node(c: &ResolveContext, link: *const DocLink) -> bool {
         return !type_node(c, d).is_null();
     }
     let n: *const GraphNode = if !((*link).source_qn).is_null() {
-        cbm_gbuf_find_by_qn(c.g, (*link).source_qn)
+        cbm_gbuf_find_by_qn(c.g.cast(), (*link).source_qn)
     } else {
         ptr::null()
     };
     (((!(n).is_null()) && (!((*n).file_path).is_null()))
-        && (strcmp(((*n).file_path) as *const c_char, (*c.f).rel_path) == 0))
+        && (strcmp((*n).file_path, (*c.f).rel_path) == 0))
         && ((*n).start_line == (((*link).def_line) as i32))
 }
 

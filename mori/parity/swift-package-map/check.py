@@ -85,6 +85,7 @@ C_SOURCES = [
     "src/foundation/str_util.c",
     "src/foundation/yaml.c",
     "internal/cbm/helpers.c",
+    "internal/cbm/ts_runtime.c",
     "vendored/yyjson/yyjson.c",
 ]
 
@@ -104,6 +105,7 @@ CC = [
     "-Ivendored/mimalloc/include",
     "-Iinternal/cbm",
     "-Iinternal/cbm/vendored/ts_runtime/include",
+    "-Iinternal/cbm/vendored/ts_runtime/src",
 ]
 
 
@@ -129,9 +131,11 @@ def probe(scratch: Path) -> str:
     rust_probe = scratch / "pkgmap.rs"
     rust_probe.write_text(
         "".join(
-            f'#[path = "../jiyuu-mori/src/{path}"]\nmod {module};\n'
+            f'#[allow(dead_code)]\n#[path = "../jiyuu-mori/src/{path}"]\nmod {module};\n'
             for module, path in (
+                ("native_graph_buffer", "native_graph_buffer.rs"),
                 ("native_hash_table", "native_hash_table.rs"),
+                ("native_tree", "native_tree.rs"),
                 ("swift_package_map", "swift_package_map.rs"),
                 ("pkgmap", "pkgmap/mod.rs"),
             )
@@ -144,6 +148,7 @@ def probe(scratch: Path) -> str:
         "2024",
         "--crate-type",
         "staticlib",
+        "-O",
         rust_probe,
         "-o",
         rust_archive,
@@ -162,7 +167,7 @@ def probe(scratch: Path) -> str:
         "-o",
         reference,
     )
-    run(*CC, PROBE, *C_SOURCES, PKGMAP, BRIDGE, rust_archive, "-o", candidate)
+    run(*CC, PROBE, *C_SOURCES, BRIDGE, rust_archive, "-o", candidate)
 
     before = run(reference, repo)
     after = run(candidate, repo)

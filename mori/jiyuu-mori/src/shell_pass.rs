@@ -2,6 +2,7 @@
 
 use super::native_graph_buffer::{
     Node, cbm_gbuf_find_by_label, cbm_gbuf_find_by_name,
+    cbm_gbuf_node_set_properties_json,
 };
 use super::native_hash_table::{HashTable, cbm_ht_count, cbm_ht_get};
 use std::collections::{HashMap, HashSet};
@@ -86,10 +87,6 @@ unsafe extern "C" {
         kind: *const c_char,
         props: *const c_char,
     ) -> i64;
-    fn cbm_gbuf_node_set_properties_json(
-        node: *mut Node,
-        props: *const c_char,
-    ) -> c_int;
     fn cbm_json_escape(
         out: *mut c_char,
         size: c_int,
