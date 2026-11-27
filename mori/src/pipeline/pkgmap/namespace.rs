@@ -3,12 +3,11 @@
 
 use super::graph::{
     FileResult, Text, cbm_pipeline_fqn_compute, cbm_pkgmap_namespace,
-    with_c_string,
 };
 use super::{
     HashTable, c_bytes, cbm_ht_create, cbm_ht_foreach, cbm_ht_free, cbm_ht_get,
-    cbm_ht_set, cbm_pkgmap_tracked_free, cbm_pkgmap_tracked_strdup, duplicate,
-    free,
+    cbm_ht_set, cbm_pkgmap_tracked_free, cbm_pkgmap_tracked_strdup, free,
+    realloc,
 };
 use std::ffi::{c_char, c_int, c_void};
 use std::ptr::null_mut;
@@ -19,7 +18,7 @@ fn add(
     rel: *const c_char,
     name: *const c_char,
 ) -> bool {
-    let Some(name) = unsafe { c_bytes(name) }.filter(|name| !name.is_empty())
+    let Some(source) = unsafe { c_bytes(name) }.filter(|name| !name.is_empty())
     else {
         return true;
     };
@@ -31,45 +30,73 @@ fn add(
     }) else {
         return false;
     };
-    let normalized: Vec<_> = name
-        .iter()
-        .map(|&byte| match byte {
-            b'\\' | b':' | b'/' => b'.',
-            _ => byte,
-        })
-        .collect();
-    with_c_string(&normalized, |key| unsafe {
-        let stored = cbm_ht_get_key(map, key.as_ptr());
-        if stored.is_null() {
-            let key = cbm_pkgmap_tracked_strdup(key.as_ptr());
-            let qn = super::graph::take_text(Some(qn));
-            if !key.is_null() {
-                cbm_ht_set(map, key, qn.cast());
-                if cbm_ht_get(map, key) == qn.cast() {
-                    return true;
-                }
-            }
+    let key = unsafe { cbm_pkgmap_tracked_strdup(name) };
+    if key.is_null() {
+        return false;
+    }
+    // The table owns the normalized key on insertion, including its NUL.
+    let bytes = unsafe {
+        std::slice::from_raw_parts_mut(key.cast::<u8>(), source.len())
+    };
+    for byte in bytes {
+        if matches!(*byte, b'\\' | b':' | b'/') {
+            *byte = b'.';
+        }
+    }
+    let stored = unsafe { cbm_ht_get_key(map, key) };
+    if !stored.is_null() {
+        let replaced = append_file(map, stored, qn.bytes()).is_some();
+        unsafe { cbm_pkgmap_tracked_free(key) };
+        return replaced;
+    }
+    let qn = super::graph::take_text(Some(qn));
+    unsafe {
+        cbm_ht_set(map, key, qn.cast());
+        let owns_key = cbm_ht_get_key(map, key) == key;
+        let owns_qn = cbm_ht_get(map, key) == qn.cast();
+        if !owns_key {
             cbm_pkgmap_tracked_free(key);
+        }
+        if !owns_qn {
             free(qn.cast());
-            return false;
         }
-        let previous = cbm_ht_get(map, stored);
-        let Some(previous_bytes) = c_bytes(previous.cast()) else {
-            return false;
-        };
-        let value = duplicate(&[previous_bytes, b"\n", qn.bytes()].concat());
-        if value.is_null() {
-            return false;
-        }
+        owns_key && owns_qn
+    }
+}
+
+fn append_file(
+    map: &mut HashTable,
+    key: *const c_char,
+    qn: &[u8],
+) -> Option<()> {
+    let previous = unsafe { cbm_ht_get(map, key) };
+    let previous_bytes = unsafe { c_bytes(previous.cast()) }?;
+    let prefix_len = previous_bytes.len().checked_add(1)?;
+    let contents_len = prefix_len.checked_add(qn.len())?;
+    let value = unsafe { realloc(null_mut(), contents_len.checked_add(1)?) }
+        .cast::<u8>();
+    if value.is_null() {
+        return None;
+    }
+    unsafe {
+        value.copy_from_nonoverlapping(
+            previous_bytes.as_ptr(),
+            previous_bytes.len(),
+        );
+        value.add(prefix_len - 1).write(b'\n');
+        value
+            .add(prefix_len)
+            .copy_from_nonoverlapping(qn.as_ptr(), qn.len());
+        value.add(contents_len).write(0);
         // Preserve the stored key's address on replacement.
-        cbm_ht_set(map, stored, value.cast());
-        if cbm_ht_get(map, stored) != value.cast() {
+        cbm_ht_set(map, key, value.cast());
+        if cbm_ht_get(map, key) != value.cast() {
             free(value.cast());
-            return false;
+            return None;
         }
         free(previous);
-        true
-    })
+    }
+    Some(())
 }
 
 fn build(
