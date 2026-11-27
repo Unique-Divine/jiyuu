@@ -186,6 +186,12 @@ mod go_imports;
 mod go_registry_ast;
 
 #[cfg(feature = "native-engine-abi")]
+mod go_registry_defs;
+
+#[cfg(feature = "native-engine-abi")]
+mod go_registry_generics;
+
+#[cfg(feature = "native-engine-abi")]
 mod go_types;
 
 #[cfg(feature = "native-engine-abi")]

@@ -67,6 +67,11 @@ TSNode cbm_ffi_ts_tree_cursor_current_node(const TSTreeCursor *cursor) {
     return ts_tree_cursor_current_node(cursor);
 }
 
+const char *cbm_ffi_ts_tree_cursor_current_field_name(const TSTreeCursor *cursor) {
+    cbm_ffi_ts_cursor_written(cursor);
+    return ts_tree_cursor_current_field_name(cursor);
+}
+
 bool cbm_ffi_ts_tree_cursor_goto_first_child(TSTreeCursor *cursor) {
     cbm_ffi_ts_cursor_written(cursor);
     return ts_tree_cursor_goto_first_child(cursor);

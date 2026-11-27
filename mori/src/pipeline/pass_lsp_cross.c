@@ -171,8 +171,7 @@ static const char *pxc_join_pipe(CBMArena *arena, const char *const *items) {
 /* ── Go result lists for the cross-file registrar ─────────────────
  *
  * The Go registrar reads a def's return_types as '|'-separated type texts and
- * parses each piece on its own (go_lsp.c split_pipe_types ->
- * cbm_parse_return_type_text: `*T`, `[]T`, builtins, named types). A single
+ * parses each piece in Rust as a pointer, slice, builtin, or named type. A single
  * result already is one such text. A result LIST arrives as its raw source,
  * `(*T, error)` or the named `(t *T, err error)`, which parses as nothing, so
  * pxc_go_result_list splits it into its element types. The extractor's
@@ -554,8 +553,8 @@ static int pxc_build_lsp_def(CBMArena *arena, const CBMDefinition *src, const ch
             src->decl_namespace ? cbm_arena_strdup(arena, src->decl_namespace) : NULL;
     }
     dst->is_interface = (strcmp(label, "Interface") == 0 || strcmp(label, "Protocol") == 0);
-    /* The return-type string. The Go registrar splits it on '|' (go_lsp.c
-     * split_pipe_types), so a Go result LIST arrives split into its element
+    /* The Rust Go registrar splits return types on '|', so a Go result
+     * list must arrive split into its element
      * types: `(*T, error)` as `*T|error`, a named `(t *T)` as `*T`. The raw
      * list text did not parse, so every variable bound by a cross-file
      * multi-value or named-result call (`t, err := pkg.New()`) stayed untyped

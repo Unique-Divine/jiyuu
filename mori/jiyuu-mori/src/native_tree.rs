@@ -39,6 +39,9 @@ unsafe extern "C" {
     );
     fn cbm_ffi_ts_tree_cursor_delete(cursor: *mut RawCursor);
     fn cbm_ffi_ts_tree_cursor_current_node(cursor: *const RawCursor) -> RawNode;
+    fn cbm_ffi_ts_tree_cursor_current_field_name(
+        cursor: *const RawCursor,
+    ) -> *const c_char;
     fn cbm_ffi_ts_tree_cursor_goto_first_child(cursor: *mut RawCursor) -> bool;
     fn cbm_ffi_ts_tree_cursor_goto_next_sibling(cursor: *mut RawCursor) -> bool;
     fn cbm_ffi_ts_tree_cursor_goto_parent(cursor: *mut RawCursor) -> bool;
@@ -68,6 +71,12 @@ impl TreeCursor {
     pub(crate) fn node(&self) -> RawNode {
         // SAFETY: A live cursor has a current node in its borrowed tree.
         unsafe { cbm_ffi_ts_tree_cursor_current_node(&self.0) }
+    }
+
+    fn field_name(&self) -> Option<&'static CStr> {
+        // SAFETY: The cursor points into its live grammar tree.
+        let name = unsafe { cbm_ffi_ts_tree_cursor_current_field_name(&self.0) };
+        (!name.is_null()).then(|| unsafe { CStr::from_ptr(name) })
     }
 
     pub(crate) fn first_child(&mut self) -> bool {
@@ -200,6 +209,22 @@ impl<'tree> BorrowedNode<'tree> {
     pub(crate) fn children(self) -> impl Iterator<Item = Self> {
         // SAFETY: The iterator owns a copy of this borrow.
         unsafe { self.raw.children() }.map(move |child| self.with_raw(child))
+    }
+
+    pub(crate) fn child_fields(
+        self,
+    ) -> impl Iterator<Item = (Self, Option<&'static CStr>)> {
+        // SAFETY: The iterator retains this borrow as long as its cursor lives.
+        let mut cursor = unsafe { TreeCursor::new(self.raw) };
+        let mut has_child = cursor.first_child();
+        std::iter::from_fn(move || {
+            if !has_child {
+                return None;
+            }
+            let field = (self.with_raw(cursor.node()), cursor.field_name());
+            has_child = cursor.next_sibling();
+            Some(field)
+        })
     }
 
     pub(crate) fn as_raw(&self) -> &RawNode {

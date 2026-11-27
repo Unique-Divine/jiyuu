@@ -9,44 +9,6 @@
 
 #include <stdatomic.h>
 
-// GoLSPContext holds state for Go expression type evaluation within a file.
-typedef struct {
-    CBMArena* arena;
-    const char* source;
-    int source_len;
-    const CBMTypeRegistry* registry;
-    CBMScope* current_scope;
-
-    // Import map: local_name -> package QN (arena-allocated)
-    const char** import_local_names;   // NULL-terminated
-    const char** import_package_qns;   // NULL-terminated
-    int import_count;
-    CBMNameRows import_rows; // import_local_names by name, rows in table order
-
-    // Current function context
-    const char* enclosing_func_qn;
-    const char* package_qn;  // module QN for this file
-    const char* rel_path;    // repo-relative file path: init() QN suffix (#1910); NULL = flat
-
-    // Output: resolved calls accumulate here
-    CBMResolvedCallArray* resolved_calls;
-
-} GoLSPContext;
-
-// Initialize a GoLSPContext for processing one file.
-void go_lsp_init(GoLSPContext* ctx, CBMArena* arena, const char* source, int source_len,
-    const CBMTypeRegistry* registry, const char* package_qn, CBMResolvedCallArray* out);
-
-// Add an import mapping.
-void go_lsp_add_import(GoLSPContext* ctx, const char* local_name, const char* package_qn);
-
-// Process all functions in a file's AST, evaluating types and resolving calls.
-// root is the tree-sitter root node of the file.
-void go_lsp_process_file(GoLSPContext* ctx, TSNode root);
-
-// Parse a Go type AST node into a CBMType.
-const CBMType* go_parse_type_node(GoLSPContext* ctx, TSNode node);
-
 // Entry point: build registry from file's own defs + run LSP resolution.
 // Called from cbm_extract_file() after definitions and imports are extracted.
 // rel_path is the file's repo-relative path: it names the file's init()
@@ -145,29 +107,5 @@ typedef enum {
 CBMGoResolveStatus cbm_go_resolve_cross_metadata(
     CBMFileResult *result, const CBMTypeRegistry *reg, const char **import_names,
     const char **import_qns, int import_count, const _Atomic int *cancelled);
-
-// --- Batch cross-file LSP ---
-
-// Per-file input for batch Go LSP processing.
-typedef struct {
-    const char* source;
-    int source_len;
-    const char* module_qn;
-    const char* rel_path;          // repo-relative path (init() QNs, #1910); NULL = flat
-    TSTree* cached_tree;           // from TSTree caching (NULL = parse internally)
-    CBMLSPDef* defs;               // combined file-local + cross-file defs
-    int def_count;
-    const char** import_names;     // parallel arrays, import_count long
-    const char** import_qns;
-    int import_count;
-} CBMBatchGoLSPFile;
-
-// Process multiple Go files' cross-file LSP in one CGo call.
-// out must point to file_count pre-zeroed CBMResolvedCallArray structs.
-// Uses per-file arenas internally; results are copied to the output arena.
-void cbm_batch_go_lsp_cross(
-    CBMArena* arena,
-    CBMBatchGoLSPFile* files, int file_count,
-    CBMResolvedCallArray* out);
 
 #endif // CBM_LSP_GO_LSP_H

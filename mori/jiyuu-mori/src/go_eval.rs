@@ -7,7 +7,7 @@ use crate::go_types::{TypeMode, is_builtin};
 use crate::native_tree::BorrowedNode;
 
 #[path = "go_eval_native.rs"]
-mod native;
+pub(crate) mod native;
 use native::{Callable, File, NameList, Signature, Type, TypeView};
 
 #[path = "go_bindings.rs"]

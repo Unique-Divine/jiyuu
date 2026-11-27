@@ -26,7 +26,7 @@ const TYPE_PARAM: u32 = 11;
 
 /// The fields of the native type union read by Go expression evaluation.
 #[repr(C)]
-pub(super) struct RawType {
+pub(crate) struct RawType {
     kind: u32,
     data: Data,
 }
@@ -56,13 +56,13 @@ struct Tuple {
 
 #[derive(Clone, Copy)]
 #[repr(C)]
-pub(super) struct Signature {
+pub(crate) struct Signature {
     _param_names: *const *const c_char,
     params: TypeList,
     returns: TypeList,
 }
 
-pub(super) type Type = *const RawType;
+pub(crate) type Type = *const RawType;
 type TypeList = *const Type;
 pub(super) type NameList = *const *const c_char;
 
@@ -148,7 +148,7 @@ struct Output {
     site: SourceSite,
 }
 
-pub(super) enum TypeView<'file> {
+pub(crate) enum TypeView<'file> {
     Unknown,
     Named(&'file CStr),
     Builtin(&'file CStr),
@@ -162,13 +162,50 @@ pub(super) enum TypeView<'file> {
     Other,
 }
 
+/// The caller keeps this native type and its children alive during the view.
+pub(crate) unsafe fn view_type<'a>(ty: Type) -> TypeView<'a> {
+    if ty.is_null() {
+        return TypeView::Unknown;
+    }
+    // SAFETY: A type in this file or project outlives this traversal.
+    // A discriminator determines which initialized union field to read.
+    unsafe {
+        match (*ty).kind {
+            TYPE_UNKNOWN => TypeView::Unknown,
+            TYPE_NAMED if !(*ty).data.name.is_null() => {
+                TypeView::Named(CStr::from_ptr((*ty).data.name))
+            }
+            TYPE_POINTER => TypeView::Pointer((*ty).data.element),
+            TYPE_SLICE => TypeView::Slice((*ty).data.element),
+            TYPE_MAP => {
+                let Map { key, value } = (*ty).data.map;
+                TypeView::Map(key, value)
+            }
+            TYPE_CHANNEL => TypeView::Channel((*ty).data.element),
+            TYPE_FUNC => TypeView::Function((*ty).data.signature),
+            TYPE_INTERFACE => TypeView::Interface,
+            TYPE_BUILTIN if !(*ty).data.name.is_null() => {
+                TypeView::Builtin(CStr::from_ptr((*ty).data.name))
+            }
+            TYPE_PARAM if !(*ty).data.name.is_null() => {
+                TypeView::Parameter(CStr::from_ptr((*ty).data.name))
+            }
+            _ => TypeView::Other,
+        }
+    }
+}
+
 impl Signature {
+    pub(crate) fn has_parameters(self) -> bool {
+        !self.params.is_null()
+    }
+
     // A signature view is valid while the current arena or registry lives.
-    pub(super) fn params(self) -> impl Iterator<Item = Type> {
+    pub(crate) fn params(self) -> impl Iterator<Item = Type> {
         terminated(self.params)
     }
 
-    pub(super) fn returns(self) -> impl Iterator<Item = Type> {
+    pub(crate) fn returns(self) -> impl Iterator<Item = Type> {
         terminated(self.returns)
     }
 }
@@ -227,11 +264,15 @@ struct Input {
 }
 
 unsafe extern "C" {
-    fn cbm_type_unknown() -> Type;
-    fn cbm_type_named(arena: *mut Arena, name: *const c_char) -> Type;
-    fn cbm_type_builtin(arena: *mut Arena, name: *const c_char) -> Type;
-    fn cbm_type_pointer(arena: *mut Arena, element: Type) -> Type;
-    fn cbm_type_slice(arena: *mut Arena, element: Type) -> Type;
+    pub(crate) fn cbm_type_unknown() -> Type;
+    pub(crate) fn cbm_type_named(arena: *mut Arena, name: *const c_char)
+    -> Type;
+    pub(crate) fn cbm_type_builtin(
+        arena: *mut Arena,
+        name: *const c_char,
+    ) -> Type;
+    pub(crate) fn cbm_type_pointer(arena: *mut Arena, element: Type) -> Type;
+    pub(crate) fn cbm_type_slice(arena: *mut Arena, element: Type) -> Type;
     fn cbm_type_deref(ty: Type) -> Type;
     fn cbm_registry_lookup_type(
         registry: *const Registry,
@@ -261,7 +302,7 @@ unsafe extern "C" {
     ) -> *const Function;
 
     // Bridge Rust-owned lists and strings through C with explicit sizes for MSan.
-    fn cbm_go_eval_copy_name(
+    pub(crate) fn cbm_go_eval_copy_name(
         arena: *mut Arena,
         data: *const u8,
         len: usize,
@@ -319,35 +360,8 @@ impl<'file> File<'file> {
     }
 
     pub(super) fn view(&self, ty: Type) -> TypeView<'file> {
-        if ty.is_null() {
-            return TypeView::Unknown;
-        }
-        // SAFETY: A type in this file or project outlives this traversal.
-        // A discriminator determines which initialized union field to read.
-        unsafe {
-            match (*ty).kind {
-                TYPE_UNKNOWN => TypeView::Unknown,
-                TYPE_NAMED if !(*ty).data.name.is_null() => {
-                    TypeView::Named(CStr::from_ptr((*ty).data.name))
-                }
-                TYPE_POINTER => TypeView::Pointer((*ty).data.element),
-                TYPE_SLICE => TypeView::Slice((*ty).data.element),
-                TYPE_MAP => {
-                    let Map { key, value } = (*ty).data.map;
-                    TypeView::Map(key, value)
-                }
-                TYPE_CHANNEL => TypeView::Channel((*ty).data.element),
-                TYPE_FUNC => TypeView::Function((*ty).data.signature),
-                TYPE_INTERFACE => TypeView::Interface,
-                TYPE_BUILTIN if !(*ty).data.name.is_null() => {
-                    TypeView::Builtin(CStr::from_ptr((*ty).data.name))
-                }
-                TYPE_PARAM if !(*ty).data.name.is_null() => {
-                    TypeView::Parameter(CStr::from_ptr((*ty).data.name))
-                }
-                _ => TypeView::Other,
-            }
-        }
+        // SAFETY: The type lives in the current file or shared registry arena.
+        unsafe { view_type(ty) }
     }
 
     pub(super) fn names(
