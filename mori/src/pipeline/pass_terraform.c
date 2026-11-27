@@ -1893,7 +1893,7 @@ static int tg_link_units(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t *files, 
  * declare none. Run before the K8s joins: references meet these objects like
  * manifest ones. */
 
-/* Matches K8sRecord in jiyuu-mori/src/terraform.rs. The record and its
+/* Matches K8sRecord in src/pipeline/terraform.rs. The record and its
  * strings are borrowed for the publication callback. */
 typedef struct {
     const char *block_name;

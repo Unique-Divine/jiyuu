@@ -11,9 +11,12 @@ license = "MIT"
 publish = false
 build = "build.rs"
 
+[lib]
+path = "../src/lib.rs"
+
 [[bin]]
 name = "mori"
-path = "src/main.rs"
+path = "../src/main.rs"
 
 [features]
 # Link the whole C program (mori/Makefile.cbm target libmori-c). Off by

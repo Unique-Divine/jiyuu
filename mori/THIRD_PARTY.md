@@ -191,8 +191,8 @@ rewording). Patches must be reapplied on every upstream refresh and are
 covered by `scripts/vendored-checksums.txt`.
 
 The Graph UI uses Tokio and socket2 for networking. Mori implements HTTP/1
-framing in `jiyuu-mori/src/ui/http_request.rs` and
-`jiyuu-mori/src/ui/http_transport.rs`. Its route handlers live in
+framing in `src/ui/http_request.rs` and
+`src/ui/http_transport.rs`. Its route handlers live in
 `src/ui/http_server.c`.
 
 ## Embedded Model Data
