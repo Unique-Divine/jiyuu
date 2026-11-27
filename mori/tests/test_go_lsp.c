@@ -968,7 +968,14 @@ TEST(golsp_fast_crossfile_same_leaf_calls_preserve_exact_sites) {
 
     CBMTypeRegistry *reg = cbm_go_build_cross_registry(&r->arena, defs, 2);
     ASSERT_NOT_NULL(reg);
-    ASSERT_EQ(cbm_go_fast_resolve_qualified_calls(r, reg, NULL, NULL, 0), 0);
+    _Atomic int cancelled = 1;
+    int prior = r->resolved_calls.count;
+    ASSERT_EQ(cbm_go_resolve_cross_metadata(r, reg, NULL, NULL, 0, &cancelled),
+              CBM_GO_RESOLVE_CANCELLED);
+    ASSERT_EQ(r->resolved_calls.count, prior);
+    ASSERT_EQ(cbm_go_resolve_cross_metadata(r, reg, NULL, NULL, 1, NULL), CBM_GO_RESOLVE_FAILED);
+    ASSERT_EQ(r->resolved_calls.count, prior);
+    ASSERT_EQ(cbm_go_resolve_cross_metadata(r, reg, NULL, NULL, 0, NULL), CBM_GO_RESOLVE_COMPLETE);
 
     const CBMResolvedCall *a_semantic = NULL;
     const CBMResolvedCall *b_semantic = NULL;

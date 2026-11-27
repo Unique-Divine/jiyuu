@@ -7,6 +7,8 @@
 #include "type_registry.h"
 #include "../cbm.h"
 
+#include <stdatomic.h>
+
 // GoLSPContext holds state for Go expression type evaluation within a file.
 typedef struct {
     CBMArena* arena;
@@ -149,18 +151,19 @@ void cbm_run_go_lsp_cross_with_registry(
     TSTree* cached_tree,           // NULL = parse internally
     CBMResolvedCallArray* out);
 
-/* Tier 3: AST-walk-free fast resolver. Iterates result->calls and
- * resolves fully-qualified calls (pkg.Func) directly from the
- * pre-built registry — no tree-sitter parse, no AST walk. Returns
- * the count of calls that STILL need the slow path (methods on
- * locals + qualified calls we couldn't resolve). When the return
- * value is 0, the caller can skip the cbm_run_go_lsp_cross_with_
- * registry parse+walk entirely. Resolved entries are appended to
- * result->resolved_calls in result->arena. */
-int cbm_go_fast_resolve_qualified_calls(
-    CBMFileResult* result,
-    CBMTypeRegistry* reg,
-    const char** import_names, const char** import_qns, int import_count);
+typedef enum {
+    CBM_GO_RESOLVE_COMPLETE = 0,
+    CBM_GO_RESOLVE_CANCELLED,
+    CBM_GO_RESOLVE_FAILED,
+} CBMGoResolveStatus;
+
+#define CBM_GO_RESOLVE_ERROR "Go cross-file metadata resolution failed"
+
+/* Refine existing Go call facts against a sealed project registry. Append
+ * results only after the Rust resolver completes, before the AST walk. */
+CBMGoResolveStatus cbm_go_resolve_cross_metadata(
+    CBMFileResult *result, const CBMTypeRegistry *reg, const char **import_names,
+    const char **import_qns, int import_count, const _Atomic int *cancelled);
 
 // --- Batch cross-file LSP ---
 

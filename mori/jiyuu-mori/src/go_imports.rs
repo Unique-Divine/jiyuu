@@ -47,19 +47,8 @@ type ImportSink = unsafe extern "C" fn(
     name_len: usize,
 );
 
-type ImportExtractor = unsafe extern "C" fn(
-    root: RawNode,
-    source: *const c_char,
-    source_len: usize,
-    context: *mut c_void,
-    sink: ImportSink,
-);
-
-unsafe extern "C" {
-    fn cbm_go_set_import_extractor(extract: ImportExtractor);
-}
-
-unsafe extern "C" fn extract(
+#[unsafe(no_mangle)]
+unsafe extern "C" fn mori_go_extract_imports(
     root: RawNode,
     source: *const c_char,
     source_len: usize,
@@ -117,16 +106,6 @@ unsafe extern "C" fn extract(
             }
         }
     }
-}
-
-/// Install the Go import extractor before starting worker threads.
-///
-/// # Safety
-///
-/// The C setter must run before any thread reads the callback.
-pub unsafe fn register() {
-    // SAFETY: The executable installs callbacks before extraction.
-    unsafe { cbm_go_set_import_extractor(extract) };
 }
 
 #[cfg(test)]

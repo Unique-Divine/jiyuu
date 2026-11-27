@@ -40,7 +40,7 @@ struct CallEdge {
     properties: String,
 }
 
-fn index(root: &Path, repo: &Path, backend: &str) -> Vec<CallEdge> {
+fn index(root: &Path, repo: &Path, workers: &str) -> Vec<CallEdge> {
     const PROJECT: &str = "go-results-probe";
     let cache = root.join("cache");
     let runtime = root.join("rt");
@@ -60,8 +60,7 @@ fn index(root: &Path, repo: &Path, backend: &str) -> Vec<CallEdge> {
             .env("CBM_RUNTIME_DIR", &runtime)
             .env("CBM_PROFILE", "1")
             .env("CBM_LOG_LEVEL", "debug")
-            .env("CBM_WORKERS", "2")
-            .env("MORI_IMPL_GO_RESULTS", backend);
+            .env("CBM_WORKERS", workers);
         command
     };
     let args = json!({"repo_path": repo, "name": PROJECT, "mode": "full"});
@@ -86,7 +85,7 @@ fn index(root: &Path, repo: &Path, backend: &str) -> Vec<CallEdge> {
                 .unwrap()
                 .contains("msg=lsp.go_result_list implementation=rust")
     });
-    assert_eq!(ran_rust, backend == "rust");
+    assert!(ran_rust, "worker did not run the Rust Go result encoder");
 
     let db = Connection::open_with_flags(
         cache.join(format!("{PROJECT}.db")),
@@ -173,9 +172,19 @@ func (Second) NamedMark() int { return 0 }
     )
     .unwrap();
 
-    let native = index(&scratch.0.join("native"), &repo, "c");
-    let rust = index(&scratch.0.join("rust"), &repo, "rust");
-    assert_eq!(rust, native);
+    let padding = repo.join("padding");
+    fs::create_dir(&padding).unwrap();
+    for i in 0..60 {
+        fs::write(
+            padding.join(format!("pad{i}.go")),
+            "package padding
+",
+        )
+        .unwrap();
+    }
+    let serial = index(&scratch.0.join("serial"), &repo, "1");
+    let rust = index(&scratch.0.join("parallel"), &repo, "2");
+    assert_eq!(rust, serial);
     let expected = [
         ("UseGrouped", "GroupedMark"),
         ("UseNamed", "NamedMark"),

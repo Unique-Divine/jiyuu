@@ -4623,13 +4623,14 @@ static void resolve_worker(int worker_id, void *ctx_ptr) {
                     rc->module_def_index, rc->all_defs, rc->def_count,
                     own_lsp_map ? lsp_keys : imp_keys, own_lsp_map ? lsp_vals : imp_vals,
                     own_lsp_map ? lsp_count : imp_count, pp_rust_shared_registry_get, rc,
-                    &php_vendor);
+                    &php_vendor, rc->cancelled);
                 if (own_lsp_map) {
                     cbm_pxc_free_import_map(lsp_keys, lsp_vals, lsp_count);
                 }
                 cbm_index_mark_done(rel);
                 if (!had_error && result->has_error && result->error_msg &&
-                    (strcmp(result->error_msg, CBM_C_LSP_MEMO_ERROR) == 0 ||
+                    (strcmp(result->error_msg, CBM_GO_RESOLVE_ERROR) == 0 ||
+                     strcmp(result->error_msg, CBM_C_LSP_MEMO_ERROR) == 0 ||
                      strcmp(result->error_msg, CBM_PY_LSP_MEMO_ERROR) == 0 ||
                      strcmp(result->error_msg, CBM_C_LSP_DEPTH_ERROR) == 0 ||
                      strcmp(result->error_msg, CBM_PY_LSP_DEPTH_ERROR) == 0 ||

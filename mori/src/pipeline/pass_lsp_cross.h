@@ -251,6 +251,6 @@ void cbm_pxc_dispatch_file_with_php_bindings(
     const CBMModuleDefIndex *module_def_index, CBMLSPDef *all_defs, int all_def_count,
     const char **imp_keys, const char **imp_vals, int imp_count,
     CBMTypeRegistry *(*rust_shared_get)(void *), void *rust_shared_ctx,
-    const CBMPHPImportBindings *bindings);
+    const CBMPHPImportBindings *bindings, const _Atomic int *cancelled);
 
 #endif /* CBM_PIPELINE_PASS_LSP_CROSS_H */

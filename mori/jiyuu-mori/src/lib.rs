@@ -167,11 +167,23 @@ mod graphql_extract;
 #[cfg(feature = "c-backend")]
 pub use graphql_extract::register as mori_register_graphql_extractor;
 
-#[cfg(feature = "c-backend")]
+#[cfg(any(feature = "native-engine-abi", test))]
+mod go_cross;
+
+#[cfg(any(feature = "native-engine-abi", test))]
+mod go_results;
+
+#[cfg(any(feature = "native-engine-abi", test))]
+mod resolver;
+
+#[cfg(feature = "native-engine-abi")]
 mod go_imports;
 
-#[cfg(feature = "c-backend")]
-pub use go_imports::register as mori_register_go_import_extractor;
+#[cfg(feature = "native-engine-abi")]
+mod go_types;
+
+#[cfg(feature = "native-engine-abi")]
+mod go_types_native;
 
 #[cfg(feature = "native-engine-abi")]
 mod native_tree;

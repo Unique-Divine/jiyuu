@@ -24,7 +24,6 @@ unsafe extern "C" {
     fn cbm_ffi_ts_node_type(node: *const RawNode) -> *const c_char;
     fn cbm_ffi_ts_node_start_byte(node: *const RawNode) -> u32;
     fn cbm_ffi_ts_node_end_byte(node: *const RawNode) -> u32;
-    #[cfg(feature = "c-backend")]
     fn cbm_ffi_ts_node_is_named(node: *const RawNode) -> bool;
     fn cbm_ffi_ts_node_child_by_field_name(
         node: *const RawNode,
@@ -126,7 +125,6 @@ impl RawNode {
         })
     }
 
-    #[cfg(feature = "c-backend")]
     pub(crate) unsafe fn named_children(self) -> impl Iterator<Item = Self> {
         // SAFETY: Namedness is checked while each yielded node's tree is live.
         unsafe {
