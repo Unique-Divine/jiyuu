@@ -5,9 +5,9 @@ use super::graph::{
     FileResult, Text, cbm_pipeline_fqn_compute, cbm_pkgmap_namespace,
 };
 use super::{
-    HashTable, c_bytes, cbm_ht_create, cbm_ht_foreach, cbm_ht_free, cbm_ht_get,
-    cbm_ht_set, cbm_pkgmap_tracked_free, cbm_pkgmap_tracked_strdup, free,
-    realloc,
+    HashTable, c_bytes, cbm_ffi_mark_written, cbm_ht_create, cbm_ht_foreach,
+    cbm_ht_free, cbm_ht_get, cbm_ht_set, cbm_pkgmap_tracked_free,
+    cbm_pkgmap_tracked_strdup, free, realloc,
 };
 use std::ffi::{c_char, c_int, c_void};
 use std::ptr::null_mut;
@@ -73,8 +73,8 @@ fn append_file(
     let previous_bytes = unsafe { c_bytes(previous.cast()) }?;
     let prefix_len = previous_bytes.len().checked_add(1)?;
     let contents_len = prefix_len.checked_add(qn.len())?;
-    let value = unsafe { realloc(null_mut(), contents_len.checked_add(1)?) }
-        .cast::<u8>();
+    let size = contents_len.checked_add(1)?;
+    let value = unsafe { realloc(null_mut(), size) }.cast::<u8>();
     if value.is_null() {
         return None;
     }
@@ -88,6 +88,7 @@ fn append_file(
             .add(prefix_len)
             .copy_from_nonoverlapping(qn.as_ptr(), qn.len());
         value.add(contents_len).write(0);
+        cbm_ffi_mark_written(value.cast(), size);
         // Preserve the stored key's address on replacement.
         cbm_ht_set(map, key, value.cast());
         if cbm_ht_get(map, key) != value.cast() {
