@@ -618,7 +618,6 @@ UI_SRCS = \
     src/ui/atlas_why.c \
     src/ui/atlas_metrics.c \
     src/ui/atlas_impact.c \
-    src/ui/xrepo.c \
     src/ui/embedded_stub.c
 
 # mimalloc (vendored, global allocator override)

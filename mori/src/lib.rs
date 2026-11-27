@@ -143,6 +143,10 @@ mod ui_http_host;
 #[path = "ui/http_transport.rs"]
 mod ui_http_transport;
 
+#[cfg(feature = "native-engine-abi")]
+#[path = "ui/xrepo.rs"]
+mod ui_xrepo;
+
 #[cfg(any(feature = "graphql-callbacks", test))]
 #[path = "pipeline/gqlgen.rs"]
 mod gqlgen;
