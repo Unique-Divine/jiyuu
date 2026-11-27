@@ -1,6 +1,6 @@
 [package]
 name = "mori-native-sys"
-version = "0.14.0-dev"
+version = "0.14.5"
 edition = "2024"
 rust-version = "1.89"
 description = "Internal build support for Mori's native archive"
