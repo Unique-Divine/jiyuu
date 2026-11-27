@@ -118,6 +118,7 @@ extern const char *const *cbm_rust_swift_overloads(const cbm_rust_swift_signatur
 extern void cbm_rust_swift_signature_free(cbm_rust_swift_signature_index_t *index);
 
 typedef struct swift_owner swift_owner_t;
+/* Rust owns the strings and links in this read-only view. */
 struct swift_owner {
     const char *qn;
     const char *path;
@@ -126,26 +127,40 @@ struct swift_owner {
     const char *manifest;
     const char *imports;
     bool declaration;
-    swift_owner_t *primary;
-    swift_owner_t *members;
-    swift_owner_t *next_member;
-    swift_owner_t *next_path;
-    swift_owner_t *next;
+    const swift_owner_t *primary;
+    const swift_owner_t *members;
+    const swift_owner_t *next_member;
 };
+
+typedef struct cbm_rust_swift_owner_index cbm_rust_swift_owner_index_t;
+
+extern cbm_rust_swift_owner_index_t *cbm_rust_swift_owners_new(void);
+extern void cbm_rust_swift_owners_free(cbm_rust_swift_owner_index_t *index);
+extern void cbm_rust_swift_owner_add(cbm_rust_swift_owner_index_t *index,
+                                    const char *qn, const char *path, const char *imports,
+                                    bool declaration, const char *file, size_t module_len,
+                                    const char *manifest, const char *target_name);
+extern void cbm_rust_swift_owner_add_return(cbm_rust_swift_owner_index_t *index, const char *qn,
+                                            const char *returned);
+extern void cbm_rust_swift_owners_finish(cbm_rust_swift_owner_index_t *index);
+extern const swift_owner_t *cbm_rust_swift_owner_by_qn(const cbm_rust_swift_owner_index_t *index,
+                                                       const char *qn);
+extern const swift_owner_t *
+cbm_rust_swift_owner_by_module_path(const cbm_rust_swift_owner_index_t *index, const char *key);
+extern bool cbm_rust_swift_owner_imports(const swift_owner_t *owner, const char *module_name);
+extern const swift_owner_t *cbm_rust_swift_owner_primary(const cbm_rust_swift_owner_index_t *index,
+                                                        const swift_owner_t *owner, bool imports_only);
+extern const char *cbm_rust_swift_owner_return(const cbm_rust_swift_owner_index_t *index,
+                                               const char *qn);
 
 typedef struct {
     CBMArena arena;
-    const cbm_registry_t *registry;
     cbm_pkg_entries_t targets;
     CBMHashTable *by_source_root;
     CBMHashTable *by_manifest_root;
     CBMHashTable *by_target_name;
     cbm_pkg_entry_t ambiguous_target;
-    CBMHashTable *by_qn;
-    CBMHashTable *by_path;
-    CBMHashTable *by_module_path;
-    CBMHashTable *return_types;
-    swift_owner_t *types;
+    cbm_rust_swift_owner_index_t *owners;
 } swift_owners_t;
 _Static_assert(CBM_LANG_COUNT <= UINT8_MAX, "CBMLanguage must fit the per-entry lang byte");
 
@@ -1667,10 +1682,7 @@ static void swift_owners_free(swift_owners_t *index) {
     if (!index) {
         return;
     }
-    cbm_ht_free(index->by_qn);
-    cbm_ht_free(index->by_path);
-    cbm_ht_free(index->by_module_path);
-    cbm_ht_free(index->return_types);
+    cbm_rust_swift_owners_free(index->owners);
     cbm_ht_free(index->by_source_root);
     cbm_ht_free(index->by_manifest_root);
     cbm_ht_free(index->by_target_name);
@@ -3661,14 +3673,6 @@ static size_t swift_owner_module_length(const char *file) {
     return end ? (size_t)(end - file) : 0;
 }
 
-static const char *swift_owner_module(CBMArena *arena, const char *file) {
-    return cbm_arena_strndup(arena, file, swift_owner_module_length(file));
-}
-
-static const char *swift_module_path_key(CBMArena *arena, const char *module, const char *path) {
-    return cbm_arena_sprintf(arena, "%s\n%s", module, path);
-}
-
 static const cbm_pkg_entry_t *swift_owner_target(const swift_owners_t *index, const char *file) {
     char directory[CBM_SZ_4K];
     size_t len = strlen(file);
@@ -3696,162 +3700,49 @@ static const cbm_pkg_entry_t *swift_owner_target(const swift_owners_t *index, co
     }
 }
 
-static void swift_owner_assign_module(swift_owners_t *index, swift_owner_t *type,
-                                      const char *file) {
-    const cbm_pkg_entry_t *target = swift_owner_target(index, file);
-    if (target && target->pkg_name) {
-        type->module =
-            cbm_arena_sprintf(&index->arena, "%s\n%s", target->manifest_rel, target->pkg_name);
-        type->module_name = target->pkg_name;
-        type->manifest = target->manifest_rel;
-    } else if (target) {
-        /* Overlapping target roots need sources/excludes before files can be assigned. */
-        type->module = cbm_arena_strdup(&index->arena, file);
-        type->module_name = "";
-    } else {
-        type->module = swift_owner_module(&index->arena, file);
-        const char *leaf = type->module ? strrchr(type->module, '/') : NULL;
-        type->module_name = leaf ? leaf + SKIP_ONE : type->module;
-    }
-}
+typedef struct {
+    const cbm_registry_t *registry;
+    swift_owners_t *index;
+} swift_owner_collection_t;
 
-static void swift_owner_index_add(swift_owners_t *index, swift_owner_t *type) {
-    type->next = index->types;
-    index->types = type;
-    cbm_ht_set(index->by_qn, type->qn, type);
-    if (type->declaration) {
-        type->next_path = cbm_ht_get(index->by_path, type->path);
-        cbm_ht_set(index->by_path, type->path, type);
-        const char *key = swift_module_path_key(&index->arena, type->module, type->path);
-        swift_owner_t *prior = key ? cbm_ht_get(index->by_module_path, key) : NULL;
-        if (key && (!prior || strcmp(type->qn, prior->qn) < 0)) {
-            cbm_ht_set(index->by_module_path, key, type);
-        }
-    }
-}
-
-static void swift_return_type_collect(const cbm_gbuf_node_t *node, swift_owners_t *index) {
+static void swift_owner_collect(const cbm_gbuf_node_t *node, void *userdata) {
+    const swift_owner_collection_t *collection = userdata;
+    const cbm_registry_t *r = collection->registry;
+    swift_owners_t *index = collection->index;
     if (!node->properties_json) {
         return;
     }
-    const cbm_registry_t *r = index->registry;
-    const char *key = cbm_ht_get_key(r->exact, node->qualified_name);
-    if (!key || !cbm_rust_swift_signature_get(r->swift_signatures, key).selector) {
+    const char *qn = cbm_ht_get_key(r->exact, node->qualified_name);
+    bool has_signature = qn && cbm_rust_swift_signature_get(r->swift_signatures, qn).selector;
+    bool has_owner = node->file_path &&
+                     (strstr(node->properties_json, "\"swift_type_path\"") ||
+                      strstr(node->properties_json, "\"swift_extension\""));
+    if (!has_signature && !has_owner) {
         return;
     }
-    yyjson_doc *doc = yyjson_read(node->properties_json, strlen(node->properties_json), 0);
-    const char *type = yyjson_get_str(yyjson_obj_get(yyjson_doc_get_root(doc), "return_type"));
-    const char *owned = type ? cbm_arena_strdup(&index->arena, type) : NULL;
-    if (owned) {
-        cbm_ht_set(index->return_types, key, (void *)owned);
-    }
-    yyjson_doc_free(doc);
-}
 
-static void swift_owner_collect(const cbm_gbuf_node_t *node, void *userdata) {
-    swift_owners_t *index = userdata;
-    swift_return_type_collect(node, index);
-    if (!node->file_path || !node->properties_json ||
-        (!strstr(node->properties_json, "\"swift_type_path\"") &&
-         !strstr(node->properties_json, "\"swift_extension\""))) {
-        return;
-    }
     yyjson_doc *doc = yyjson_read(node->properties_json, strlen(node->properties_json), 0);
     yyjson_val *props = yyjson_doc_get_root(doc);
-    const char *declaration = yyjson_get_str(yyjson_obj_get(props, "swift_type_path"));
-    const char *extension = yyjson_get_str(yyjson_obj_get(props, "swift_extension"));
-    const char *path = declaration ? declaration : extension;
-    swift_owner_t *type = path ? cbm_arena_alloc(&index->arena, sizeof(*type)) : NULL;
-    if (!type) {
-        yyjson_doc_free(doc);
-        return;
+    const char *returned = has_signature ? yyjson_get_str(yyjson_obj_get(props, "return_type")) : NULL;
+    if (returned) {
+        cbm_rust_swift_owner_add_return(index->owners, qn, returned);
     }
-    memset(type, 0, sizeof(*type));
-    type->qn = cbm_arena_strdup(&index->arena, node->qualified_name);
-    type->path = cbm_arena_strdup(&index->arena, path);
-    swift_owner_assign_module(index, type, node->file_path);
-    const char *imports = yyjson_get_str(yyjson_obj_get(props, "swift_imports"));
-    type->imports = cbm_arena_strdup(&index->arena, imports ? imports : "");
-    type->declaration = declaration != NULL;
-    if (type->qn && type->path && type->module && type->imports) {
-        swift_owner_index_add(index, type);
+    if (has_owner) {
+        const char *declaration = yyjson_get_str(yyjson_obj_get(props, "swift_type_path"));
+        const char *path = declaration ? declaration
+                                       : yyjson_get_str(yyjson_obj_get(props, "swift_extension"));
+        if (path) {
+            const char *file = node->file_path;
+            const cbm_pkg_entry_t *target = swift_owner_target(index, file);
+            const char *imports = yyjson_get_str(yyjson_obj_get(props, "swift_imports"));
+            size_t module_len = target ? strlen(file) : swift_owner_module_length(file);
+            cbm_rust_swift_owner_add(index->owners, node->qualified_name, path, imports ? imports : "",
+                                     declaration != NULL, file, module_len,
+                                     target ? target->manifest_rel : NULL,
+                                     target ? target->pkg_name : NULL);
+        }
     }
     yyjson_doc_free(doc);
-}
-
-static bool swift_owner_imports(const swift_owner_t *extension, const char *leaf) {
-    size_t n = strlen(leaf);
-    for (const char *p = extension->imports; p && *p;) {
-        const char *end = strchr(p, '|');
-        size_t len = end ? (size_t)(end - p) : strlen(p);
-        if (n && len >= n && memcmp(p, leaf, n) == 0 && (len == n || p[n] == '.')) {
-            return true;
-        }
-        p = end ? end + SKIP_ONE : NULL;
-    }
-    return false;
-}
-
-static swift_owner_t *swift_owner_imported_primary(const swift_owners_t *index,
-                                                   const swift_owner_t *type) {
-    swift_owner_t *imported = NULL;
-    bool imported_local = false;
-    bool ambiguous = false;
-    for (swift_owner_t *decl = cbm_ht_get(index->by_path, type->path); decl;
-         decl = decl->next_path) {
-        if (swift_owner_imports(type, decl->module_name)) {
-            bool same_package =
-                type->manifest && decl->manifest && strcmp(type->manifest, decl->manifest) == 0;
-            if (imported_local && !same_package) {
-                continue;
-            }
-            if (same_package && !imported_local) {
-                imported = NULL;
-                imported_local = true;
-                ambiguous = false;
-            }
-            if (imported && strcmp(imported->module, decl->module) != 0) {
-                ambiguous = true;
-                continue;
-            }
-            if (!imported || strcmp(decl->qn, imported->qn) < 0) {
-                imported = decl;
-            }
-        }
-    }
-    return ambiguous ? NULL : imported;
-}
-
-static swift_owner_t *swift_owner_primary(const swift_owners_t *index, const swift_owner_t *type) {
-    char key[CBM_SZ_4K];
-    int length = snprintf(key, sizeof(key), "%s\n%s", type->module, type->path);
-    swift_owner_t *local =
-        length >= 0 && (size_t)length < sizeof(key) ? cbm_ht_get(index->by_module_path, key) : NULL;
-    return local ? local : swift_owner_imported_primary(index, type);
-}
-
-static void swift_owner_group_members(swift_owners_t *index) {
-    /* Unindexed external types still share extensions within their own target. */
-    for (swift_owner_t *type = index->types; type; type = type->next) {
-        if (type->primary) {
-            continue;
-        }
-        const char *key = swift_module_path_key(&index->arena, type->module, type->path);
-        swift_owner_t *prior = key ? cbm_ht_get(index->by_module_path, key) : NULL;
-        if (key && (!prior || strcmp(type->qn, prior->qn) < 0)) {
-            cbm_ht_set(index->by_module_path, key, type);
-        }
-    }
-    for (swift_owner_t *type = index->types; type; type = type->next) {
-        if (!type->primary) {
-            const char *key = swift_module_path_key(&index->arena, type->module, type->path);
-            type->primary = key ? cbm_ht_get(index->by_module_path, key) : NULL;
-        }
-        if (type->primary) {
-            type->next_member = type->primary->members;
-            type->primary->members = type;
-        }
-    }
 }
 
 void cbm_registry_build_swift_owners(cbm_registry_t *r, const cbm_gbuf_t *graph,
@@ -3870,18 +3761,12 @@ void cbm_registry_build_swift_owners(cbm_registry_t *r, const cbm_gbuf_t *graph,
         return;
     }
     cbm_arena_init(&index->arena);
-    index->registry = r;
     cbm_pkg_entries_init(&index->targets);
     (void)cbm_pkgmap_scan_swift_targets(repo_path, &index->targets, excluded_dirs, excluded_count);
     index->by_source_root = cbm_ht_create(CBM_SZ_512);
     index->by_manifest_root = cbm_ht_create(CBM_SZ_512);
     index->by_target_name = cbm_ht_create(CBM_SZ_512);
-    index->by_qn = cbm_ht_create(CBM_SZ_512);
-    index->by_path = cbm_ht_create(CBM_SZ_512);
-    index->by_module_path = cbm_ht_create(CBM_SZ_512);
-    index->return_types = cbm_ht_create(CBM_SZ_512);
-    if (!index->by_source_root || !index->by_manifest_root || !index->by_target_name ||
-        !index->by_qn || !index->by_path || !index->by_module_path || !index->return_types) {
+    if (!index->by_source_root || !index->by_manifest_root || !index->by_target_name) {
         swift_owners_free(index);
         return;
     }
@@ -3892,7 +3777,7 @@ void cbm_registry_build_swift_owners(cbm_registry_t *r, const cbm_gbuf_t *graph,
         }
         if (target->manifest_rel && target->pkg_name && target->entry_rel) {
             const char *module =
-                swift_module_path_key(&index->arena, target->manifest_rel, target->pkg_name);
+                cbm_arena_sprintf(&index->arena, "%s\n%s", target->manifest_rel, target->pkg_name);
             if (module) {
                 cbm_ht_set(index->by_target_name, module, target);
             }
@@ -3905,11 +3790,10 @@ void cbm_registry_build_swift_owners(cbm_registry_t *r, const cbm_gbuf_t *graph,
             }
         }
     }
-    cbm_gbuf_foreach_node(graph, swift_owner_collect, index);
-    for (swift_owner_t *type = index->types; type; type = type->next) {
-        type->primary = swift_owner_primary(index, type);
-    }
-    swift_owner_group_members(index);
+    index->owners = cbm_rust_swift_owners_new();
+    swift_owner_collection_t collection = {.registry = r, .index = index};
+    cbm_gbuf_foreach_node(graph, swift_owner_collect, &collection);
+    cbm_rust_swift_owners_finish(index->owners);
     r->swift_owners = index;
 }
 
@@ -3949,7 +3833,8 @@ static int swift_owner_candidates(const cbm_registry_t *r, const cbm_gbuf_t *gra
                                   const CBMFileResult *file, const char *module_qn,
                                   const CBMCall *call, const char *name, const char **out,
                                   int out_cap, const char **owner) {
-    const swift_owner_t *type = r->swift_owners ? cbm_ht_get(r->swift_owners->by_qn, *owner) : NULL;
+    const swift_owners_t *index = r->swift_owners;
+    const swift_owner_t *type = index ? cbm_rust_swift_owner_by_qn(index->owners, *owner) : NULL;
     if (!type || !type->primary) {
         return swift_owner_bucket(r, call, *owner, name, out, out_cap, 0);
     }
@@ -3978,7 +3863,7 @@ static const swift_owner_t *swift_lexical_type(const swift_owners_t *index,
         int length = snprintf(key, sizeof(key), "%s\n%.*s.%s", scope->module, (int)prefix,
                               scope->path, nominal);
         const swift_owner_t *type = length >= 0 && (size_t)length < sizeof(key)
-                                        ? cbm_ht_get(index->by_module_path, key)
+                                        ? cbm_rust_swift_owner_by_module_path(index->owners, key)
                                         : NULL;
         if (type) {
             return type;
@@ -4001,7 +3886,7 @@ static const char *swift_type_in_owner(const cbm_registry_t *r, const char *owne
         return NULL;
     }
     swift_owners_t *index = r->swift_owners;
-    const swift_owner_t *context = index ? cbm_ht_get(index->by_qn, owner) : NULL;
+    const swift_owner_t *context = index ? cbm_rust_swift_owner_by_qn(index->owners, owner) : NULL;
     if (!context) {
         return cbm_registry_resolve(r, nominal, owner, NULL, NULL, 0).qualified_name;
     }
@@ -4012,7 +3897,7 @@ static const char *swift_type_in_owner(const cbm_registry_t *r, const char *owne
         resolved = swift_lexical_type(index, context->primary, nominal);
     }
     if (!resolved) {
-        resolved = swift_owner_primary(index, &reference);
+        resolved = cbm_rust_swift_owner_primary(index->owners, &reference, false);
     }
     if (resolved) {
         return resolved->qn;
@@ -4023,13 +3908,12 @@ static const char *swift_type_in_owner(const cbm_registry_t *r, const char *owne
     }
     *dot = '\0';
     bool local = strcmp(nominal, context->module_name) == 0;
-    if (!local && !swift_owner_imports(context, nominal)) {
+    if (!local && !cbm_rust_swift_owner_imports(context, nominal)) {
         return NULL;
     }
     reference.path = dot + SKIP_ONE;
     reference.imports = local ? "" : nominal;
-    resolved = local ? swift_owner_primary(index, &reference)
-                     : swift_owner_imported_primary(index, &reference);
+    resolved = cbm_rust_swift_owner_primary(index->owners, &reference, !local);
     return resolved ? resolved->qn : NULL;
 }
 
@@ -4096,7 +3980,9 @@ static const swift_owner_t *swift_target_type(const swift_owners_t *index,
                                               const cbm_pkg_entry_t *target, const char *type) {
     char key[CBM_SZ_4K];
     int n = snprintf(key, sizeof(key), "%s\n%s\n%s", target->manifest_rel, target->pkg_name, type);
-    return n >= 0 && (size_t)n < sizeof(key) ? cbm_ht_get(index->by_module_path, key) : NULL;
+    return n >= 0 && (size_t)n < sizeof(key)
+               ? cbm_rust_swift_owner_by_module_path(index->owners, key)
+               : NULL;
 }
 
 static const swift_owner_t *swift_imported_type(const swift_owners_t *index,
@@ -4187,7 +4073,7 @@ static const char *swift_receiver_qn(const cbm_registry_t *r, const CBMFileResul
     cbm_resolution_t fallback =
         cbm_registry_resolve(r, type, module_qn, NULL, import_vals, import_count);
     const swift_owner_t *owner =
-        index && fallback.qualified_name ? cbm_ht_get(index->by_qn, fallback.qualified_name) : NULL;
+        index ? cbm_rust_swift_owner_by_qn(index->owners, fallback.qualified_name) : NULL;
     if (owner && target && target->pkg_name && file &&
         !swift_receiver_visible(index, target, file, owner)) {
         return NULL;
@@ -4558,7 +4444,8 @@ static const char *swift_chain_return_qn(const cbm_registry_t *r, const char *qn
     size_t length = base - name_length - SKIP_ONE;
     memcpy(owner, qn, length);
     owner[length] = '\0';
-    const char *raw = r->swift_owners ? cbm_ht_get(r->swift_owners->return_types, qn) : NULL;
+    const swift_owners_t *index = r->swift_owners;
+    const char *raw = index ? cbm_rust_swift_owner_return(index->owners, qn) : NULL;
     return swift_type_in_owner(r, owner, raw ? raw : returned);
 }
 
@@ -4570,7 +4457,7 @@ static const char *swift_function_return_type(const swift_inference_t *context, 
     if (!index || !declaration || !declaration->file_path) {
         return NULL;
     }
-    const char *raw = cbm_ht_get(index->return_types, qn);
+    const char *raw = cbm_rust_swift_owner_return(index->owners, qn);
     char nominal[CBM_SZ_4K];
     if (!swift_receiver_type_text(raw ? raw : returned, nominal, sizeof(nominal))) {
         return NULL;
@@ -4584,7 +4471,9 @@ static const char *swift_function_return_type(const swift_inference_t *context, 
         size_t length = swift_owner_module_length(declaration->file_path);
         int n =
             snprintf(key, sizeof(key), "%.*s\n%s", (int)length, declaration->file_path, nominal);
-        type = n >= 0 && (size_t)n < sizeof(key) ? cbm_ht_get(index->by_module_path, key) : NULL;
+        type = n >= 0 && (size_t)n < sizeof(key)
+                   ? cbm_rust_swift_owner_by_module_path(index->owners, key)
+                   : NULL;
     }
     if (type) {
         return type->qn;
@@ -4594,7 +4483,7 @@ static const char *swift_function_return_type(const swift_inference_t *context, 
         const char *resolved =
             swift_receiver_qn(r, context->file, context->graph, nominal, context->module_qn,
                               context->imports, context->import_count);
-        const swift_owner_t *owner = resolved ? cbm_ht_get(index->by_qn, resolved) : NULL;
+        const swift_owner_t *owner = cbm_rust_swift_owner_by_qn(index->owners, resolved);
         return owner && swift_receiver_visible(index, target, context->file, owner) ? resolved
                                                                                     : NULL;
     }
@@ -4753,10 +4642,10 @@ static int swift_initializer_candidates(const swift_inference_t *context,
     }
     swift_enclosing_class(call, owner);
     const swift_owners_t *index = context->registry->swift_owners;
-    if (index && cbm_ht_has(index->by_qn, assignment->enclosing_func_qn)) {
+    if (index && cbm_rust_swift_owner_by_qn(index->owners, assignment->enclosing_func_qn)) {
         (void)snprintf(owner, CBM_SZ_4K, "%s", assignment->enclosing_func_qn);
     }
-    if (index && cbm_ht_has(index->by_qn, owner)) {
+    if (index && cbm_rust_swift_owner_by_qn(index->owners, owner)) {
         int count = swift_typed_candidates(context->registry, context->graph, context->file,
                                            context->module_qn, call, owner, call->callee_name, out,
                                            REG_MAX_CANDIDATES);
@@ -4850,7 +4739,7 @@ static int swift_receiver_candidates(const swift_inference_t *context, const CBM
                                      char *expression, const char *type, char *member,
                                      const char **out, int out_cap) {
     const cbm_registry_t *r = context->registry;
-    bool from_chain = r->swift_owners && cbm_ht_has(r->swift_owners->by_qn, type);
+    bool from_chain = r->swift_owners && cbm_rust_swift_owner_by_qn(r->swift_owners->owners, type);
     while (type && type[0]) {
         char type_text[CBM_SZ_4K];
         if (!from_chain && !swift_receiver_type_text(type, type_text, sizeof(type_text))) {
