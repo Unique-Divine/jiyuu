@@ -4123,17 +4123,6 @@ enum {
     BM25_COL_START = 5,
     BM25_COL_END = 6,
     BM25_COL_RANK = 7,
-    BM25_BIND_QUERY = 1,
-    BM25_BIND_PROJECT = 2,
-    BM25_BIND_LIMIT = 3,
-    BM25_BIND_OFFSET = 4,
-    BM25_BIND_INNER = 5,
-    BM25_BIND_FILE = 6,
-    BM25_BIND_LABEL = 7,
-    BM25_BIND_EXACT = 8,
-    BM25_BIND_KIND = 9,
-    BM25_BIND_NS = 10,
-    BM25_BIND_LABEL_WEIGHT = 11,
     BM25_SQL_AUTO_LEN = -1,
     /* Inner FTS5 candidate cap.  SQLite can early-terminate a plain FTS5 query
      * (no JOIN/WHERE on outer table) of the form:
@@ -4142,8 +4131,6 @@ enum {
      * and then joining/filtering/re-ranking those, we bound all work to O(N) where
      * N = BM25_INNER_LIMIT rather than the full match set size. */
     BM25_INNER_LIMIT = 2000,
-    /* SQLite reads a negative LIMIT as "no limit": rank every candidate. */
-    BM25_INNER_ALL = -1,
     /* Longest label spliced into the MATCH pre-filter; real labels are short
      * identifiers, so anything longer simply skips the pre-filter. */
     BM25_LABEL_MAX = 64,
@@ -4151,44 +4138,8 @@ enum {
     BM25_MATCH_BUF = BM25_QUERY_BUF + BM25_LABEL_MAX + 32,
 };
 
-/* Column weights for nodes_fts (name, qualified_name, label, file_path, body).
- * The four identifier columns stay at parity; prose sits well below them.
- * FTS5 applies these to per-column term frequency BEFORE the tf-saturation
- * term, which is what makes the weighting BM25F-correct rather than a post-hoc
- * rescale. 0.3 is the findability-favouring end of the field weighting the IR
- * literature settles on for body text (typical title:body ratios run 3:1 to
- * 10:1): a prose-only hit still surfaces, but never outranks a node whose
- * IDENTIFIER matches.
- *
- * Defined once and used by BOTH the ranked query and the count query — they
- * share an inner candidate window, so different weights would silently
- * desynchronise the reported total from the rows returned.
- *
- * Safe against a legacy four-column nodes_fts: FTS5's bm25() reads a weight
- * only when an instance actually lands in that column (`nVal > ic`), so the
- * fifth weight is simply never consulted on a table that has no fifth
- * column.
- *
- * The label weight is bound (?11): 1.0 normally, 0.0 when the MATCH is scoped
- * to a label (#2386). Every candidate then carries that label, so a label hit
- * cannot tell them apart, and a zero weight keeps the added `label : "..."`
- * phrase from shifting BM25 order by row length. */
-#define BM25_WEIGHTS "bm25(nodes_fts, 1.0, 1.0, ?11, 1.0, 0.3)"
 static const double BM25_LABEL_WEIGHT = 1.0;
 static const double BM25_LABEL_WEIGHT_SCOPED = 0.0;
-
-/* Labels an UNLABELLED query never ranks: path-shaped File/Folder nodes, the
- * Project node and Variables match almost any token through their qualified
- * name and file path, and would crowd definitions out of the result. They are
- * still in nodes_fts, so an explicit `label` that names one of them is served
- * from its own label-scoped window like any other label (?7 is the caller's
- * label, NULL when none was given). Excluding them there too returned 0 rows
- * -- often with an exact "eq" total -- although such nodes match. Section and
- * Module are NOT excluded (#518/#519): they carry the prose the body column
- * indexes. Shared by the ranked and the count query, so the two cannot
- * desynchronise. */
-#define BM25_UNLABELLED_EXCLUSION \
-    "(?7 IS NOT NULL OR n.label NOT IN ('File','Folder','Variable','Project'))"
 
 /* Module-local SQLITE_TRANSIENT wrapper to dodge performance-no-int-to-ptr.
  * See the matching helper in src/store/store.c for the same pattern. */
@@ -4499,93 +4450,6 @@ static char *bm25_render(const bm25_output_row_t *rows, int returned, int total,
     return json;
 }
 
-static cbm_rank_search_reader_fn rank_search_reader;
-
-void cbm_mcp_set_rank_search_reader(cbm_rank_search_reader_fn reader) {
-    rank_search_reader = reader;
-}
-
-static void bm25_bind_opt_text(sqlite3_stmt *st, int idx, const char *value) {
-    if (value && value[0]) {
-        sqlite3_bind_text(st, idx, value, BM25_SQL_AUTO_LEN, MCP_SQLITE_TRANSIENT);
-    } else {
-        sqlite3_bind_null(st, idx);
-    }
-}
-
-static void bm25_bind_filters(sqlite3_stmt *st, const cbm_rank_search_filters_t *f) {
-    sqlite3_bind_text(st, BM25_BIND_QUERY, f->fts_query, BM25_SQL_AUTO_LEN, MCP_SQLITE_TRANSIENT);
-    sqlite3_bind_text(st, BM25_BIND_PROJECT, f->project, BM25_SQL_AUTO_LEN, MCP_SQLITE_TRANSIENT);
-    bm25_bind_opt_text(st, BM25_BIND_FILE, f->file_like);
-    bm25_bind_opt_text(st, BM25_BIND_LABEL, f->label);
-    bm25_bind_opt_text(st, BM25_BIND_KIND, f->kind);
-    bm25_bind_opt_text(st, BM25_BIND_NS, f->ns);
-    sqlite3_bind_double(st, BM25_BIND_LABEL_WEIGHT, f->label_weight);
-}
-
-/* The top-candidate window is a performance ceiling, not an exact-total
- * boundary. Probe one candidate beyond it so a broad query never presents a
- * window-local count as the complete match count. The probe shares the
- * label-scoped MATCH but is otherwise global to the FTS table; saturation is
- * therefore conservatively reported even when later project/path filters
- * might discard the hidden candidates. */
-static const char bm25_probe_sql[] =
-    "SELECT rowid FROM nodes_fts WHERE nodes_fts MATCH ?1 "
-    "ORDER BY bm25(nodes_fts), rowid LIMIT 1 OFFSET ?2";
-
-static bool bm25_window_saturated(sqlite3 *db, const char *fts_query) {
-    enum { PROBE_BIND_OFFSET = 2 };
-    sqlite3_stmt *probe = NULL;
-    if (sqlite3_prepare_v2(db, bm25_probe_sql, BM25_SQL_AUTO_LEN, &probe, NULL) != SQLITE_OK) {
-        return true;
-    }
-    sqlite3_bind_text(probe, BM25_BIND_QUERY, fts_query, BM25_SQL_AUTO_LEN, MCP_SQLITE_TRANSIENT);
-    sqlite3_bind_int(probe, PROBE_BIND_OFFSET, BM25_INNER_LIMIT);
-    bool saturated = sqlite3_step(probe) != SQLITE_DONE;
-    sqlite3_finalize(probe);
-    return saturated;
-}
-
-/* Count the candidates that pass the filters among the top `inner_limit`
- * (BM25_INNER_ALL: among all of them), with the ranked query's subquery shape
- * so FTS5 drives the scan here too. */
-static const char bm25_count_sql[] =
-    "SELECT COUNT(*) FROM ("
-    "    SELECT fts.rowid FROM ("
-    "        SELECT rowid FROM nodes_fts WHERE nodes_fts MATCH ?1"
-    "        ORDER BY " BM25_WEIGHTS " LIMIT ?3"
-    "    ) fts "
-    "    JOIN nodes n ON n.id = fts.rowid "
-    "    WHERE n.project = ?2 "
-    /* MIRRORS the ranked query's filter verbatim — same weights, same
-     * label exclusions. Changing one alone reports a total that does
-     * not describe the rows returned. */
-    "      AND " BM25_UNLABELLED_EXCLUSION " "
-    "      AND (?6 IS NULL OR n.file_path LIKE ?6)"
-    "      AND (?7 IS NULL OR n.label = ?7)"
-    "      AND (?9 IS NULL OR (CASE WHEN json_valid(n.properties) "
-    "           THEN json_extract(n.properties,'$.kind') END) = ?9)"
-    "      AND (?10 IS NULL OR (CASE WHEN json_valid(n.properties) "
-    "           THEN json_extract(n.properties,'$.obj_key') END) "
-    "           LIKE ('%/%/' || replace(replace(replace(?10,'\\','\\\\'),'%','\\%'),"
-    "           '_','\\_') || '/%') ESCAPE '\\')"
-    ")";
-
-static int bm25_count_candidates(sqlite3 *db, const cbm_rank_search_filters_t *f, int inner_limit) {
-    int total = 0;
-    sqlite3_stmt *cs = NULL;
-    if (sqlite3_prepare_v2(db, bm25_count_sql, BM25_SQL_AUTO_LEN, &cs, NULL) != SQLITE_OK) {
-        return 0;
-    }
-    bm25_bind_filters(cs, f);
-    sqlite3_bind_int(cs, BM25_BIND_LIMIT, inner_limit);
-    if (sqlite3_step(cs) == SQLITE_ROW) {
-        total = sqlite3_column_int(cs, 0);
-    }
-    sqlite3_finalize(cs);
-    return total;
-}
-
 typedef struct {
     bm25_output_row_t *rows;
     int count;
@@ -4628,65 +4492,6 @@ static char *bm25_search(cbm_store_t *store, const char *project, const char *qu
         bm25_scope_match_to_label(fts_tokens, label, fts_query, sizeof(fts_query));
     char *file_like = bm25_file_pattern_like(file_pattern);
 
-    /* BM25 ranked query using a two-step approach to enable FTS5 early termination.
-     *
-     * Flat queries of the form:
-     *   SELECT ... FROM nodes_fts JOIN nodes WHERE MATCH ? AND n.project=? ORDER BY rank LIMIT N
-     * block FTS5's WAND/MaxScore early-exit because the outer JOIN+WHERE conditions
-     * are invisible to the FTS5 planner — it must score every matching document before
-     * the project/label filter can discard any of them.  On a large codebase with 100K+
-     * matches, this causes multi-minute queries.
-     *
-     * The fix: let FTS5 drive the inner subquery alone.  SQLite CAN early-terminate
-     *   SELECT rowid, bm25(nodes_fts,...) FROM nodes_fts WHERE MATCH ? ORDER BY bm25() LIMIT N
-     * because no outer predicate blocks it.  We fetch BM25_INNER_LIMIT top candidates
-     * from the FTS5 index, then join/filter/boost only those rows.  bm25() returns a
-     * NEGATIVE score (lower = more relevant). */
-    /* Exact-name tier (2026-09-16 probe): a definition whose NAME is the query
-     * outranks every partial hit. BM25 term frequency otherwise rewards a long
-     * test-method name that repeats the token — `table references table with
-     * same name` — over the `Table` class itself, and the label tiers below
-     * then push the class's own methods above it (Method 10 > Class 5). The
-     * definition the reader asked for by name comes first; case-insensitive
-     * exact spelling comes next; everything else keeps its BM25 order. */
-    const char *sql =
-        "SELECT n.id, n.label, n.name, n.qualified_name, n.file_path, n.start_line, n.end_line, "
-        "       (fts.base_rank "
-        "        - CASE WHEN n.name = ?8 THEN 30.0 "
-        "               WHEN lower(n.name) = lower(?8) THEN 20.0 ELSE 0.0 END "
-        "        - CASE WHEN n.label IN ('Function','Method') THEN 10.0 "
-        "               WHEN n.label = 'Route' THEN 8.0 "
-        "               WHEN n.label IN (" CBM_SQL_TYPE_LIKE_LABELS ") THEN 5.0 "
-        /* Relations rank with the type tier: a table IS the schema container
-         * a data question is looking for (findability-first). */
-        "               WHEN n.label IN (" CBM_SQL_RELATION_LABELS ") THEN 5.0 "
-        "               ELSE 0.0 END) AS rank "
-        "FROM ("
-        "    SELECT rowid, " BM25_WEIGHTS " AS base_rank"
-        "    FROM nodes_fts WHERE nodes_fts MATCH ?1"
-        "    ORDER BY base_rank, rowid LIMIT ?5"
-        ") fts "
-        "JOIN nodes n ON n.id = fts.rowid "
-        "WHERE n.project = ?2 "
-        "  AND " BM25_UNLABELLED_EXCLUSION " "
-        "  AND (?6 IS NULL OR n.file_path LIKE ?6) "
-        /* The caller's label filter applies in query mode exactly as it does
-         * in the structural mode (2026-09-16 probe: `label=Class` was ignored
-         * here and five Methods came back). MIRRORED in the count query. */
-        "  AND (?7 IS NULL OR n.label = ?7) "
-        /* Infra filters, guarded (json_extract raises on malformed JSON).
-         * MIRRORED in the count query. */
-        "  AND (?9 IS NULL OR (CASE WHEN json_valid(n.properties) THEN "
-        "       json_extract(n.properties,'$.kind') END) = ?9) "
-        "  AND (?10 IS NULL OR (CASE WHEN json_valid(n.properties) THEN "
-        "       json_extract(n.properties,'$.obj_key') END) LIKE ('%/%/' || "
-        "       replace(replace(replace(?10,'\\','\\\\'),'%','\\%'),'_','\\_') || '/%') "
-        "       ESCAPE '\\') "
-        /* rank ties are common (boosted floats) — the id tie-break makes
-         * offset pages contractually stable across calls. */
-        "ORDER BY rank, n.id "
-        "LIMIT ?3 OFFSET ?4";
-
     const cbm_rank_search_filters_t filters = {
         .fts_query = fts_query,
         .project = project,
@@ -4707,64 +4512,23 @@ static char *bm25_search(cbm_store_t *store, const char *project, const char *qu
         return heap_strdup("out of memory");
     }
     bm25_scan_t scan = {.rows = rows};
-    /* file_pattern, kind and namespace cannot be put into the MATCH the way
-     * the label is, so they filter AFTER the candidate window. When more
-     * candidates exist beyond it, a narrow filter can find none of its rows in
-     * the top BM25_INNER_LIMIT and the search answered 0 rows although
-     * matching nodes exist. A saturated window under such a filter -- or one
-     * that held no row passing the filters at all -- is therefore ranked over
-     * every candidate instead: the FTS-first subquery plan stays, the extra
-     * work is linear in the token's match count (the saturation probe already
-     * orders every match), and the total becomes exact. The decision depends
-     * only on the query, never on the page, so offset pages stay consistent.
-     * Unfiltered and label-only queries that find rows keep the window. */
-    if (rank_search_reader) {
-        const cbm_rank_search_request_t request = {
-            .rank_sql = sql,
-            .count_sql = bm25_count_sql,
-            .probe_sql = bm25_probe_sql,
-            .filters = &filters,
-            .exact_query = query,
-            .limit = row_cap,
-            .offset = row_offset,
-            .candidate_limit = BM25_INNER_LIMIT,
-        };
-        if (!rank_search_reader(db, &request, &total, &candidate_window_saturated, &scan,
-                                bm25_scan_append)) {
-            free(file_like);
-            bm25_output_rows_free(rows, scan.count);
-            return NULL;
-        }
-        cbm_log_debug("search_graph.reader", "mode", "bm25", "backend", "rust");
-    } else {
-        sqlite3_stmt *stmt = NULL;
-        if (sqlite3_prepare_v2(db, sql, BM25_SQL_AUTO_LEN, &stmt, NULL) != SQLITE_OK) {
-            free(file_like);
-            bm25_output_rows_free(rows, scan.count);
-            return NULL;
-        }
-        bm25_bind_filters(stmt, &filters);
-        sqlite3_bind_int(stmt, BM25_BIND_LIMIT, row_cap);
-        sqlite3_bind_int(stmt, BM25_BIND_OFFSET, row_offset);
-        sqlite3_bind_text(stmt, BM25_BIND_EXACT, query, BM25_SQL_AUTO_LEN, MCP_SQLITE_TRANSIENT);
-
-        bool saturated = bm25_window_saturated(db, fts_query);
-        bool post_window_filter = file_like || (kind && kind[0]) || (ns && ns[0]);
-        int inner_limit = saturated && post_window_filter ? BM25_INNER_ALL : BM25_INNER_LIMIT;
-        total = bm25_count_candidates(db, &filters, inner_limit);
-        if (saturated && total == 0 && inner_limit != BM25_INNER_ALL) {
-            inner_limit = BM25_INNER_ALL;
-            total = bm25_count_candidates(db, &filters, inner_limit);
-        }
-        candidate_window_saturated = saturated && inner_limit != BM25_INNER_ALL;
-        sqlite3_bind_int(stmt, BM25_BIND_INNER, inner_limit);
-
-        while (scan.count < row_cap && sqlite3_step(stmt) == SQLITE_ROW) {
-            bm25_scan_append(&scan, stmt);
-        }
-        sqlite3_finalize(stmt);
-    }
+    const cbm_rank_search_request_t request = {
+        .filters = &filters,
+        .exact_query = query,
+        .limit = row_cap,
+        .offset = row_offset,
+        .candidate_limit = BM25_INNER_LIMIT,
+    };
+    bool ranked = mori_rank_search(db, &request, &total, &candidate_window_saturated, &scan,
+                                   bm25_scan_append);
     free(file_like);
+    if (!ranked) {
+        bm25_output_rows_free(rows, scan.count);
+        return NULL;
+    }
+    CBM_MSAN_WRITTEN(&total, sizeof(total));
+    CBM_MSAN_WRITTEN(&candidate_window_saturated, sizeof(candidate_window_saturated));
+    cbm_log_debug("search_graph.reader", "mode", "bm25", "backend", "rust");
     int row_count = scan.count;
 
     /* Never a silent zero for a label the index spells differently. */
@@ -10517,171 +10281,34 @@ static void trace_possibles_tree(cbm_sb_t *sb, const cbm_traverse_result_t *tr,
     }
 }
 
-/* ── Pagination cursors (stateless, exactly-once) ────────────────────
- * Token: "c1.<leg>.<generation>.<qhash>.<hop>.<id>" — version, trace leg
- * (o=callees, i=callers), the store generation (per-DB uid + mutation
- * counter), an FNV-1a-64 hash of the canonical query params, and the
- * (hop, node_id) watermark of the last emitted row in canonical order.
- * Stateless by design: the server re-traverses (the recursive CTE pays the
- * full reachable-set cost regardless of LIMIT, so a page costs what one
- * call costs today) and skips to the watermark. The generation stamp turns
- * every post-reindex cursor into a loud, actionable error — node ids are
- * never reused across rebuilds, so silently resuming would be wrong. */
-
-static uint64_t cursor_fnv1a64(const char *s, uint64_t h) {
-    while (s && *s) {
-        h ^= (uint64_t)(unsigned char)*s++;
-        h *= 0x100000001b3ULL;
-    }
-    return h;
+static const char *trace_next_cursor_edge(void *context) {
+    yyjson_val *value = yyjson_arr_iter_next(context);
+    return !value ? NULL : yyjson_is_str(value) ? yyjson_get_str(value) : "<non-string>";
 }
 
-typedef struct {
-    char leg;            /* 'o' callees, 'i' callers */
-    char generation[96]; /* store generation at mint time */
-    uint64_t qhash;      /* canonical-params hash */
-    int hop;             /* watermark: last emitted row */
-    int64_t node_id;
-} trace_cursor_t;
-
-/* Hash the params that define the traversal identity. A cursor replayed with
- * different params must fail loudly, never silently mis-skip. */
-static uint64_t trace_params_hash(const char *project, const char *func_name, const char *direction,
-                                  const char *mode, const char *param_name, int depth,
-                                  bool include_tests, bool risk_labels, bool include_evidence,
-                                  bool include_overrides, int limit, const char *args) {
-    uint64_t h = 0xcbf29ce484222325ULL;
-    h = cursor_fnv1a64(project ? project : "", h);
-    h = cursor_fnv1a64("|", h);
-    h = cursor_fnv1a64(func_name ? func_name : "", h);
-    h = cursor_fnv1a64("|", h);
-    h = cursor_fnv1a64(direction ? direction : "", h);
-    h = cursor_fnv1a64("|", h);
-    h = cursor_fnv1a64(mode ? mode : "", h);
-    h = cursor_fnv1a64("|", h);
-    h = cursor_fnv1a64(param_name ? param_name : "", h);
-    char nums[64];
-    /* Output budget changes only how many whole rows fit after the exact
-     * watermark; it does not change graph identity. Excluding it lets a caller
-     * follow a hard-floor instruction and raise max_output_tokens without
-     * invalidating the cursor that reached that page. */
-    snprintf(nums, sizeof(nums), "|%d|%d|%d|%d|%d", depth, include_tests ? 1 : 0,
-             risk_labels ? 1 : 0, include_evidence ? 1 : 0, limit);
-    h = cursor_fnv1a64(nums, h);
-    /* include_overrides adds an optional section and never changes the rows.
-     * It joins the identity only when set, so a cursor minted without it is
-     * the token minted before the flag existed. */
-    if (include_overrides) {
-        h = cursor_fnv1a64("|include_overrides", h);
-    }
-
-    /* Explicit edge types define the traversed graph. Omitting them from the
-     * cursor identity allowed a token minted for CALLS to resume an IMPORTS
-     * traversal at an unrelated watermark. Preserve caller order: cursors
-     * intentionally require unchanged arguments. */
+static const char *trace_read_cursor(const char *args, const cbm_trace_params_t *params,
+                                     const char *generation, const char *token,
+                                     cbm_trace_pagination_t *state) {
     yyjson_doc *doc = args ? yyjson_read(args, strlen(args), 0) : NULL;
     yyjson_val *root = doc ? yyjson_doc_get_root(doc) : NULL;
     yyjson_val *types = root && yyjson_is_obj(root) ? yyjson_obj_get(root, "edge_types") : NULL;
-    h = cursor_fnv1a64("|edge_types=", h);
-    if (types && yyjson_is_arr(types)) {
-        size_t index;
-        size_t maximum;
-        yyjson_val *value;
-        yyjson_arr_foreach(types, index, maximum, value) {
-            h = cursor_fnv1a64(yyjson_is_str(value) ? yyjson_get_str(value) : "<non-string>", h);
-            h = cursor_fnv1a64(";", h);
-        }
-    }
+    yyjson_arr_iter edges = yyjson_arr_iter_with(types);
+    const char *error =
+        mori_trace_cursor(params, generation, token, trace_next_cursor_edge, &edges, state);
+    CBM_MSAN_WRITTEN(&state->hash, sizeof(state->hash));
+    CBM_MSAN_WRITTEN(&state->node_id, sizeof(state->node_id));
+    CBM_MSAN_WRITTEN(&state->hop, sizeof(state->hop));
+    CBM_MSAN_WRITTEN(&state->leg, sizeof(state->leg));
     if (doc) {
         yyjson_doc_free(doc);
     }
-    return h;
+    return error;
 }
 
-static void trace_cursor_encode(const trace_cursor_t *c, char *buf, size_t bufsz) {
-    snprintf(buf, bufsz, "c1.%c.%s.%016llx.%d.%lld", c->leg, c->generation,
-             (unsigned long long)c->qhash, c->hop, (long long)c->node_id);
-}
-
-/* Decode + validate. Returns NULL on success, else a static teaching error. */
-static const char *trace_cursor_decode(const char *token, const char *current_generation,
-                                       uint64_t expected_qhash, trace_cursor_t *out) {
-    memset(out, 0, sizeof(*out));
-    if (!token || strncmp(token, "c1.", 3) != 0) {
-        return "invalid_cursor: unrecognized token — re-run the original query without 'cursor'";
-    }
-    const char *p = token + 3;
-    if ((*p != 'o' && *p != 'i') || p[1] != '.') {
-        return "invalid_cursor: unrecognized token — re-run the original query without 'cursor'";
-    }
-    out->leg = *p;
-    p += 2; /* leg + '.' */
-    const char *gen_end = strchr(p, '.');
-    if (!gen_end || gen_end == p || (size_t)(gen_end - p) >= sizeof(out->generation)) {
-        return "invalid_cursor: unrecognized token — re-run the original query without 'cursor'";
-    }
-    memcpy(out->generation, p, (size_t)(gen_end - p));
-    out->generation[gen_end - p] = '\0';
-    const char *hash_start = gen_end + 1;
-    const char *hash_end = strchr(hash_start, '.');
-    if (!hash_end || hash_end - hash_start != 16) {
-        return "invalid_cursor: unrecognized token — re-run the original query without 'cursor'";
-    }
-    for (const char *digit = hash_start; digit < hash_end; digit++) {
-        if (!isxdigit((unsigned char)*digit)) {
-            return "invalid_cursor: unrecognized token — re-run the original query without "
-                   "'cursor'";
-        }
-    }
-    errno = 0;
-    char *parsed_end = NULL;
-    unsigned long long qh = strtoull(hash_start, &parsed_end, 16);
-    if (errno == ERANGE || parsed_end != hash_end) {
-        return "invalid_cursor: unrecognized token — re-run the original query without 'cursor'";
-    }
-    const char *hop_start = hash_end + 1;
-    const char *hop_end = strchr(hop_start, '.');
-    errno = 0;
-    long parsed_hop = hop_end ? strtol(hop_start, &parsed_end, 10) : -1;
-    if (!hop_end || hop_end == hop_start || errno == ERANGE || parsed_end != hop_end ||
-        parsed_hop < 1 || parsed_hop > INT_MAX) {
-        return "invalid_cursor: unrecognized token — re-run the original query without 'cursor'";
-    }
-    const char *node_start = hop_end + 1;
-    errno = 0;
-    long long nid = strtoll(node_start, &parsed_end, 10);
-    if (node_start == parsed_end || errno == ERANGE || *parsed_end != '\0' || nid <= 0) {
-        return "invalid_cursor: unrecognized token — re-run the original query without 'cursor'";
-    }
-    out->hop = (int)parsed_hop;
-    out->qhash = qh;
-    out->node_id = nid;
-    if (out->qhash != expected_qhash) {
-        return "cursor_params_mismatch: this cursor was issued for different arguments — "
-               "pass the cursor back with ALL other arguments identical";
-    }
-    if (strcmp(out->generation, current_generation) != 0) {
-        return "stale_cursor: the project was reindexed since this cursor was issued — "
-               "re-run the original query without 'cursor' (node identities changed)";
-    }
-    return NULL;
-}
-
-/* Validate an exactly-issued watermark and return the first row after it.
- * Treating an arbitrary (hop,id) as an insertion point let syntactically valid
- * but edited cursors skip rows. The watermarked row must still exist in the
- * selected, test-filtered leg for this generation. */
-static int trace_watermark_next_index(const cbm_traverse_result_t *tr, int hop, int64_t node_id) {
-    for (int i = 0; i < tr->visited_count; i++) {
-        if (tr->visited[i].hop == hop && tr->visited[i].node.id == node_id) {
-            return i + SKIP_ONE;
-        }
-        if (tr->visited[i].hop > hop ||
-            (tr->visited[i].hop == hop && tr->visited[i].node.id > node_id)) {
-            break;
-        }
-    }
-    return CBM_NOT_FOUND;
+static cbm_trace_watermark_t trace_read_watermark(const void *rows, int index) {
+    const cbm_traverse_result_t *leg = rows;
+    return (cbm_trace_watermark_t){.node_id = leg->visited[index].node.id,
+                                    .hop = leg->visited[index].hop};
 }
 
 /* json-stringified tree for one trace leg: same grouped model as the text
@@ -11305,43 +10932,31 @@ static char *handle_trace_call_path(cbm_mcp_server_t *srv, const char *args) {
     char generation[96];
     (void)cbm_store_generation(store, generation, sizeof(generation));
     char *cursor_arg = cbm_mcp_get_string_arg(args, "cursor");
-    trace_cursor_t cur = {0};
-    bool have_cursor = false;
-    /* A "legacy" generation (pre-migration DB, e.g. opened read-only before
-     * any reindex) offers NO staleness detection: "legacy" == "legacy" across
-     * rebuilds, so a stale watermark would silently resume on wrong node ids.
-     * Cursors are therefore never minted nor accepted under it. */
-    bool gen_legacy = strcmp(generation, "legacy") == 0;
-    if (gen_legacy && cursor_arg && cursor_arg[0]) {
-        free(cursor_arg);
+    const cbm_trace_params_t cursor_params = {
+        .project = project,
+        .function_name = func_name,
+        .direction = direction ? direction : "both",
+        .mode = mode,
+        .parameter_name = param_name,
+        .depth = depth,
+        .limit = trace_limit,
+        .include_tests = include_tests,
+        .risk_labels = risk_labels,
+        .include_evidence = include_evidence,
+        .include_overrides = include_overrides,
+    };
+    cbm_trace_pagination_t pagination = {0};
+    const char *cursor_error =
+        trace_read_cursor(args, &cursor_params, generation, cursor_arg, &pagination);
+    free(cursor_arg);
+    if (cursor_error) {
         free(func_name);
         free(project);
         free(direction);
         free(mode);
         free(param_name);
-        return cbm_mcp_text_result(
-            "cursor_unsupported: this project's index predates generation tracking, so cursor "
-            "staleness cannot be detected. Re-call with a higher 'limit' instead, or re-index "
-            "the project to enable pagination.",
-            true);
+        return cbm_mcp_text_result(cursor_error, true);
     }
-    if (cursor_arg && cursor_arg[0]) {
-        uint64_t qh = trace_params_hash(project, func_name, direction ? direction : "both", mode,
-                                        param_name, depth, include_tests, risk_labels,
-                                        include_evidence, include_overrides, trace_limit, args);
-        const char *cerr = trace_cursor_decode(cursor_arg, generation, qh, &cur);
-        if (cerr) {
-            free(cursor_arg);
-            free(func_name);
-            free(project);
-            free(direction);
-            free(mode);
-            free(param_name);
-            return cbm_mcp_text_result(cerr, true);
-        }
-        have_cursor = true;
-    }
-    free(cursor_arg);
     if (!direction) {
         direction = heap_strdup("both");
     }
@@ -11362,8 +10977,8 @@ static char *handle_trace_call_path(cbm_mcp_server_t *srv, const char *args) {
         free(param_name);
         return cbm_mcp_text_result(errbuf, true);
     }
-    if (have_cursor && ((cur.leg == 'o' && strcmp(direction, "inbound") == 0) ||
-                        (cur.leg == 'i' && strcmp(direction, "outbound") == 0))) {
+    if ((pagination.leg == 'o' && strcmp(direction, "inbound") == 0) ||
+        (pagination.leg == 'i' && strcmp(direction, "outbound") == 0)) {
         free(func_name);
         free(project);
         free(direction);
@@ -11507,58 +11122,32 @@ static char *handle_trace_call_path(cbm_mcp_server_t *srv, const char *args) {
         trace_filter_test_rows(&tr_in);
     }
 
-    /* Page windows in canonical (hop,id) order. Legs drain in a fixed order
-     * (callees, then callers); a resume cursor starts its leg at the row
-     * after the watermark, and a page that finishes one leg with budget to
-     * spare continues into the next. */
-    int out_start = 0;
-    int in_start = 0;
-    if (have_cursor) {
-        int watermark_next = CBM_NOT_FOUND;
-        if (cur.leg == 'o') {
-            watermark_next = trace_watermark_next_index(&tr_out, cur.hop, cur.node_id);
-            out_start = watermark_next;
-        } else {
-            out_start = tr_out.visited_count; /* callees leg already drained */
-            watermark_next = trace_watermark_next_index(&tr_in, cur.hop, cur.node_id);
-            in_start = watermark_next;
+    const cbm_trace_leg_t outbound = {.rows = &tr_out, .count = tr_out.visited_count};
+    const cbm_trace_leg_t inbound = {.rows = &tr_in, .count = tr_in.visited_count};
+    cbm_trace_page_start_t start = {0};
+    cursor_error = mori_trace_page_start(&pagination, &outbound, &inbound, trace_read_watermark,
+                                        &start);
+    CBM_MSAN_WRITTEN(&start, sizeof(start));
+    if (cursor_error) {
+        cbm_store_traverse_free(&tr_out);
+        cbm_store_traverse_free(&tr_in);
+        cbm_store_free_nodes(nodes, node_count);
+        free(func_name);
+        free(project);
+        free(direction);
+        free(mode);
+        free(param_name);
+        if (et_doc_keep) {
+            yyjson_doc_free(et_doc_keep);
         }
-        if (watermark_next == CBM_NOT_FOUND) {
-            cbm_store_traverse_free(&tr_out);
-            cbm_store_traverse_free(&tr_in);
-            cbm_store_free_nodes(nodes, node_count);
-            free(func_name);
-            free(project);
-            free(direction);
-            free(mode);
-            free(param_name);
-            if (et_doc_keep) {
-                yyjson_doc_free(et_doc_keep);
-            }
-            return cbm_mcp_text_result(
-                "invalid_cursor: watermark is not present in the selected visible trace leg — "
-                "re-run the original query without 'cursor'",
-                true);
-        }
+        return cbm_mcp_text_result(cursor_error, true);
     }
-    int budget = trace_limit;
-    int out_len = 0;
-    int in_len = 0;
-    if (do_outbound) {
-        out_len = tr_out.visited_count - out_start;
-        if (out_len > budget) {
-            out_len = budget;
-        }
-        budget -= out_len;
-    }
-    if (do_inbound) {
-        in_len = tr_in.visited_count - in_start;
-        if (in_len > budget) {
-            in_len = budget;
-        }
-    }
-    const int requested_out_len = out_len;
-    const int requested_in_len = in_len;
+    cbm_trace_page_t page = {0};
+    mori_trace_page(&pagination, generation, &outbound, &inbound, trace_read_watermark, &start,
+                    trace_limit, &page);
+    CBM_MSAN_WRITTEN(&page, sizeof(page));
+    const int requested_out_len = page.outbound;
+    const int requested_in_len = page.inbound;
     const int requested_page_rows = requested_out_len + requested_in_len;
     int row_target = requested_page_rows;
     int budget_search_low = 0;
@@ -11584,7 +11173,7 @@ static char *handle_trace_call_path(cbm_mcp_server_t *srv, const char *args) {
     bool emit_possibles = include_overrides && do_outbound && trace_includes_calls;
     bool possibles_omitted = false;
     if (emit_possibles) {
-        trace_possibles_for_page(store, nodes, node_count, &tr_out, out_start, requested_out_len,
+        trace_possibles_for_page(store, nodes, node_count, &tr_out, start.outbound, requested_out_len,
                                  include_tests, &possibles);
     }
     bool unresolved_out = false;
@@ -11614,70 +11203,30 @@ static char *handle_trace_call_path(cbm_mcp_server_t *srv, const char *args) {
     }
 
 render_trace_output:;
-    int rows_left = row_target;
-    out_len = requested_out_len < rows_left ? requested_out_len : rows_left;
-    rows_left -= out_len;
-    in_len = requested_in_len < rows_left ? requested_in_len : rows_left;
-    bool out_more = do_outbound && out_start + out_len < tr_out.visited_count;
-    bool in_more = do_inbound && in_start + in_len < tr_in.visited_count;
-    bool more_rows = out_more || in_more;
+    if (row_target != page.outbound + page.inbound) {
+        mori_trace_page(&pagination, generation, &outbound, &inbound, trace_read_watermark, &start,
+                        row_target, &page);
+        CBM_MSAN_WRITTEN(&page, sizeof(page));
+    }
+    bool more_rows = page.has_more;
     bool engine_saturated = tr_out.truncated || tr_in.truncated;
     bool edge_data_saturated = tr_out.edges_truncated || tr_in.edges_truncated;
     bool trace_truncated =
         more_rows || engine_saturated || edge_data_saturated || output_budget_hit;
-    char next_tok[192] = "";
-    /* Never mint a cursor under a "legacy" generation (no staleness
-     * detection); the truncated flag + raise-limit hint still fire below. */
-    if (more_rows && !gen_legacy) {
-        trace_cursor_t nc = {0};
-        snprintf(nc.generation, sizeof(nc.generation), "%s", generation);
-        nc.qhash =
-            trace_params_hash(project, func_name, direction, mode, param_name, depth, include_tests,
-                              risk_labels, include_evidence, include_overrides, trace_limit, args);
-        /* The watermark is the last row ACTUALLY emitted, not the leg that
-         * happens to have additional rows. At an exact outbound page boundary
-         * inbound may be pending with zero emitted rows. */
-        if (in_len > 0) {
-            nc.leg = 'i';
-            nc.hop = tr_in.visited[in_start + in_len - 1].hop;
-            nc.node_id = tr_in.visited[in_start + in_len - 1].node.id;
-        } else if (out_len > 0) {
-            nc.leg = 'o';
-            nc.hop = tr_out.visited[out_start + out_len - 1].hop;
-            nc.node_id = tr_out.visited[out_start + out_len - 1].node.id;
-        }
-        if (in_len > 0 || out_len > 0) {
-            trace_cursor_encode(&nc, next_tok, sizeof(next_tok));
-        }
-    }
+    const char *next_tok = page.next;
 
     /* Window views: visited offset + count; the full edges array stays
      * attached so data_flow args resolve for boundary nodes whose incoming
      * edge originated on an earlier page. */
     cbm_traverse_result_t view_out = tr_out;
-    view_out.visited = tr_out.visited ? tr_out.visited + out_start : NULL;
-    view_out.visited_count = out_len;
+    view_out.visited = tr_out.visited ? tr_out.visited + start.outbound : NULL;
+    view_out.visited_count = page.outbound;
     cbm_traverse_result_t view_in = tr_in;
-    view_in.visited = tr_in.visited ? tr_in.visited + in_start : NULL;
-    view_in.visited_count = in_len;
+    view_in.visited = tr_in.visited ? tr_in.visited + start.inbound : NULL;
+    view_in.visited_count = page.inbound;
 
-    /* Totals must count what the caller can actually enumerate: when
-     * include_tests=false the tables hide test-file rows, so raw
-     * visited_count overstated the reachable set (a field-eval agent read
-     * callers_total=175 against a handful of visible rows and distrusted
-     * the tool). Count with the same filter the emitters apply. */
-    int out_total = 0;
-    for (int i = 0; i < tr_out.visited_count; i++) {
-        if (include_tests || !is_test_file(tr_out.visited[i].node.file_path)) {
-            out_total++;
-        }
-    }
-    int in_total = 0;
-    for (int i = 0; i < tr_in.visited_count; i++) {
-        if (include_tests || !is_test_file(tr_in.visited[i].node.file_path)) {
-            in_total++;
-        }
-    }
+    int out_total = outbound.count;
+    int in_total = inbound.count;
 
     free(json);
     json = NULL;
@@ -18347,6 +17896,14 @@ typedef struct {
     uint64_t qhash;    /* semantic query identity; page sizing is deliberately excluded */
     int offset;        /* next row in this independently pageable stream */
 } detect_cursor_t;
+
+static uint64_t cursor_fnv1a64(const char *s, uint64_t h) {
+    while (s && *s) {
+        h ^= (uint64_t)(unsigned char)*s++;
+        h *= 0x100000001b3ULL;
+    }
+    return h;
+}
 
 static uint64_t detect_params_hash(const char *project, const char *base_branch, const char *scope,
                                    const char *direction, int depth) {

@@ -80,6 +80,9 @@ mod rust_doc_cargo;
 #[path = "pipeline/rust_doc_path.rs"]
 mod rust_doc_path;
 #[cfg(feature = "native-engine-abi")]
+#[path = "mcp/search/mod.rs"]
+mod search;
+#[cfg(feature = "native-engine-abi")]
 #[path = "mcp/search_code_request/mod.rs"]
 mod search_code_request;
 #[cfg(any(feature = "native-engine-abi", test))]
@@ -108,6 +111,12 @@ mod terraform;
 #[cfg(feature = "native-engine-abi")]
 #[path = "cli/test_impact_cli.rs"]
 mod test_impact_cli;
+#[cfg(any(feature = "native-engine-abi", test))]
+#[path = "mcp/trace_page.rs"]
+mod trace_page;
+
+#[cfg(all(feature = "c-backend", not(test)))]
+pub use search::register_search_readers;
 #[cfg(feature = "native-engine-abi")]
 #[path = "mcp/test_impact_git.rs"]
 mod test_impact_git;
