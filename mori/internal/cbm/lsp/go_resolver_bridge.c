@@ -1095,36 +1095,74 @@ static void extract_type_params_from_ast(CBMArena *arena, CBMTypeRegistry *reg, 
 // Forward: tree-sitter Go language (from lang_specs.c)
 extern const TSLanguage *tree_sitter_go(void);
 
+typedef struct {
+    TSParser *parser;
+    TSTree *tree;
+} GoParse;
+
+typedef struct {
+    const _Atomic int *cancelled;
+} GoParseControl;
+
+static bool go_parse_progress(TSParseState *state) {
+    const GoParseControl *control = state->payload;
+    return go_token_cancelled(control->cancelled);
+}
+
+static CBMGoResolveStatus go_parse_cross_file(const char *source, int len, TSTree *cached,
+                                               const _Atomic int *cancelled, GoParse *out) {
+    if (go_token_cancelled(cancelled))
+        return CBM_GO_RESOLVE_CANCELLED;
+    if (!source || len <= 0)
+        return CBM_GO_RESOLVE_UNAVAILABLE;
+    if (cached) {
+        *out = (GoParse){.tree = cached};
+        return CBM_GO_RESOLVE_COMPLETE;
+    }
+
+    TSParser *parser = ts_parser_new();
+    if (!parser)
+        return CBM_GO_RESOLVE_FAILED;
+    if (!ts_parser_set_language(parser, tree_sitter_go())) {
+        ts_parser_delete(parser);
+        return CBM_GO_RESOLVE_FAILED;
+    }
+    GoParseControl control = {.cancelled = cancelled};
+    TSParseOptions options = {0};
+    if (cancelled) {
+        options.payload = &control;
+        options.progress_callback = go_parse_progress;
+    }
+    TSTree *tree = cbm_parse_source(parser, source, (uint32_t)len, options);
+    bool interrupted = go_token_cancelled(cancelled);
+    if (!tree || interrupted) {
+        if (tree)
+            ts_tree_delete(tree);
+        ts_parser_delete(parser);
+        return interrupted ? CBM_GO_RESOLVE_CANCELLED : CBM_GO_RESOLVE_FAILED;
+    }
+    *out = (GoParse){parser, tree};
+    return CBM_GO_RESOLVE_COMPLETE;
+}
+
+static void go_parse_release(GoParse parsed) {
+    if (parsed.parser) {
+        ts_tree_delete(parsed.tree);
+        ts_parser_delete(parsed.parser);
+    }
+}
+
 CBMGoResolveStatus cbm_run_go_lsp_cross_status(
     CBMArena *arena, const char *source, int source_len, const char *module_qn,
     const char *rel_path, CBMLSPDef *defs, int def_count, const char **import_names,
     const char **import_qns, int import_count, TSTree *cached_tree, CBMResolvedCallArray *out,
     const _Atomic int *cancelled) {
-    if (go_token_cancelled(cancelled))
-        return CBM_GO_RESOLVE_CANCELLED;
-    if (!source || source_len <= 0)
-        return CBM_GO_RESOLVE_UNAVAILABLE;
-
-    // 1. Use cached tree if available, otherwise parse fresh
-    TSParser *parser = NULL;
-    TSTree *tree = cached_tree;
-    bool owns_tree = false;
-    if (!tree) {
-        parser = ts_parser_new();
-        if (!parser)
-            return CBM_GO_RESOLVE_FAILED;
-        if (!ts_parser_set_language(parser, tree_sitter_go())) {
-            ts_parser_delete(parser);
-            return CBM_GO_RESOLVE_UNAVAILABLE;
-        }
-        tree = cbm_parse_source(parser, source, (uint32_t)source_len, (TSParseOptions){0});
-        owns_tree = true;
-        if (!tree) {
-            ts_parser_delete(parser);
-            return CBM_GO_RESOLVE_UNAVAILABLE;
-        }
-    }
-    TSNode root = ts_tree_root_node(tree);
+    GoParse parsed;
+    CBMGoResolveStatus status = go_parse_cross_file(source, source_len, cached_tree, cancelled,
+                                                    &parsed);
+    if (status != CBM_GO_RESOLVE_COMPLETE)
+        return status;
+    TSNode root = ts_tree_root_node(parsed.tree);
 
     // 2. Build registry (the stdlib is the shared sealed registry, chained)
     CBMTypeRegistry reg;
@@ -1173,14 +1211,8 @@ CBMGoResolveStatus cbm_run_go_lsp_cross_status(
         }
     }
 
-    CBMGoResolveStatus status = go_lsp_process_file(&ctx, root);
-
-    // 5. Cleanup — only free if we allocated
-    if (owns_tree) {
-        ts_tree_delete(tree);
-        if (parser)
-            ts_parser_delete(parser);
-    }
+    status = go_lsp_process_file(&ctx, root);
+    go_parse_release(parsed);
     return status;
 }
 
@@ -1236,28 +1268,14 @@ CBMGoResolveStatus cbm_run_go_lsp_cross_with_registry_status(
     CBMResolvedCallArray *out, const _Atomic int *cancelled) {
     if (go_token_cancelled(cancelled))
         return CBM_GO_RESOLVE_CANCELLED;
-    if (!source || source_len <= 0 || !reg)
+    if (!reg)
         return CBM_GO_RESOLVE_UNAVAILABLE;
-
-    TSParser *parser = NULL;
-    TSTree *tree = cached_tree;
-    bool owns_tree = false;
-    if (!tree) {
-        parser = ts_parser_new();
-        if (!parser)
-            return CBM_GO_RESOLVE_FAILED;
-        if (!ts_parser_set_language(parser, tree_sitter_go())) {
-            ts_parser_delete(parser);
-            return CBM_GO_RESOLVE_UNAVAILABLE;
-        }
-        tree = cbm_parse_source(parser, source, (uint32_t)source_len, (TSParseOptions){0});
-        owns_tree = true;
-        if (!tree) {
-            ts_parser_delete(parser);
-            return CBM_GO_RESOLVE_UNAVAILABLE;
-        }
-    }
-    TSNode root = ts_tree_root_node(tree);
+    GoParse parsed;
+    CBMGoResolveStatus status = go_parse_cross_file(source, source_len, cached_tree, cancelled,
+                                                    &parsed);
+    if (status != CBM_GO_RESOLVE_COMPLETE)
+        return status;
+    TSNode root = ts_tree_root_node(parsed.tree);
 
     /* Phase 1b/1c (per-file AST mutations on registry) DELIBERATELY SKIPPED —
      * shared registry must stay immutable across parallel workers. */
@@ -1271,13 +1289,8 @@ CBMGoResolveStatus cbm_run_go_lsp_cross_with_registry_status(
             go_lsp_add_import(&ctx, import_names[i], import_qns[i]);
         }
     }
-    CBMGoResolveStatus status = go_lsp_process_file(&ctx, root);
-
-    if (owns_tree) {
-        ts_tree_delete(tree);
-        if (parser)
-            ts_parser_delete(parser);
-    }
+    status = go_lsp_process_file(&ctx, root);
+    go_parse_release(parsed);
     return status;
 }
 
