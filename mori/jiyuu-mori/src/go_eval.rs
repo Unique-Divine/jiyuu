@@ -1,6 +1,6 @@
 //! Go expression types, including lexical, imported, and generic calls.
 
-use std::ffi::{CStr, c_char};
+use std::ffi::CStr;
 use std::ptr;
 
 use crate::go_types::{TypeMode, is_builtin};
@@ -12,6 +12,10 @@ use native::{Callable, File, NameList, Signature, Type, TypeView};
 
 #[path = "go_bindings.rs"]
 mod bindings;
+#[path = "go_members.rs"]
+mod members;
+#[path = "go_walk.rs"]
+mod walk;
 
 type Node<'tree> = BorrowedNode<'tree>;
 
@@ -41,8 +45,14 @@ fn qualified<'file>(
     package: &CStr,
     name: &CStr,
 ) -> Option<&'file CStr> {
-    let package = package.to_bytes();
-    let name = name.to_bytes();
+    qualified_bytes(file, package.to_bytes(), name.to_bytes())
+}
+
+fn qualified_bytes<'file>(
+    file: &File<'file>,
+    package: &[u8],
+    name: &[u8],
+) -> Option<&'file CStr> {
     let mut text = Vec::new();
     text.try_reserve_exact(
         package.len().checked_add(name.len())?.checked_add(1)?,
@@ -109,12 +119,13 @@ fn selector(file: &File<'_>, node: Node<'_>, depth: usize) -> Type {
     };
     if let TypeView::Named(qn) = file.view(base) {
         if let Some(method) =
-            file.method(qn, member).filter(Callable::has_signature)
+            members::method(file, qn, member, 0).filter(Callable::has_signature)
         {
             return method.signature;
         }
-        let field = file.field(qn, member);
-        if !matches!(file.view(field), TypeView::Unknown) {
+        if let Some(field) = members::field(file, qn, member, 0)
+            && !matches!(file.view(field), TypeView::Unknown)
+        {
             return field;
         }
     }
@@ -145,12 +156,6 @@ fn builtin_call(name: &[u8]) -> bool {
     )
 }
 
-#[unsafe(no_mangle)]
-unsafe extern "C" fn mori_go_is_builtin(name: *const c_char) -> bool {
-    // SAFETY: The Go walk supplies a live, NUL-terminated identifier.
-    builtin_call(unsafe { CStr::from_ptr(name) }.to_bytes())
-}
-
 fn builtin_return(
     file: &File<'_>,
     name: &[u8],
@@ -167,7 +172,10 @@ fn builtin_return(
     }
 }
 
-fn registry_callable(file: &File<'_>, callee: Node<'_>) -> Option<Callable> {
+fn registry_callable<'file>(
+    file: &File<'file>,
+    callee: Node<'_>,
+) -> Option<Callable<'file>> {
     let name = self::name(file, callee)?;
     let qn = qualified(file, file.package, name)?;
     file.function(qn).or_else(|| {
@@ -396,7 +404,7 @@ fn closure(file: &File<'_>, node: Node<'_>) -> Type {
                 }
             }
         }
-        file.walk(body.as_raw());
+        file.walk(body);
     }
 
     let mut params = [ptr::null(); MAX_CLOSURE_TYPES];

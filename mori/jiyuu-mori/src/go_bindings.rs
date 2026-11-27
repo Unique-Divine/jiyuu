@@ -3,9 +3,9 @@
 use std::ffi::CStr;
 
 use super::native::{File, TypeView};
-use super::{Node, evaluate, name, parse};
+use super::{Node, evaluate, name, parse, walk::exact_callable};
 
-fn binding_name<'file>(
+pub(super) fn binding_name<'file>(
     file: &File<'file>,
     node: Node<'_>,
 ) -> Option<&'file CStr> {
@@ -23,7 +23,7 @@ fn first_value(node: Node<'_>) -> Node<'_> {
     }
 }
 
-fn values(node: Node<'_>) -> impl Iterator<Item = Node<'_>> {
+pub(super) fn values(node: Node<'_>) -> impl Iterator<Item = Node<'_>> {
     let list = node.kind() == c"expression_list";
     (!list)
         .then_some(node)
@@ -40,7 +40,7 @@ fn only_value(node: Node<'_>) -> Option<Node<'_>> {
 fn short_declaration(file: &File<'_>, left: Node<'_>, right: Node<'_>) {
     let single = only_value(right);
     let ty = single.map(|node| evaluate(file, Some(node), 0));
-    let callable = single.and_then(|node| file.exact_callable(node.as_raw()));
+    let callable = single.and_then(|node| exact_callable(file, node));
     if left.kind() == c"expression_list" {
         for (index, target) in left.named_children().enumerate() {
             let Some(name) = binding_name(file, target) else {
@@ -72,7 +72,7 @@ fn assignment(file: &File<'_>, left: Node<'_>, right: Node<'_>) {
             continue;
         };
         let ty = evaluate(file, value, 0);
-        let callable = value.and_then(|node| file.exact_callable(node.as_raw()));
+        let callable = value.and_then(|node| exact_callable(file, node));
         // Unknown RHS calls clear a previous exact callable on this name.
         file.bind_value(name, ty, callable);
     }
@@ -90,7 +90,7 @@ fn declaration(file: &File<'_>, node: Node<'_>) {
     };
     let callable = value
         .and_then(only_value)
-        .and_then(|node| file.exact_callable(node.as_raw()));
+        .and_then(|node| exact_callable(file, node));
     if is_const {
         if let Some(name) = node
             .field(c"name")
@@ -215,7 +215,7 @@ fn function(file: &File<'_>, node: Node<'_>) {
         bind_parameters(file, receiver, false, true);
     }
     if let Some(body) = node.field(c"body") {
-        file.walk(body.as_raw());
+        file.walk(body);
     }
 }
 

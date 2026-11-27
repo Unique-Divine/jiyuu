@@ -206,11 +206,13 @@ impl<'tree> BorrowedNode<'tree> {
         &self.raw
     }
 
+    pub(crate) fn is_named(self) -> bool {
+        // SAFETY: This node belongs to the live tree borrow.
+        unsafe { cbm_ffi_ts_node_is_named(self.as_raw()) }
+    }
+
     pub(crate) fn unnamed_children(self) -> impl Iterator<Item = Self> {
-        self.children().filter(|child| {
-            // SAFETY: The child carries the live tree borrow.
-            !unsafe { cbm_ffi_ts_node_is_named(child.as_raw()) }
-        })
+        self.children().filter(|child| !child.is_named())
     }
 
     pub(crate) fn named_children(self) -> impl Iterator<Item = Self> {

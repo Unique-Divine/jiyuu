@@ -31,12 +31,6 @@ typedef struct {
     // Output: resolved calls accumulate here
     CBMResolvedCallArray* resolved_calls;
 
-    // AST-walk recursion depth for resolve_calls_in_node (guards stack overflow
-    // on deeply-nested/cyclic files; see cbm_lsp_max_walk_depth). Zero via memset.
-    int walk_depth;
-
-    // Debug mode (CBM_LSP_DEBUG env)
-    bool debug;
 } GoLSPContext;
 
 // Initialize a GoLSPContext for processing one file.
@@ -50,15 +44,8 @@ void go_lsp_add_import(GoLSPContext* ctx, const char* local_name, const char* pa
 // root is the tree-sitter root node of the file.
 void go_lsp_process_file(GoLSPContext* ctx, TSNode root);
 
-// Evaluate the type of a Go expression node.
-const CBMType* go_eval_expr_type(GoLSPContext* ctx, TSNode node);
-
 // Parse a Go type AST node into a CBMType.
 const CBMType* go_parse_type_node(GoLSPContext* ctx, TSNode node);
-
-// Look up a field or method on a type, traversing embedded types.
-const CBMRegisteredFunc* go_lookup_field_or_method(GoLSPContext* ctx,
-    const char* type_qn, const char* member_name);
 
 // Entry point: build registry from file's own defs + run LSP resolution.
 // Called from cbm_extract_file() after definitions and imports are extracted.

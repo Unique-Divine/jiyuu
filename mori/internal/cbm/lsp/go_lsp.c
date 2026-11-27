@@ -10,30 +10,6 @@
 #include <stdlib.h>
 #include <stdatomic.h>
 
-// Forward declarations
-static void resolve_calls_in_node_inner(GoLSPContext *ctx, TSNode node);
-
-/* Depth-guarded entry for the AST call-resolution walk. The walk recurses once
- * per nesting level; a deeply-nested or cyclic file can overflow the native
- * stack (SIGSEGV) and take down the whole index. Past the cap the subtree is
- * skipped — its calls stay unresolved, which is graceful degradation, not a
- * crash. The cap is CBM_LSP_MAX_WALK_DEPTH, env-overridable via the same name.
- * The walk_depth-- runs after the inner returns, so early returns in the body
- * never leak the counter. */
-static void resolve_calls_in_node(GoLSPContext *ctx, TSNode node) {
-    if (ctx->walk_depth >= cbm_lsp_max_walk_depth())
-        return;
-    ctx->walk_depth++;
-    resolve_calls_in_node_inner(ctx, node);
-    ctx->walk_depth--;
-}
-static void emit_resolved_call(GoLSPContext *ctx, const char *callee_qn, const char *strategy,
-                               float confidence, TSNode site);
-static const char *go_exact_callable_target(GoLSPContext *ctx, TSNode node);
-static void go_scope_bind_value(GoLSPContext *ctx, const char *name, const CBMType *type,
-                                const char *callable_qn);
-static const CBMType *go_lookup_field(GoLSPContext *ctx, const char *type_qn,
-                                      const char *field_name, int depth);
 static void extract_type_params_from_ast(CBMArena *arena, CBMTypeRegistry *reg, TSNode root,
                                          const char *source, int source_len, const char *module_qn);
 
@@ -51,10 +27,6 @@ void go_lsp_init(GoLSPContext *ctx, CBMArena *arena, const char *source, int sou
     ctx->resolved_calls = out;
     ctx->current_scope = cbm_scope_push(arena, NULL); // root scope
 
-    {
-        const char *debug_env = getenv("CBM_LSP_DEBUG");
-        ctx->debug = (debug_env && debug_env[0]);
-    }
 }
 
 void go_lsp_add_import(GoLSPContext *ctx, const char *local_name, const char *pkg_qn) {
@@ -79,12 +51,6 @@ void go_lsp_add_import(GoLSPContext *ctx, const char *local_name, const char *pk
     ctx->import_count++;
 }
 
-// --- Helper: get node text ---
-
-static char *lsp_node_text(GoLSPContext *ctx, TSNode node) {
-    return cbm_node_text(ctx->arena, node, ctx->source);
-}
-
 // --- Helper: resolve import alias to package QN ---
 
 /* The first import of this local name. Found by name (lsp_name_rows.h): a scan
@@ -96,8 +62,6 @@ static const char *resolve_import(GoLSPContext *ctx, const char *local_name) {
                                 ctx->import_count, local_name);
     return i >= 0 ? ctx->import_package_qns[i] : NULL;
 }
-
-extern bool mori_go_is_builtin(const char *name);
 
 // --- go_parse_type_node: AST type node -> CBMType ---
 
@@ -212,7 +176,7 @@ const CBMType *go_parse_type_node(GoLSPContext *ctx, TSNode node) {
 _Static_assert(sizeof(CBMTypeKind) == sizeof(uint32_t), "Go evaluator type kind width");
 _Static_assert(CBM_TYPE_UNKNOWN == 0 && CBM_TYPE_NAMED == 1 && CBM_TYPE_POINTER == 2 &&
                    CBM_TYPE_SLICE == 3 && CBM_TYPE_MAP == 4 && CBM_TYPE_CHANNEL == 5 &&
-                   CBM_TYPE_FUNC == 6 && CBM_TYPE_BUILTIN == 9 && CBM_TYPE_TUPLE == 10 &&
+                   CBM_TYPE_FUNC == 6 && CBM_TYPE_INTERFACE == 7 && CBM_TYPE_BUILTIN == 9 && CBM_TYPE_TUPLE == 10 &&
                    CBM_TYPE_TYPE_PARAM == 11,
                "Go evaluator type tags");
 _Static_assert(offsetof(CBMType, data) == sizeof(void *), "Go evaluator type payload");
@@ -223,19 +187,37 @@ _Static_assert(offsetof(CBMRegisteredFunc, signature) == 3 * sizeof(void *),
 _Static_assert(offsetof(CBMRegisteredFunc, type_param_names) == 4 * sizeof(void *),
                "Go evaluator function type parameters");
 
+_Static_assert(offsetof(CBMRegisteredType, method_names) == 4 * sizeof(void *),
+               "Go resolver interface methods");
+_Static_assert(offsetof(CBMRegisteredType, is_interface) == 9 * sizeof(void *),
+               "Go resolver interface flag");
+_Static_assert(CBM_RESOLVED_INVOCATION == 0 && CBM_RESOLVED_CALL_REFERENCE == 1,
+               "Go resolver call kind");
+_Static_assert(CBM_SOURCE_ORIGIN_RAW == 0, "Go resolver source origin");
+
+typedef struct {
+    const char *target;
+    const char *strategy;
+    const char *reason;
+    float confidence;
+    uint32_t kind;
+    uint32_t start;
+    uint32_t end;
+    uint32_t origin;
+} GoEvalOutput;
+
 typedef struct {
     bool (*scope_lookup)(GoLSPContext *, const char *, const CBMType **);
     const char *(*import)(GoLSPContext *, const char *);
-    const CBMType *(*field)(GoLSPContext *, const char *, const char *);
-    const CBMRegisteredFunc *(*method)(GoLSPContext *, const char *, const char *);
     const CBMType *(*parse_type)(GoLSPContext *, const TSNode *);
     CBMScope *(*push_scope)(GoLSPContext *);
     void (*pop_scope)(GoLSPContext *, CBMScope *);
     void (*bind)(GoLSPContext *, const char *, const CBMType *);
-    void (*walk)(GoLSPContext *, const TSNode *);
-    const char *(*exact_callable)(GoLSPContext *, const TSNode *);
     void (*bind_value)(GoLSPContext *, const char *, const CBMType *, const char *);
     void (*enter_function)(GoLSPContext *, const TSNode *, const char *);
+    const char *(*scope_callable)(GoLSPContext *, const char *);
+    void (*clear_callable)(GoLSPContext *, const char *);
+    void (*emit)(GoLSPContext *, const GoEvalOutput *);
 } GoEvalOps;
 
 typedef struct {
@@ -248,10 +230,11 @@ typedef struct {
     GoLSPContext *context;
     const GoEvalOps *operations;
     size_t depth_limit;
+    const char *const *import_names;
+    const char *const *import_values;
+    size_t import_count;
 } GoEvalInput;
 
-extern const CBMType *mori_go_eval_expr(const GoEvalInput *input);
-extern void mori_go_bind_statement(const GoEvalInput *input);
 extern void mori_go_walk_file(const GoEvalInput *input);
 
 static bool go_eval_scope_lookup(GoLSPContext *ctx, const char *name, const CBMType **out) {
@@ -260,10 +243,6 @@ static bool go_eval_scope_lookup(GoLSPContext *ctx, const char *name, const CBMT
         return false;
     *out = binding->type;
     return true;
-}
-
-static const CBMType *go_eval_field(GoLSPContext *ctx, const char *type, const char *field) {
-    return go_lookup_field(ctx, type, field, 0);
 }
 
 static const CBMType *go_eval_parse_type(GoLSPContext *ctx, const TSNode *node) {
@@ -285,14 +264,46 @@ static void go_eval_bind(GoLSPContext *ctx, const char *name, const CBMType *typ
     cbm_scope_bind(ctx->current_scope, name, type);
 }
 
-static void go_eval_walk(GoLSPContext *ctx, const TSNode *node) {
-    cbm_ffi_ts_node_written(node);
-    resolve_calls_in_node(ctx, *node);
+static void go_eval_bind_value(GoLSPContext *ctx, const char *name, const CBMType *type,
+                               const char *callable) {
+    cbm_scope_bind_callable(ctx->current_scope, name, type, callable);
 }
 
-static const char *go_eval_exact_callable(GoLSPContext *ctx, const TSNode *node) {
-    cbm_ffi_ts_node_written(node);
-    return go_exact_callable_target(ctx, *node);
+static const char *go_eval_scope_callable(GoLSPContext *ctx, const char *name) {
+    return cbm_scope_lookup_callable(ctx->current_scope, name);
+}
+
+static void go_eval_clear_callable(GoLSPContext *ctx, const char *name) {
+    cbm_scope_update_callable(ctx->current_scope, name, NULL);
+}
+
+static void go_eval_emit(GoLSPContext *ctx, const GoEvalOutput *row) {
+    if (!ctx->resolved_calls || !ctx->enclosing_func_qn)
+        return;
+    CBM_MSAN_WRITTEN(row, sizeof(*row));
+    CBMResolvedCall call = {
+        .caller_qn = ctx->enclosing_func_qn,
+        .callee_qn = row->target,
+        .strategy = row->strategy,
+        .reason = row->reason,
+        .confidence = row->confidence,
+        .kind = (CBMResolvedKind)row->kind,
+        .site_start_byte = row->start,
+        .site_end_byte = row->end,
+        .source_origin = (CBMSourceOrigin)row->origin,
+    };
+    cbm_resolvedcall_push(ctx->resolved_calls, ctx->arena, call);
+}
+
+typedef bool (*GoEvalVisitType)(void *, const CBMRegisteredType *);
+
+void cbm_go_eval_visit_types(const CBMTypeRegistry *reg, void *context, GoEvalVisitType visit) {
+    CBMTypeShortIter types;
+    cbm_registry_all_types_chain(reg, &types);
+    for (int i = cbm_type_short_iter_next(&types); i >= 0; i = cbm_type_short_iter_next(&types)) {
+        if (!visit(context, &types.reg->types[i]))
+            break;
+    }
 }
 
 /* Reuse the same init and method identity helpers as definition extraction. */
@@ -313,24 +324,23 @@ static void go_eval_enter_function(GoLSPContext *ctx, const TSNode *node, const 
     }
 }
 
-static bool go_eval_input(GoLSPContext *ctx, TSNode node, GoEvalInput *input) {
+void go_lsp_process_file(GoLSPContext *ctx, TSNode node) {
     if (ts_node_is_null(node) || !ctx->source || ctx->source_len < 0 || !ctx->package_qn)
-        return false;
+        return;
     static const GoEvalOps ops = {
         .scope_lookup = go_eval_scope_lookup,
         .import = resolve_import,
-        .field = go_eval_field,
-        .method = go_lookup_field_or_method,
         .parse_type = go_eval_parse_type,
         .push_scope = go_eval_push_scope,
         .pop_scope = go_eval_pop_scope,
         .bind = go_eval_bind,
-        .walk = go_eval_walk,
-        .exact_callable = go_eval_exact_callable,
-        .bind_value = go_scope_bind_value,
+        .bind_value = go_eval_bind_value,
         .enter_function = go_eval_enter_function,
+        .scope_callable = go_eval_scope_callable,
+        .clear_callable = go_eval_clear_callable,
+        .emit = go_eval_emit,
     };
-    *input = (GoEvalInput){
+    GoEvalInput input = {
         .root = node,
         .source = (const unsigned char *)ctx->source,
         .source_len = (size_t)ctx->source_len,
@@ -340,13 +350,11 @@ static bool go_eval_input(GoLSPContext *ctx, TSNode node, GoEvalInput *input) {
         .context = ctx,
         .operations = &ops,
         .depth_limit = (size_t)cbm_lsp_max_walk_depth(),
+        .import_names = ctx->import_local_names,
+        .import_values = ctx->import_package_qns,
+        .import_count = (size_t)ctx->import_count,
     };
-    return true;
-}
-
-const CBMType *go_eval_expr_type(GoLSPContext *ctx, TSNode node) {
-    GoEvalInput input;
-    return go_eval_input(ctx, node, &input) ? mori_go_eval_expr(&input) : cbm_type_unknown();
+    mori_go_walk_file(&input);
 }
 
 /* Copy names and lists from Rust before native code consumes them. Counts
@@ -387,831 +395,6 @@ const CBMType *cbm_go_eval_substitute(CBMArena *arena, const CBMType *type, cons
     memcpy(values, args, count * sizeof(*args));
     values[count] = NULL;
     return cbm_type_substitute(arena, type, names, values);
-}
-
-// --- go_lookup_field: struct field lookup with embedding recursion ---
-
-// --- Import-alias re-qualification ------------------------------------
-//
-// parse_field_defs_into_type qualifies struct field type texts as
-// "<def_module>.<text>". When the author wrote the text through an import
-// alias ("Svc:svc.Svc" in module test.main), that yields a QN
-// ("test.main.svc.Svc") that exists nowhere in the project-wide registry —
-// the real QN is "<import_qn>.Svc" and only the calling file's import map
-// can say so. On an exact-QN miss this rewrites the alias segment through
-// the file's imports; returns NULL when no alias segment is involved.
-
-static const char *go_requalify_via_imports(GoLSPContext *ctx, const char *type_qn) {
-    if (!ctx || !type_qn || !type_qn[0] || ctx->import_count <= 0)
-        return NULL;
-    for (int j = 0; j < ctx->import_count; j++) {
-        const char *alias = ctx->import_local_names[j];
-        const char *alias_qn = ctx->import_package_qns[j];
-        if (!alias || !alias[0] || !alias_qn || strchr(alias, '.'))
-            continue;
-        size_t alias_len = strlen(alias);
-        /* Last occurrence of a "<dot>alias<dot>" segment in type_qn. */
-        const char *hit = NULL;
-        for (const char *p = type_qn;;) {
-            p = strstr(p, ".");
-            if (!p)
-                break;
-            p++;
-            if (strncmp(p, alias, alias_len) == 0 && p[alias_len] == '.') {
-                hit = p;
-                p += alias_len;
-            }
-        }
-        if (hit) {
-            const char *rest = hit + alias_len + 1; /* past "<alias>." */
-            return cbm_arena_sprintf(ctx->arena, "%s.%s", alias_qn, rest);
-        }
-    }
-    return NULL;
-}
-
-static const CBMType *go_lookup_field(GoLSPContext *ctx, const char *type_qn,
-                                      const char *field_name, int depth) {
-    if (!type_qn || !field_name || depth > 5)
-        return NULL;
-
-    const CBMRegisteredType *rt = cbm_registry_lookup_type(ctx->registry, type_qn);
-    if (!rt && depth == 0) {
-        /* Import-alias re-qualification: field texts from cross-package defs
-         * may embed an alias segment only this file's import map resolves. */
-        const char *alt_qn = go_requalify_via_imports(ctx, type_qn);
-        if (alt_qn)
-            rt = cbm_registry_lookup_type(ctx->registry, alt_qn);
-    }
-    if (!rt)
-        return NULL;
-
-    // Follow alias chain
-    if (rt->alias_of)
-        return go_lookup_field(ctx, rt->alias_of, field_name, depth + 1);
-
-    // Direct field lookup
-    if (rt->field_names) {
-        for (int i = 0; rt->field_names[i]; i++) {
-            if (strcmp(rt->field_names[i], field_name) == 0 && rt->field_types &&
-                rt->field_types[i]) {
-                return rt->field_types[i];
-            }
-        }
-    }
-
-    // Promoted fields from embedded types
-    if (rt->embedded_types) {
-        for (int i = 0; rt->embedded_types[i]; i++) {
-            const CBMType *f = go_lookup_field(ctx, rt->embedded_types[i], field_name, depth + 1);
-            if (f)
-                return f;
-        }
-    }
-
-    return NULL;
-}
-
-// --- go_lookup_field_or_method: method sets + embedding ---
-
-static const CBMRegisteredFunc *go_lookup_field_or_method_depth(GoLSPContext *ctx,
-                                                                const char *type_qn,
-                                                                const char *member_name,
-                                                                int depth) {
-    if (!type_qn || !member_name)
-        return NULL;
-    if (depth > CBM_LSP_MAX_LOOKUP_DEPTH)
-        return NULL;
-
-    // Direct method lookup
-    const CBMRegisteredFunc *f = cbm_registry_lookup_method(ctx->registry, type_qn, member_name);
-    if (f)
-        return f;
-
-    /* Import-alias re-qualification fallback: NAMED receivers built from
-     * cross-package field type texts can carry a "<module>.svc.Svc" QN;
-     * retry the method set on the import-resolved QN (see
-     * go_requalify_via_imports). */
-    if (depth == 0) {
-        const char *alt_qn = go_requalify_via_imports(ctx, type_qn);
-        if (alt_qn) {
-            f = go_lookup_field_or_method_depth(ctx, alt_qn, member_name, depth + 1);
-            if (f)
-                return f;
-        }
-    }
-
-    const CBMRegisteredType *rt = cbm_registry_lookup_type(ctx->registry, type_qn);
-    if (rt) {
-        // Follow type alias chain
-        if (rt->alias_of) {
-            f = go_lookup_field_or_method_depth(ctx, rt->alias_of, member_name, depth + 1);
-            if (f)
-                return f;
-        }
-
-        // Check embedded types (promoted methods)
-        if (rt->embedded_types) {
-            for (int i = 0; rt->embedded_types[i]; i++) {
-                f = go_lookup_field_or_method_depth(ctx, rt->embedded_types[i], member_name,
-                                                    depth + 1);
-                if (f)
-                    return f;
-            }
-        }
-    }
-
-    return NULL;
-}
-
-const CBMRegisteredFunc *go_lookup_field_or_method(GoLSPContext *ctx, const char *type_qn,
-                                                   const char *member_name) {
-    return go_lookup_field_or_method_depth(ctx, type_qn, member_name, 0);
-}
-
-/* Resolve only source forms that prove one callable identity.  This is
- * intentionally narrower than go_eval_expr_type: conditional expressions,
- * indexed dispatch tables, interfaces with several implementers, and unknown
- * locals remain ordinary values. */
-static const char *go_exact_callable_target(GoLSPContext *ctx, TSNode node) {
-    if (!ctx || ts_node_is_null(node))
-        return NULL;
-    const char *kind = ts_node_type(node);
-
-    if (strcmp(kind, "parenthesized_expression") == 0 && ts_node_named_child_count(node) == 1) {
-        return go_exact_callable_target(ctx, ts_node_named_child(node, 0));
-    }
-
-    if (strcmp(kind, "identifier") == 0) {
-        char *name = lsp_node_text(ctx, node);
-        if (!name)
-            return NULL;
-        /* A local value shadows the package declaration even when its type is
-         * UNKNOWN.  Only an explicitly tracked callable alias may pass. */
-        if (cbm_scope_contains(ctx->current_scope, name)) {
-            return cbm_scope_lookup_callable(ctx->current_scope, name);
-        }
-        const CBMRegisteredFunc *f =
-            cbm_registry_lookup_symbol(ctx->registry, ctx->package_qn, name);
-        return f ? f->qualified_name : NULL;
-    }
-
-    if (strcmp(kind, "selector_expression") == 0) {
-        TSNode operand = ts_node_child_by_field_name(node, "operand", 7);
-        TSNode field = ts_node_child_by_field_name(node, "field", 5);
-        if (ts_node_is_null(operand) || ts_node_is_null(field))
-            return NULL;
-        char *member = lsp_node_text(ctx, field);
-        if (!member)
-            return NULL;
-
-        if (strcmp(ts_node_type(operand), "identifier") == 0) {
-            char *local = lsp_node_text(ctx, operand);
-            const char *package_qn = local ? resolve_import(ctx, local) : NULL;
-            if (package_qn) {
-                const CBMRegisteredFunc *f =
-                    cbm_registry_lookup_symbol(ctx->registry, package_qn, member);
-                return f ? f->qualified_name : NULL;
-            }
-        }
-
-        const CBMType *recv = go_eval_expr_type(ctx, operand);
-        if (recv && recv->kind == CBM_TYPE_POINTER)
-            recv = cbm_type_deref(recv);
-        if (recv && recv->kind == CBM_TYPE_NAMED) {
-            /* A direct method name is unique in a valid Go method set.
-             * Promoted lookup through embedded types can be ambiguous; without
-             * full selector-depth resolution, fail closed and retain USAGE. */
-            const CBMRegisteredFunc *method =
-                cbm_registry_lookup_method(ctx->registry, recv->data.named.qualified_name, member);
-            return method ? method->qualified_name : NULL;
-        }
-    }
-    return NULL;
-}
-
-static void go_scope_bind_value(GoLSPContext *ctx, const char *name, const CBMType *type,
-                                const char *callable_qn) {
-    if (callable_qn) {
-        cbm_scope_bind_callable(ctx->current_scope, name, type, callable_qn);
-    } else {
-        cbm_scope_bind(ctx->current_scope, name, type);
-    }
-}
-
-static void go_process_statement(GoLSPContext *ctx, TSNode node) {
-    GoEvalInput input;
-    if (go_eval_input(ctx, node, &input))
-        mori_go_bind_statement(&input);
-}
-
-// --- Emit a resolved call/reference ---
-
-static void go_emit_resolved_kind(GoLSPContext *ctx, const char *callee_qn, const char *strategy,
-                                  float confidence, const char *source_name, CBMResolvedKind kind,
-                                  TSNode site) {
-    if (!ctx->resolved_calls || !callee_qn || !ctx->enclosing_func_qn)
-        return;
-
-    CBMResolvedCall rc = {0};
-    rc.caller_qn = ctx->enclosing_func_qn;
-    rc.callee_qn = callee_qn;
-    rc.strategy = strategy;
-    rc.confidence = confidence;
-    /* When a callable alias has a different textual leaf, retain that source
-     * name for the exact-site join. */
-    rc.reason = source_name;
-    rc.kind = kind;
-    if (!ts_node_is_null(site)) {
-        rc.site_start_byte = ts_node_start_byte(site);
-        rc.site_end_byte = ts_node_end_byte(site);
-    }
-    cbm_resolvedcall_push(ctx->resolved_calls, ctx->arena, rc);
-}
-
-static void emit_resolved_call(GoLSPContext *ctx, const char *callee_qn, const char *strategy,
-                               float confidence, TSNode site) {
-    go_emit_resolved_kind(ctx, callee_qn, strategy, confidence, NULL, CBM_RESOLVED_INVOCATION,
-                          site);
-}
-
-static void emit_resolved_alias_call(GoLSPContext *ctx, const char *callee_qn,
-                                     const char *source_name, TSNode site) {
-    go_emit_resolved_kind(ctx, callee_qn, "lsp_callable_alias", 0.97f, source_name,
-                          CBM_RESOLVED_INVOCATION, site);
-}
-
-static void emit_resolved_reference(GoLSPContext *ctx, const char *callee_qn,
-                                    const char *source_name, TSNode site) {
-    const char *leaf = strrchr(callee_qn, '.');
-    leaf = leaf ? leaf + 1 : callee_qn;
-    const char *join_name = source_name && strcmp(source_name, leaf) != 0 ? source_name : NULL;
-    go_emit_resolved_kind(ctx, callee_qn, "lsp_callable_value_reference", 0.97f, join_name,
-                          CBM_RESOLVED_CALL_REFERENCE, site);
-}
-
-static void emit_unresolved_reference(GoLSPContext *ctx, const char *source_name, TSNode site) {
-    if (!ctx || !ctx->resolved_calls || !ctx->enclosing_func_qn || !source_name ||
-        ts_node_is_null(site)) {
-        return;
-    }
-    CBMResolvedCall rc = {0};
-    rc.caller_qn = ctx->enclosing_func_qn;
-    rc.callee_qn = source_name;
-    rc.strategy = "lsp_unresolved";
-    rc.confidence = 0.0f;
-    rc.reason = "callable_value_not_in_registry";
-    rc.kind = CBM_RESOLVED_CALL_REFERENCE;
-    rc.site_start_byte = ts_node_start_byte(site);
-    rc.site_end_byte = ts_node_end_byte(site);
-    cbm_resolvedcall_push(ctx->resolved_calls, ctx->arena, rc);
-}
-
-// Emit a diagnostic for an unresolved call (confidence 0.0).
-static void emit_unresolved_call(GoLSPContext *ctx, const char *expr_text, const char *reason,
-                                 TSNode site) {
-    if (!ctx->resolved_calls || !ctx->enclosing_func_qn)
-        return;
-
-    CBMResolvedCall rc = {0};
-    rc.caller_qn = ctx->enclosing_func_qn;
-    rc.callee_qn = expr_text ? expr_text : "?";
-    rc.strategy = "lsp_unresolved";
-    rc.confidence = 0.0f;
-    rc.reason = reason;
-    rc.kind = CBM_RESOLVED_INVOCATION;
-    if (!ts_node_is_null(site)) {
-        rc.site_start_byte = ts_node_start_byte(site);
-        rc.site_end_byte = ts_node_end_byte(site);
-    }
-    cbm_resolvedcall_push(ctx->resolved_calls, ctx->arena, rc);
-}
-
-/* Only direct argument expressions are candidates. Descending into a
- * conditional/map/index expression would promote its constituent names even
- * though the runtime callable is not statically unique. */
-static void go_resolve_value_references_at(GoLSPContext *ctx, TSNode call) {
-    TSNode args = ts_node_child_by_field_name(call, "arguments", 9);
-    if (ts_node_is_null(args))
-        return;
-    uint32_t count = ts_node_named_child_count(args);
-    for (uint32_t i = 0; i < count; i++) {
-        TSNode arg = ts_node_named_child(args, i);
-        const char *kind = ts_node_type(arg);
-        if (strcmp(kind, "identifier") != 0 && strcmp(kind, "selector_expression") != 0 &&
-            strcmp(kind, "parenthesized_expression") != 0)
-            continue;
-        const char *target = go_exact_callable_target(ctx, arg);
-        char *source_name = lsp_node_text(ctx, arg);
-        if (target) {
-            emit_resolved_reference(ctx, target, source_name, arg);
-        } else if (strcmp(kind, "identifier") == 0 && source_name &&
-                   !cbm_scope_contains(ctx->current_scope, source_name)) {
-            /* The per-file registry cannot see an unqualified function from
-             * another file in the same Go package. Preserve the exact source
-             * occurrence for the metadata-only project pass. */
-            emit_unresolved_reference(ctx, source_name, arg);
-        }
-    }
-}
-
-/* Any assignment that is guarded by a branch/loop makes the post-construct
- * callable identity a join of at least two paths. Clear the outer exact
- * identity before walking the construct; assignments inside its temporary
- * scope may still be exact locally, but cannot leak past the join. */
-static void go_invalidate_control_flow_aliases(GoLSPContext *ctx, TSNode node, int depth) {
-    if (!ctx || ts_node_is_null(node) || depth > 64)
-        return;
-    const char *kind = ts_node_type(node);
-    if (strcmp(kind, "func_literal") == 0)
-        return;
-    if (strcmp(kind, "assignment_statement") == 0) {
-        TSNode left = ts_node_child_by_field_name(node, "left", 4);
-        if (!ts_node_is_null(left)) {
-            uint32_t count = strcmp(ts_node_type(left), "expression_list") == 0
-                                 ? ts_node_named_child_count(left)
-                                 : 1;
-            for (uint32_t i = 0; i < count; i++) {
-                TSNode target = count == 1 && strcmp(ts_node_type(left), "expression_list") != 0
-                                    ? left
-                                    : ts_node_named_child(left, i);
-                if (ts_node_is_null(target) || strcmp(ts_node_type(target), "identifier") != 0) {
-                    continue;
-                }
-                char *name = lsp_node_text(ctx, target);
-                if (name && cbm_scope_lookup_callable(ctx->current_scope, name)) {
-                    cbm_scope_update_callable(ctx->current_scope, name, NULL);
-                }
-            }
-        }
-        return;
-    }
-    uint32_t count = ts_node_named_child_count(node);
-    for (uint32_t i = 0; i < count; i++) {
-        go_invalidate_control_flow_aliases(ctx, ts_node_named_child(node, i), depth + 1);
-    }
-}
-
-// --- Walk call expressions and resolve them ---
-
-static void resolve_calls_in_node_inner(GoLSPContext *ctx, TSNode node) {
-    if (ts_node_is_null(node))
-        return;
-    const char *kind = ts_node_type(node);
-
-    // Process statements to build scope
-    go_process_statement(ctx, node);
-
-    if (strcmp(kind, "if_statement") == 0 || strcmp(kind, "for_statement") == 0 ||
-        strcmp(kind, "expression_switch_statement") == 0 ||
-        strcmp(kind, "type_switch_statement") == 0 || strcmp(kind, "select_statement") == 0) {
-        go_invalidate_control_flow_aliases(ctx, node, 0);
-    }
-
-    // Resolve call expressions
-    if (strcmp(kind, "call_expression") == 0) {
-        go_resolve_value_references_at(ctx, node);
-        TSNode func_node = ts_node_child_by_field_name(node, "function", 8);
-        if (!ts_node_is_null(func_node)) {
-            const char *fk = ts_node_type(func_node);
-
-            // selector_expression: obj.Method() or pkg.Func()
-            if (strcmp(fk, "selector_expression") == 0) {
-                TSNode operand = ts_node_child_by_field_name(func_node, "operand", 7);
-                TSNode field = ts_node_child_by_field_name(func_node, "field", 5);
-                if (!ts_node_is_null(operand) && !ts_node_is_null(field)) {
-                    char *field_name = lsp_node_text(ctx, field);
-
-                    // Check if operand is a package import
-                    if (strcmp(ts_node_type(operand), "identifier") == 0) {
-                        char *pkg_name = lsp_node_text(ctx, operand);
-                        if (pkg_name) {
-                            const char *pkg_qn = resolve_import(ctx, pkg_name);
-                            if (pkg_qn && field_name) {
-                                const CBMRegisteredFunc *f =
-                                    cbm_registry_lookup_symbol(ctx->registry, pkg_qn, field_name);
-                                if (f) {
-                                    emit_resolved_call(ctx, f->qualified_name, "lsp_direct", 0.95f,
-                                                       node);
-                                    goto recurse;
-                                }
-                                // Package found but symbol not in registry
-                                emit_unresolved_call(
-                                    ctx,
-                                    cbm_arena_sprintf(ctx->arena, "%s.%s", pkg_name, field_name),
-                                    "symbol_not_in_registry", node);
-                                goto recurse;
-                            }
-                        }
-                    }
-
-                    // Type-based method dispatch
-                    if (field_name) {
-                        const CBMType *recv_type = go_eval_expr_type(ctx, operand);
-                        const CBMType *base = recv_type;
-                        if (base && base->kind == CBM_TYPE_POINTER)
-                            base = cbm_type_deref(base);
-
-                        if (base && base->kind == CBM_TYPE_NAMED) {
-                            const char *recv_qn = base->data.named.qualified_name;
-                            const CBMRegisteredType *receiver_type =
-                                cbm_registry_lookup_type(ctx->registry, recv_qn);
-                            const char *alt_qn = NULL;
-                            /* Re-qualify NAMED receivers that embed an import
-                             * alias segment (cross-package field type texts) —
-                             * the real type only exists under the import QN. */
-                            if (!receiver_type) {
-                                alt_qn = go_requalify_via_imports(ctx, recv_qn);
-                                if (alt_qn) {
-                                    receiver_type = cbm_registry_lookup_type(ctx->registry, alt_qn);
-                                    if (receiver_type)
-                                        recv_qn = alt_qn;
-                                }
-                            }
-                            /* Registered interface receivers must reach the
-                             * interface-resolution branch below. Their semantic
-                             * method registrations are signatures, not concrete
-                             * dispatch targets. */
-                            if (!receiver_type || !receiver_type->is_interface) {
-                                const CBMRegisteredFunc *method =
-                                    go_lookup_field_or_method(ctx, recv_qn, field_name);
-                                if (method) {
-                                    const char *strategy = "lsp_type_dispatch";
-                                    if (method->receiver_type &&
-                                        strcmp(method->receiver_type, recv_qn) != 0) {
-                                        strategy = "lsp_embed_dispatch";
-                                    }
-                                    emit_resolved_call(ctx, method->qualified_name, strategy, 0.95f,
-                                                       node);
-                                    goto recurse;
-                                }
-                            }
-                        }
-
-                        // Interface dispatch: NAMED type that is an interface, or bare INTERFACE
-                        // type
-                        if (base && field_name) {
-                            bool is_iface = (base->kind == CBM_TYPE_INTERFACE);
-                            const char *iface_qn = NULL;
-                            if (!is_iface && base->kind == CBM_TYPE_NAMED) {
-                                const CBMRegisteredType *rt = cbm_registry_lookup_type(
-                                    ctx->registry, base->data.named.qualified_name);
-                                if (!rt) {
-                                    const char *alt_qn = go_requalify_via_imports(
-                                        ctx, base->data.named.qualified_name);
-                                    if (alt_qn)
-                                        rt = cbm_registry_lookup_type(ctx->registry, alt_qn);
-                                }
-                                if (rt && rt->is_interface) {
-                                    is_iface = true;
-                                    iface_qn = rt->qualified_name;
-                                }
-                            }
-                            if (is_iface) {
-                                // Try interface satisfaction: find concrete types implementing this
-                                // interface
-                                const CBMRegisteredType *iface_rt =
-                                    iface_qn ? cbm_registry_lookup_type(ctx->registry, iface_qn)
-                                             : NULL;
-                                if (iface_rt && iface_rt->method_names &&
-                                    iface_rt->method_names[0]) {
-                                    // Count interface methods
-                                    int iface_mcount = 0;
-                                    while (iface_rt->method_names[iface_mcount])
-                                        iface_mcount++;
-
-                                    // Scan all registered types for satisfaction
-                                    const char *sole_impl_qn = NULL;
-                                    int impl_count = 0;
-                                    // Skip stdlib types when interface is from a project package
-                                    bool iface_is_project =
-                                        iface_qn && strchr(iface_qn, '/') != NULL;
-                                    CBMTypeShortIter all_types;
-                                    cbm_registry_all_types_chain(ctx->registry, &all_types);
-                                    for (int ti = -1;
-                                         impl_count < 2 &&
-                                         (ti = cbm_type_short_iter_next(&all_types)) >= 0;) {
-                                        const CBMRegisteredType *cand = &all_types.reg->types[ti];
-                                        if (cand->is_interface)
-                                            continue;
-                                        if (!cand->qualified_name)
-                                            continue;
-                                        if (cand->alias_of)
-                                            continue;
-                                        // For project interfaces, skip stdlib candidates (no '/' in
-                                        // QN)
-                                        if (iface_is_project && !strchr(cand->qualified_name, '/'))
-                                            continue;
-
-                                        // Check if candidate has all interface methods
-                                        bool satisfies = true;
-                                        for (int mi = 0; mi < iface_mcount; mi++) {
-                                            if (!cbm_registry_lookup_method(
-                                                    ctx->registry, cand->qualified_name,
-                                                    iface_rt->method_names[mi])) {
-                                                satisfies = false;
-                                                break;
-                                            }
-                                        }
-                                        if (satisfies) {
-                                            sole_impl_qn = cand->qualified_name;
-                                            impl_count++;
-                                        }
-                                    }
-
-                                    if (impl_count == 1 && sole_impl_qn) {
-                                        // Single implementer: resolve to concrete method
-                                        const CBMRegisteredFunc *concrete_method =
-                                            cbm_registry_lookup_method(ctx->registry, sole_impl_qn,
-                                                                       field_name);
-                                        if (concrete_method) {
-                                            // Sole-implementer interface dispatch is an unambiguous
-                                            // resolution (exactly one concrete method); rank it at
-                                            // least as high as a direct type dispatch (0.95) so the
-                                            // concrete `Type.method` wins over the interface-method
-                                            // type_dispatch for the same call site.
-                                            emit_resolved_call(ctx, concrete_method->qualified_name,
-                                                               "lsp_interface_resolve", 0.95f,
-                                                               node);
-                                            goto recurse;
-                                        }
-                                    }
-                                }
-
-                                // Fallback: generic interface dispatch
-                                emit_resolved_call(
-                                    ctx,
-                                    cbm_arena_sprintf(ctx->arena, "%s.%s",
-                                                      iface_qn ? iface_qn : "interface",
-                                                      field_name),
-                                    "lsp_interface_dispatch", 0.85f, node);
-                                goto recurse;
-                            }
-                        }
-
-                        // Type resolved to NAMED but neither method nor interface matched
-                        if (base && base->kind == CBM_TYPE_NAMED) {
-                            emit_unresolved_call(ctx,
-                                                 cbm_arena_sprintf(ctx->arena, "%s.%s",
-                                                                   base->data.named.qualified_name,
-                                                                   field_name),
-                                                 "method_not_found", node);
-                        } else if (cbm_type_is_unknown(recv_type)) {
-                            char *operand_text = lsp_node_text(ctx, operand);
-                            emit_unresolved_call(
-                                ctx,
-                                cbm_arena_sprintf(ctx->arena, "%s.%s",
-                                                  operand_text ? operand_text : "?", field_name),
-                                "unknown_receiver_type", node);
-                        }
-                    }
-                }
-            }
-
-            // Direct function call: FuncName()
-            if (strcmp(fk, "identifier") == 0) {
-                char *name = lsp_node_text(ctx, func_node);
-                if (name && !mori_go_is_builtin(name)) {
-                    if (cbm_scope_contains(ctx->current_scope, name)) {
-                        const char *alias_target =
-                            cbm_scope_lookup_callable(ctx->current_scope, name);
-                        if (alias_target) {
-                            emit_resolved_alias_call(ctx, alias_target, name, node);
-                        } else {
-                            emit_unresolved_call(ctx, name, "lexical_value_not_exact_callable",
-                                                 node);
-                        }
-                        goto recurse;
-                    }
-                    // Package-local function
-                    const CBMRegisteredFunc *f =
-                        cbm_registry_lookup_symbol(ctx->registry, ctx->package_qn, name);
-                    if (f) {
-                        emit_resolved_call(ctx, f->qualified_name, "lsp_direct", 0.95f, node);
-                    } else {
-                        emit_unresolved_call(ctx, name, "function_not_in_registry", node);
-                    }
-                }
-            }
-        }
-    }
-
-recurse:;
-    // Push scope for blocks and statements that introduce variables
-    bool push_scope =
-        (strcmp(kind, "block") == 0 || strcmp(kind, "if_statement") == 0 ||
-         strcmp(kind, "for_statement") == 0 || strcmp(kind, "expression_switch_statement") == 0);
-    if (push_scope) {
-        ctx->current_scope = cbm_scope_push(ctx->arena, ctx->current_scope);
-    }
-
-    // Process initializer field for if/for/switch statements.
-    // Go patterns: if err := f(); ..., for i := 0; ..., switch v := x; v { ... }
-    if (strcmp(kind, "if_statement") == 0 || strcmp(kind, "for_statement") == 0 ||
-        strcmp(kind, "expression_switch_statement") == 0) {
-        TSNode init = ts_node_child_by_field_name(node, "initializer", 11);
-        if (!ts_node_is_null(init)) {
-            go_process_statement(ctx, init);
-        }
-    }
-
-    // Process for_statement range_clause before recursing into body
-    if (strcmp(kind, "for_statement") == 0) {
-        for (uint32_t i = 0; i < ts_node_child_count(node); i++) {
-            TSNode child = ts_node_child(node, i);
-            if (!ts_node_is_null(child) && ts_node_is_named(child) &&
-                strcmp(ts_node_type(child), "range_clause") == 0) {
-                go_process_statement(ctx, child);
-                break;
-            }
-        }
-    }
-
-    // Type switch: switch a := expr.(type) { case *T: a.Method() }
-    // Go tree-sitter structure: type_switch_statement has flat children:
-    //   expression_list (contains var name "a")
-    //   identifier (operand "animal")
-    //   type_case (case clause, may repeat)
-    if (strcmp(kind, "type_switch_statement") == 0) {
-        const char *switch_var = NULL;
-        // Pass 1: find switch variable and operand type
-        uint32_t nc2 = ts_node_child_count(node);
-        bool found_assign = false;
-        for (uint32_t i = 0; i < nc2; i++) {
-            TSNode child = ts_node_child(node, i);
-            if (ts_node_is_null(child))
-                continue;
-            const char *ck = ts_node_type(child);
-
-            // expression_list before := is the LHS (variable name)
-            if (!found_assign && strcmp(ck, "expression_list") == 0) {
-                TSNode var_node = ts_node_named_child(child, 0);
-                if (!ts_node_is_null(var_node) && strcmp(ts_node_type(var_node), "identifier") == 0)
-                    switch_var = lsp_node_text(ctx, var_node);
-            }
-            // := operator marks the assignment
-            if (!ts_node_is_named(child)) {
-                char *tok = lsp_node_text(ctx, child);
-                if (tok && strcmp(tok, ":=") == 0)
-                    found_assign = true;
-            }
-            // identifier after := is the operand being type-switched
-            if (found_assign && strcmp(ck, "identifier") == 0) {
-                (void)go_eval_expr_type(ctx, child);
-            }
-        }
-
-        // Pass 2: process each type_case with narrowed scope
-        for (uint32_t i = 0; i < nc2; i++) {
-            TSNode child = ts_node_child(node, i);
-            if (ts_node_is_null(child) || !ts_node_is_named(child))
-                continue;
-            if (strcmp(ts_node_type(child), "type_case") != 0)
-                continue;
-
-            CBMScope *saved = ctx->current_scope;
-            ctx->current_scope = cbm_scope_push(ctx->arena, ctx->current_scope);
-
-            // Find case type and bind switch variable
-            uint32_t cc_count = ts_node_child_count(child);
-            for (uint32_t j = 0; j < cc_count; j++) {
-                TSNode cc_child = ts_node_child(child, j);
-                if (ts_node_is_null(cc_child) || !ts_node_is_named(cc_child))
-                    continue;
-                const char *cc_kind = ts_node_type(cc_child);
-                if (strcmp(cc_kind, "type_identifier") == 0 ||
-                    strcmp(cc_kind, "qualified_type") == 0 ||
-                    strcmp(cc_kind, "pointer_type") == 0 || strcmp(cc_kind, "slice_type") == 0) {
-                    if (switch_var) {
-                        cbm_scope_bind(ctx->current_scope, switch_var,
-                                       go_parse_type_node(ctx, cc_child));
-                    }
-                    break;
-                }
-            }
-
-            // Recurse into case body statements
-            for (uint32_t j = 0; j < cc_count; j++) {
-                TSNode cc_child = ts_node_child(child, j);
-                if (ts_node_is_null(cc_child) || !ts_node_is_named(cc_child))
-                    continue;
-                const char *cc_kind = ts_node_type(cc_child);
-                // Skip type nodes, process everything else (expression_statement, etc.)
-                if (strcmp(cc_kind, "type_identifier") == 0 ||
-                    strcmp(cc_kind, "qualified_type") == 0 ||
-                    strcmp(cc_kind, "pointer_type") == 0 || strcmp(cc_kind, "slice_type") == 0)
-                    continue;
-                resolve_calls_in_node(ctx, cc_child);
-            }
-
-            ctx->current_scope = saved;
-        }
-
-        if (push_scope)
-            ctx->current_scope = cbm_scope_pop(ctx->current_scope);
-        return;
-    }
-
-    // Select statement: each communication_case gets its own scope
-    // case msg := <-ch:  →  receive_statement has left (vars) + unary_expression (<-ch)
-    if (strcmp(kind, "select_statement") == 0) {
-        uint32_t nc3 = ts_node_child_count(node);
-        for (uint32_t i = 0; i < nc3; i++) {
-            TSNode child = ts_node_child(node, i);
-            if (ts_node_is_null(child) || !ts_node_is_named(child))
-                continue;
-            const char *ck3 = ts_node_type(child);
-
-            if (strcmp(ck3, "communication_case") == 0 || strcmp(ck3, "default_case") == 0) {
-                CBMScope *saved = ctx->current_scope;
-                ctx->current_scope = cbm_scope_push(ctx->arena, ctx->current_scope);
-
-                // Process children: receive_statement binds vars, then recurse body
-                uint32_t cc_count = ts_node_child_count(child);
-                for (uint32_t j = 0; j < cc_count; j++) {
-                    TSNode cc_child = ts_node_child(child, j);
-                    if (ts_node_is_null(cc_child) || !ts_node_is_named(cc_child))
-                        continue;
-                    const char *cc_kind = ts_node_type(cc_child);
-
-                    if (strcmp(cc_kind, "receive_statement") == 0) {
-                        // receive_statement: left := <-right
-                        // tree-sitter Go: right field is the channel expression (after <-)
-                        // The receive value type is the channel's element type
-                        TSNode left = ts_node_child_by_field_name(cc_child, "left", 4);
-                        TSNode right = ts_node_child_by_field_name(cc_child, "right", 5);
-                        if (!ts_node_is_null(right)) {
-                            const CBMType *right_type = go_eval_expr_type(ctx, right);
-                            // right_type might be a channel (if right is the channel)
-                            // or already the elem type (if right is a <-ch unary expr)
-                            const CBMType *recv_type = right_type;
-                            if (right_type && right_type->kind == CBM_TYPE_CHANNEL) {
-                                recv_type = right_type->data.channel.elem;
-                            }
-                            if (!ts_node_is_null(left)) {
-                                if (strcmp(ts_node_type(left), "expression_list") == 0) {
-                                    uint32_t lhs_count = ts_node_named_child_count(left);
-                                    for (uint32_t k = 0; k < lhs_count; k++) {
-                                        TSNode var_node = ts_node_named_child(left, k);
-                                        if (strcmp(ts_node_type(var_node), "identifier") != 0)
-                                            continue;
-                                        char *var_name = lsp_node_text(ctx, var_node);
-                                        if (!var_name || strcmp(var_name, "_") == 0)
-                                            continue;
-                                        if (k == 0) {
-                                            cbm_scope_bind(ctx->current_scope, var_name, recv_type);
-                                        } else {
-                                            // second var is the ok bool
-                                            cbm_scope_bind(ctx->current_scope, var_name,
-                                                           cbm_type_builtin(ctx->arena, "bool"));
-                                        }
-                                    }
-                                } else if (strcmp(ts_node_type(left), "identifier") == 0) {
-                                    char *var_name = lsp_node_text(ctx, left);
-                                    if (var_name && strcmp(var_name, "_") != 0) {
-                                        cbm_scope_bind(ctx->current_scope, var_name, recv_type);
-                                    }
-                                }
-                            }
-                        }
-                    } else {
-                        // Body statements
-                        resolve_calls_in_node(ctx, cc_child);
-                    }
-                }
-
-                ctx->current_scope = saved;
-            }
-        }
-        if (push_scope)
-            ctx->current_scope = cbm_scope_pop(ctx->current_scope);
-        return;
-    }
-
-    // Recurse into children via a cursor (O(n)); ts_node_child(node,i) is O(i)
-    // → O(n²) on a wide node.
-    // The cursor is this depth's pooled one (cbm_cursor_acquire): the recursion
-    // below runs one level deeper and never touches it.
-    {
-        cbm_cursor_lease_t lease;
-        TSTreeCursor *cursor = cbm_cursor_acquire(&lease, ctx->walk_depth, node);
-        if (ts_tree_cursor_goto_first_child(cursor)) {
-            do {
-                resolve_calls_in_node(ctx, ts_tree_cursor_current_node(cursor));
-            } while (ts_tree_cursor_goto_next_sibling(cursor));
-        }
-        cbm_cursor_release(&lease);
-    }
-
-    if (push_scope) {
-        ctx->current_scope = cbm_scope_pop(ctx->current_scope);
-    }
-}
-
-void go_lsp_process_file(GoLSPContext *ctx, TSNode root) {
-    GoEvalInput input;
-    if (go_eval_input(ctx, root, &input))
-        mori_go_walk_file(&input);
 }
 
 // --- Helper: parse Go return type text into CBMType ---

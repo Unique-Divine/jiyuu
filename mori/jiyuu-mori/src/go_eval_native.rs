@@ -1,9 +1,11 @@
 //! Read-only views of the native type and registry data used by Go evaluation.
 
+use std::cell::Cell;
 use std::ffi::{CStr, c_char, c_int, c_void};
 use std::ptr;
 
-use crate::native_tree::RawNode;
+use crate::native_tree::{BorrowedNode, RawNode};
+use crate::resolver::SourceSite;
 
 type Arena = c_void;
 type Registry = c_void;
@@ -17,6 +19,7 @@ const TYPE_SLICE: u32 = 3;
 const TYPE_MAP: u32 = 4;
 const TYPE_CHANNEL: u32 = 5;
 const TYPE_FUNC: u32 = 6;
+const TYPE_INTERFACE: u32 = 7;
 const TYPE_BUILTIN: u32 = 9;
 const TYPE_TUPLE: u32 = 10;
 const TYPE_PARAM: u32 = 11;
@@ -66,11 +69,83 @@ pub(super) type NameList = *const *const c_char;
 /// The first five fields of CBMRegisteredFunc, through the generic parameters.
 #[repr(C)]
 struct Function {
-    _qualified_name: *const c_char,
-    _receiver_type: *const c_char,
+    qualified_name: *const c_char,
+    receiver_type: *const c_char,
     _short_name: *const c_char,
     signature: Type,
     type_params: NameList,
+}
+
+/// The native registry lends the type prefix through its interface flag.
+#[repr(C)]
+struct RawRegisteredType {
+    qualified_name: *const c_char,
+    _short_name: *const c_char,
+    field_names: NameList,
+    field_types: TypeList,
+    method_names: NameList,
+    _method_qns: NameList,
+    embedded_types: NameList,
+    alias_of: *const c_char,
+    _type_param_names: NameList,
+    is_interface: bool,
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct RegisteredType<'file>(&'file RawRegisteredType);
+
+impl<'file> RegisteredType<'file> {
+    pub(super) fn name(self) -> Option<&'file CStr> {
+        unsafe { optional_name(self.0.qualified_name) }
+    }
+
+    pub(super) fn alias(self) -> Option<&'file CStr> {
+        unsafe { optional_name(self.0.alias_of) }
+    }
+
+    pub(super) fn embeds(self) -> impl Iterator<Item = &'file CStr> {
+        terminated(self.0.embedded_types).map(|ty| unsafe { CStr::from_ptr(ty) })
+    }
+
+    pub(super) fn field(self, name: &CStr) -> Option<Type> {
+        let types = self.0.field_types;
+        if types.is_null() {
+            return None;
+        }
+        terminated(self.0.field_names)
+            .enumerate()
+            .find_map(|(index, field)| {
+                if unsafe { CStr::from_ptr(field) } != name {
+                    return None;
+                }
+                // SAFETY: The registry lends type pointers parallel to the field names.
+                let ty = unsafe { *types.add(index) };
+                (!ty.is_null()).then_some(ty)
+            })
+    }
+
+    pub(super) fn method_names(self) -> NameList {
+        self.0.method_names
+    }
+
+    pub(super) fn is_interface(self) -> bool {
+        self.0.is_interface
+    }
+}
+
+unsafe fn optional_name<'file>(ptr: *const c_char) -> Option<&'file CStr> {
+    // SAFETY: The caller borrows a C string or passes NULL.
+    (!ptr.is_null()).then(|| unsafe { CStr::from_ptr(ptr) })
+}
+
+#[repr(C)]
+struct Output {
+    target: *const c_char,
+    strategy: *const c_char,
+    reason: *const c_char,
+    confidence: f32,
+    kind: u32,
+    site: SourceSite,
 }
 
 pub(super) enum TypeView<'file> {
@@ -82,6 +157,7 @@ pub(super) enum TypeView<'file> {
     Map(Type, Type),
     Channel(Type),
     Function(Signature),
+    Interface,
     Parameter(&'file CStr),
     Other,
 }
@@ -114,34 +190,24 @@ fn terminated<T>(items: *const *const T) -> impl Iterator<Item = *const T> {
     })
 }
 
-/// The host callbacks expose native arena storage, lexical scope state, and
-/// existing statement traversal while Rust owns expression evaluation.
+/// The host owns arena storage, scope state, and result publication.
 #[repr(C)]
 struct Operations {
     scope_lookup:
         unsafe extern "C" fn(*mut GoContext, *const c_char, *mut Type) -> bool,
     import: unsafe extern "C" fn(*mut GoContext, *const c_char) -> *const c_char,
-    field: unsafe extern "C" fn(
-        *mut GoContext,
-        *const c_char,
-        *const c_char,
-    ) -> Type,
-    method: unsafe extern "C" fn(
-        *mut GoContext,
-        *const c_char,
-        *const c_char,
-    ) -> *const Function,
     parse_type: unsafe extern "C" fn(*mut GoContext, *const RawNode) -> Type,
     push_scope: unsafe extern "C" fn(*mut GoContext) -> *mut Scope,
     pop_scope: unsafe extern "C" fn(*mut GoContext, *mut Scope),
     bind: unsafe extern "C" fn(*mut GoContext, *const c_char, Type),
-    walk: unsafe extern "C" fn(*mut GoContext, *const RawNode),
-    exact_callable:
-        unsafe extern "C" fn(*mut GoContext, *const RawNode) -> *const c_char,
     bind_value:
         unsafe extern "C" fn(*mut GoContext, *const c_char, Type, *const c_char),
     enter_function:
         unsafe extern "C" fn(*mut GoContext, *const RawNode, *const c_char),
+    scope_callable:
+        unsafe extern "C" fn(*mut GoContext, *const c_char) -> *const c_char,
+    clear_callable: unsafe extern "C" fn(*mut GoContext, *const c_char),
+    emit: unsafe extern "C" fn(*mut GoContext, *const Output),
 }
 
 #[repr(C)]
@@ -155,6 +221,9 @@ struct Input {
     context: *mut GoContext,
     operations: *const Operations,
     depth_limit: usize,
+    import_names: NameList,
+    import_values: NameList,
+    import_count: usize,
 }
 
 unsafe extern "C" {
@@ -167,7 +236,20 @@ unsafe extern "C" {
     fn cbm_registry_lookup_type(
         registry: *const Registry,
         name: *const c_char,
-    ) -> *const c_void;
+    ) -> *const RawRegisteredType;
+    fn cbm_registry_lookup_method(
+        registry: *const Registry,
+        ty: *const c_char,
+        name: *const c_char,
+    ) -> *const Function;
+    fn cbm_go_eval_visit_types(
+        registry: *const Registry,
+        context: *mut c_void,
+        visit: unsafe extern "C" fn(
+            *mut c_void,
+            *const RawRegisteredType,
+        ) -> bool,
+    );
     fn cbm_registry_lookup_func(
         registry: *const Registry,
         name: *const c_char,
@@ -213,15 +295,19 @@ pub(super) struct File<'file> {
     registry: *const Registry,
     context: *mut GoContext,
     ops: &'file Operations,
+    imports: (&'file [*const c_char], &'file [*const c_char]),
+    walk_depth: Cell<usize>,
 }
 
 #[derive(Clone, Copy)]
-pub(super) struct Callable {
+pub(super) struct Callable<'file> {
+    pub qualified_name: Option<&'file CStr>,
+    pub receiver_type: Option<&'file CStr>,
     pub signature: Type,
     pub type_params: NameList,
 }
 
-impl Callable {
+impl Callable<'_> {
     pub(super) fn has_signature(&self) -> bool {
         !self.signature.is_null()
     }
@@ -252,6 +338,7 @@ impl<'file> File<'file> {
                 }
                 TYPE_CHANNEL => TypeView::Channel((*ty).data.element),
                 TYPE_FUNC => TypeView::Function((*ty).data.signature),
+                TYPE_INTERFACE => TypeView::Interface,
                 TYPE_BUILTIN if !(*ty).data.name.is_null() => {
                     TypeView::Builtin(CStr::from_ptr((*ty).data.name))
                 }
@@ -292,17 +379,19 @@ impl<'file> File<'file> {
         (!qn.is_null()).then(|| unsafe { CStr::from_ptr(qn) })
     }
 
-    fn callable(&self, func: *const Function) -> Option<Callable> {
+    fn callable(&self, func: *const Function) -> Option<Callable<'file>> {
         // SAFETY: The registry lends the initialized function prefix.
         (!func.is_null()).then(|| unsafe {
             Callable {
+                qualified_name: optional_name((*func).qualified_name),
+                receiver_type: optional_name((*func).receiver_type),
                 signature: (*func).signature,
                 type_params: (*func).type_params,
             }
         })
     }
 
-    pub(super) fn function(&self, name: &CStr) -> Option<Callable> {
+    pub(super) fn function(&self, name: &CStr) -> Option<Callable<'file>> {
         self.callable(unsafe {
             cbm_registry_lookup_func(self.registry, name.as_ptr())
         })
@@ -312,7 +401,7 @@ impl<'file> File<'file> {
         &self,
         package: &CStr,
         name: &CStr,
-    ) -> Option<Callable> {
+    ) -> Option<Callable<'file>> {
         self.callable(unsafe {
             cbm_registry_lookup_symbol(
                 self.registry,
@@ -322,19 +411,98 @@ impl<'file> File<'file> {
         })
     }
 
-    pub(super) fn has_named_type(&self, name: &CStr) -> bool {
-        !unsafe { cbm_registry_lookup_type(self.registry, name.as_ptr()) }
-            .is_null()
+    pub(super) fn registry_type(
+        &self,
+        name: &CStr,
+    ) -> Option<RegisteredType<'file>> {
+        let ty =
+            unsafe { cbm_registry_lookup_type(self.registry, name.as_ptr()) };
+        (!ty.is_null()).then(|| RegisteredType(unsafe { &*ty }))
     }
 
-    pub(super) fn method(&self, ty: &CStr, name: &CStr) -> Option<Callable> {
+    pub(super) fn has_named_type(&self, name: &CStr) -> bool {
+        self.registry_type(name).is_some()
+    }
+
+    pub(super) fn direct_method(
+        &self,
+        ty: &CStr,
+        name: &CStr,
+    ) -> Option<Callable<'file>> {
         self.callable(unsafe {
-            (self.ops.method)(self.context, ty.as_ptr(), name.as_ptr())
+            cbm_registry_lookup_method(self.registry, ty.as_ptr(), name.as_ptr())
         })
     }
 
-    pub(super) fn field(&self, ty: &CStr, name: &CStr) -> Type {
-        unsafe { (self.ops.field)(self.context, ty.as_ptr(), name.as_ptr()) }
+    pub(super) fn imports(
+        &self,
+    ) -> impl Iterator<Item = (&'file CStr, &'file CStr)> {
+        self.imports
+            .0
+            .iter()
+            .copied()
+            .zip(self.imports.1.iter().copied())
+            .filter_map(|(alias, target)| unsafe {
+                Some((optional_name(alias)?, optional_name(target)?))
+            })
+    }
+
+    pub(super) fn for_each_type<F>(&self, mut visitor: F)
+    where
+        F: FnMut(RegisteredType<'file>) -> bool,
+    {
+        unsafe extern "C" fn visit<'file, F>(
+            ctx: *mut c_void,
+            ty: *const RawRegisteredType,
+        ) -> bool
+        where
+            F: FnMut(RegisteredType<'file>) -> bool,
+        {
+            // SAFETY: The callback borrows a registry row and the live visitor.
+            unsafe { (&mut *ctx.cast::<F>())(RegisteredType(&*ty)) }
+        }
+        unsafe {
+            cbm_go_eval_visit_types(
+                self.registry,
+                (&raw mut visitor).cast(),
+                visit::<F>,
+            )
+        };
+    }
+
+    pub(super) fn scope_callable(&self, name: &CStr) -> Option<&'file CStr> {
+        unsafe {
+            optional_name((self.ops.scope_callable)(self.context, name.as_ptr()))
+        }
+    }
+
+    pub(super) fn clear_callable(&self, name: &CStr) {
+        unsafe { (self.ops.clear_callable)(self.context, name.as_ptr()) };
+    }
+
+    pub(super) fn emit(
+        &self,
+        node: BorrowedNode<'_>,
+        target: &CStr,
+        strategy: &'static CStr,
+        confidence: f32,
+        reason: Option<&CStr>,
+        kind: u32,
+    ) {
+        let range = node.range();
+        let output = Output {
+            target: target.as_ptr(),
+            strategy: strategy.as_ptr(),
+            reason: reason.map_or(ptr::null(), CStr::as_ptr),
+            confidence,
+            kind,
+            site: SourceSite {
+                start: range.start as u32,
+                end: range.end as u32,
+                origin: 0,
+            },
+        };
+        unsafe { (self.ops.emit)(self.context, &output) };
     }
 
     pub(super) fn push_scope(&self) -> ScopeGuard<'_, 'file> {
@@ -346,17 +514,18 @@ impl<'file> File<'file> {
         unsafe { (self.ops.bind)(self.context, name.as_ptr(), ty) }
     }
 
-    pub(super) fn walk(&self, node: &RawNode) {
-        unsafe { (self.ops.walk)(self.context, node) };
+    pub(super) fn walk(&self, node: BorrowedNode<'_>) {
+        let depth = self.walk_depth.get();
+        if depth >= self.depth_limit {
+            return;
+        }
+        self.walk_depth.set(depth + 1);
+        super::walk::resolve(self, node);
+        self.walk_depth.set(depth);
     }
 
     pub(super) fn parse_type(&self, node: &RawNode) -> Type {
         unsafe { (self.ops.parse_type)(self.context, node) }
-    }
-
-    pub(super) fn exact_callable(&self, node: &RawNode) -> Option<&'file CStr> {
-        let callable = unsafe { (self.ops.exact_callable)(self.context, node) };
-        (!callable.is_null()).then(|| unsafe { CStr::from_ptr(callable) })
     }
 
     pub(super) fn bind_value(
@@ -479,22 +648,27 @@ unsafe fn with_input<T>(
         registry: input.registry,
         context: input.context,
         ops: unsafe { &*input.operations },
+        imports: unsafe {
+            if input.import_count == 0 {
+                (&[], &[])
+            } else {
+                (
+                    std::slice::from_raw_parts(
+                        input.import_names,
+                        input.import_count,
+                    ),
+                    std::slice::from_raw_parts(
+                        input.import_values,
+                        input.import_count,
+                    ),
+                )
+            }
+        },
+        walk_depth: Cell::new(0),
     };
     let root =
         unsafe { crate::native_tree::BorrowedNode::from_root(&input.root) };
     operation(&file, root)
-}
-
-#[unsafe(no_mangle)]
-unsafe extern "C" fn mori_go_eval_expr(input: *const Input) -> Type {
-    unsafe {
-        with_input(input, |file, root| super::evaluate(file, Some(root), 0))
-    }
-}
-
-#[unsafe(no_mangle)]
-unsafe extern "C" fn mori_go_bind_statement(input: *const Input) {
-    unsafe { with_input(input, super::bindings::statement) };
 }
 
 #[unsafe(no_mangle)]
