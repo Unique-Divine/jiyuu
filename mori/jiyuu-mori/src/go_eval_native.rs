@@ -5,7 +5,7 @@ use std::ffi::{CStr, c_char, c_int, c_void};
 use std::ptr;
 
 use crate::native_tree::{BorrowedNode, RawNode};
-use crate::resolver::SourceSite;
+use crate::resolver::{ResolveStatus, SourceSite};
 
 type Arena = c_void;
 type Registry = c_void;
@@ -234,17 +234,22 @@ struct Operations {
         unsafe extern "C" fn(*mut GoContext, *const c_char, *mut Type) -> bool,
     import: unsafe extern "C" fn(*mut GoContext, *const c_char) -> *const c_char,
     parse_type: unsafe extern "C" fn(*mut GoContext, *const RawNode) -> Type,
-    push_scope: unsafe extern "C" fn(*mut GoContext) -> *mut Scope,
+    push_scope: unsafe extern "C" fn(*mut GoContext, *mut *mut Scope) -> bool,
     pop_scope: unsafe extern "C" fn(*mut GoContext, *mut Scope),
-    bind: unsafe extern "C" fn(*mut GoContext, *const c_char, Type),
-    bind_value:
-        unsafe extern "C" fn(*mut GoContext, *const c_char, Type, *const c_char),
+    bind: unsafe extern "C" fn(*mut GoContext, *const c_char, Type) -> bool,
+    bind_value: unsafe extern "C" fn(
+        *mut GoContext,
+        *const c_char,
+        Type,
+        *const c_char,
+    ) -> bool,
     enter_function:
         unsafe extern "C" fn(*mut GoContext, *const RawNode, *const c_char),
     scope_callable:
         unsafe extern "C" fn(*mut GoContext, *const c_char) -> *const c_char,
     clear_callable: unsafe extern "C" fn(*mut GoContext, *const c_char),
-    emit: unsafe extern "C" fn(*mut GoContext, *const Output),
+    emit: unsafe extern "C" fn(*mut GoContext, *const Output) -> bool,
+    cancelled: unsafe extern "C" fn(*mut GoContext) -> bool,
 }
 
 #[repr(C)]
@@ -338,6 +343,7 @@ pub(super) struct File<'file> {
     ops: &'file Operations,
     imports: (&'file [*const c_char], &'file [*const c_char]),
     walk_depth: Cell<usize>,
+    status: Cell<ResolveStatus>,
 }
 
 #[derive(Clone, Copy)]
@@ -378,7 +384,12 @@ impl<'file> File<'file> {
         let name = unsafe {
             cbm_go_eval_copy_name(self.arena, bytes.as_ptr(), bytes.len())
         };
-        (!name.is_null()).then(|| unsafe { CStr::from_ptr(name) })
+        if name.is_null() {
+            self.fail();
+            None
+        } else {
+            Some(unsafe { CStr::from_ptr(name) })
+        }
     }
 
     pub(super) fn scope_lookup(&self, name: &CStr) -> Option<Type> {
@@ -516,21 +527,60 @@ impl<'file> File<'file> {
                 origin: 0,
             },
         };
-        unsafe { (self.ops.emit)(self.context, &output) };
+        if self.keep_working()
+            && !unsafe { (self.ops.emit)(self.context, &output) }
+        {
+            self.fail();
+        }
     }
 
-    pub(super) fn push_scope(&self) -> ScopeGuard<'_, 'file> {
-        let parent = unsafe { (self.ops.push_scope)(self.context) };
-        ScopeGuard { file: self, parent }
+    fn fail(&self) {
+        if self.status.get() == ResolveStatus::Complete {
+            self.status.set(ResolveStatus::Failed);
+        }
+    }
+
+    pub(super) fn keep_working(&self) -> bool {
+        if self.status.get() != ResolveStatus::Complete {
+            return false;
+        }
+        // SAFETY: This callback reads the live pipeline token only.
+        if unsafe { (self.ops.cancelled)(self.context) } {
+            self.status.set(ResolveStatus::Cancelled);
+            return false;
+        }
+        true
+    }
+
+    pub(super) fn push_scope(&self) -> Option<ScopeGuard<'_, 'file>> {
+        let mut parent = ptr::null_mut();
+        if !unsafe { (self.ops.push_scope)(self.context, &mut parent) } {
+            self.fail();
+            return None;
+        }
+        Some(ScopeGuard { file: self, parent })
     }
 
     pub(super) fn bind(&self, name: &CStr, ty: Type) {
-        unsafe { (self.ops.bind)(self.context, name.as_ptr(), ty) }
+        if !unsafe { (self.ops.bind)(self.context, name.as_ptr(), ty) } {
+            self.fail();
+        }
+    }
+
+    pub(super) fn within_depth(&self, depth: usize) -> bool {
+        if !self.keep_working() {
+            return false;
+        }
+        if depth >= self.depth_limit {
+            self.fail();
+            return false;
+        }
+        true
     }
 
     pub(super) fn walk(&self, node: BorrowedNode<'_>) {
         let depth = self.walk_depth.get();
-        if depth >= self.depth_limit {
+        if !self.within_depth(depth) {
             return;
         }
         self.walk_depth.set(depth + 1);
@@ -548,13 +598,15 @@ impl<'file> File<'file> {
         ty: Type,
         callable: Option<&CStr>,
     ) {
-        unsafe {
+        if !unsafe {
             (self.ops.bind_value)(
                 self.context,
                 name.as_ptr(),
                 ty,
                 callable.map_or(ptr::null(), CStr::as_ptr),
             )
+        } {
+            self.fail();
         }
     }
 
@@ -679,6 +731,7 @@ unsafe fn with_input<T>(
             }
         },
         walk_depth: Cell::new(0),
+        status: Cell::new(ResolveStatus::Complete),
     };
     let root =
         unsafe { crate::native_tree::BorrowedNode::from_root(&input.root) };
@@ -686,6 +739,14 @@ unsafe fn with_input<T>(
 }
 
 #[unsafe(no_mangle)]
-unsafe extern "C" fn mori_go_walk_file(input: *const Input) {
-    unsafe { with_input(input, super::bindings::file) };
+unsafe extern "C" fn mori_go_walk_file(input: *const Input) -> ResolveStatus {
+    unsafe {
+        with_input(input, |file, root| {
+            if file.keep_working() {
+                super::bindings::file(file, root);
+                file.keep_working();
+            }
+            file.status.get()
+        })
+    }
 }

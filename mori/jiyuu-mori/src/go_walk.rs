@@ -361,7 +361,9 @@ fn type_switch(file: &File<'_>, node: Node<'_>) {
         .named_children()
         .filter(|node| node.kind() == c"type_case")
     {
-        let _scope = file.push_scope();
+        let Some(_scope) = file.push_scope() else {
+            return;
+        };
         if let Some(name) = switch_name
             && let Some(ty) =
                 branch.named_children().find(|node| case_type(*node))
@@ -406,7 +408,9 @@ fn select(file: &File<'_>, node: Node<'_>) {
             b"communication_case" | b"default_case"
         )
     }) {
-        let _scope = file.push_scope();
+        let Some(_scope) = file.push_scope() else {
+            return;
+        };
         for child in branch.named_children() {
             if child.kind() == c"receive_statement" {
                 receive(file, child);
@@ -437,8 +441,14 @@ pub(super) fn resolve(file: &File<'_>, node: Node<'_>) {
         _ => {}
     }
 
-    let _scope =
-        (scoped_statement || kind == b"block").then(|| file.push_scope());
+    let _scope = if scoped_statement || kind == b"block" {
+        let Some(scope) = file.push_scope() else {
+            return;
+        };
+        Some(scope)
+    } else {
+        None
+    };
     if scoped_statement && let Some(initializer) = node.field(c"initializer") {
         statement(file, initializer);
     }

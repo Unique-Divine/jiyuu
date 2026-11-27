@@ -251,7 +251,7 @@ fn unify(
     depth: usize,
 ) {
     let arg_view = file.view(arg);
-    if depth >= file.depth_limit || matches!(arg_view, TypeView::Unknown) {
+    if !file.within_depth(depth) || matches!(arg_view, TypeView::Unknown) {
         return;
     }
     match (file.view(pattern), arg_view) {
@@ -390,7 +390,9 @@ fn parameters(node: Node<'_>) -> impl Iterator<Item = Node<'_>> {
 
 fn closure(file: &File<'_>, node: Node<'_>) -> Type {
     if let Some(body) = node.field(c"body") {
-        let _scope = file.push_scope();
+        let Some(_scope) = file.push_scope() else {
+            return file.unknown();
+        };
         for param in parameters(node) {
             let ty = parse(file, param.field(c"type"));
             for ident in param
@@ -433,7 +435,7 @@ fn closure(file: &File<'_>, node: Node<'_>) -> Type {
 }
 
 fn evaluate(file: &File<'_>, node: Option<Node<'_>>, depth: usize) -> Type {
-    let Some(node) = node.filter(|_| depth < file.depth_limit) else {
+    let Some(node) = node.filter(|_| file.within_depth(depth)) else {
         return file.unknown();
     };
     let depth = depth + 1;

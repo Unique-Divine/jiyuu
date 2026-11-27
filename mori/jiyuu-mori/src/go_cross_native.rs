@@ -5,8 +5,8 @@ use std::ptr;
 use std::slice;
 
 use crate::resolver::{
-    CallFact, CallableIdentity, Resolution, ResolveFailure, ResolvedCall,
-    SourceSite, copy_name,
+    CallFact, CallableIdentity, Resolution, ResolveFailure,
+    ResolveStatus as Status, ResolvedCall, SourceSite, copy_name,
 };
 
 // CBMResolvedCall from cbm.h.
@@ -185,14 +185,6 @@ unsafe fn native_slice<'a, T>(items: *const T, count: usize) -> &'a [T] {
     }
     // SAFETY: The native caller lends count live elements.
     unsafe { slice::from_raw_parts(items, count) }
-}
-
-// Matched to CBMGoResolveStatus. Only Complete commits the staged writes.
-#[repr(C)]
-enum Status {
-    Complete,
-    Cancelled,
-    Failed,
 }
 
 #[unsafe(no_mangle)]

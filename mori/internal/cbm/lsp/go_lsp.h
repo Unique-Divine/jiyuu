@@ -98,14 +98,37 @@ typedef enum {
     CBM_GO_RESOLVE_COMPLETE = 0,
     CBM_GO_RESOLVE_CANCELLED,
     CBM_GO_RESOLVE_FAILED,
+    CBM_GO_RESOLVE_UNAVAILABLE,
 } CBMGoResolveStatus;
 
-#define CBM_GO_RESOLVE_ERROR "Go cross-file metadata resolution failed"
+#define CBM_GO_RESOLVE_ERROR "Go resolution failed"
+
+CBMGoResolveStatus cbm_run_go_lsp_status(
+    CBMArena *arena, CBMFileResult *result, const char *source, int source_len,
+    TSNode root, const char *rel_path, const _Atomic int *cancelled);
+
+CBMGoResolveStatus cbm_run_go_lsp_cross_status(
+    CBMArena *arena, const char *source, int source_len, const char *module_qn,
+    const char *rel_path, CBMLSPDef *defs, int def_count, const char **import_names,
+    const char **import_qns, int import_count, TSTree *cached_tree, CBMResolvedCallArray *out,
+    const _Atomic int *cancelled);
+
+CBMGoResolveStatus cbm_run_go_lsp_cross_with_registry_status(
+    CBMArena *arena, const char *source, int source_len, const char *module_qn,
+    const char *rel_path, CBMTypeRegistry *reg, const char **import_names,
+    const char **import_qns, int import_count, TSTree *cached_tree,
+    CBMResolvedCallArray *out, const _Atomic int *cancelled);
 
 /* Refine existing Go call facts against a sealed project registry. Append
  * results only after the Rust resolver completes, before the AST walk. */
 CBMGoResolveStatus cbm_go_resolve_cross_metadata(
     CBMFileResult *result, const CBMTypeRegistry *reg, const char **import_names,
     const char **import_qns, int import_count, const _Atomic int *cancelled);
+
+#ifdef CBM_ENABLE_TEST_SEAMS
+/* Cancel this thread's next Go walk after it stages the given row count.
+ * Zero cancels between metadata and the walk. A negative count disables it. */
+void cbm_go_test_cancel_walk_after(int rows);
+#endif
 
 #endif // CBM_LSP_GO_LSP_H

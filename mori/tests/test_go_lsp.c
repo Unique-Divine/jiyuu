@@ -13,6 +13,7 @@
 #include "cbm.h"
 #include "lsp/go_lsp.h"
 #include "pipeline/lsp_resolve.h"
+#include "pipeline/pass_lsp_cross.h"
 
 /* ── Helpers ───────────────────────────────────────────────────── */
 
@@ -1688,9 +1689,128 @@ TEST(golsp_crossfile_init_caller_qn_per_file) {
     PASS();
 }
 
+TEST(golsp_rust_walk_stages_results_until_complete) {
+    static const char source[] = "package app\nfunc Run() { Other() }\n";
+    CBMArena arena;
+    cbm_arena_init(&arena);
+    CBMTypeRegistry registry;
+    cbm_registry_init(&registry, &arena);
+    CBMResolvedCall existing = {.callee_qn = "prior.Callee"};
+    CBMResolvedCallArray output = {.items = &existing, .count = 1, .cap = 1};
+    _Atomic int cancelled = 1;
+
+    CBMGoResolveStatus status = cbm_run_go_lsp_cross_with_registry_status(
+        &arena, source, (int)sizeof(source) - 1, "test.app", "app.go", &registry,
+        NULL, NULL, 0, NULL, &output, &cancelled);
+    ASSERT_EQ(status, CBM_GO_RESOLVE_CANCELLED);
+    ASSERT_EQ(output.count, 1);
+    ASSERT_TRUE(output.items == &existing);
+
+    atomic_store(&cancelled, 0);
+    status = cbm_run_go_lsp_cross_with_registry_status(
+        &arena, NULL, 0, "test.app", "app.go", &registry, NULL, NULL, 0, NULL,
+        &output, &cancelled);
+    ASSERT_EQ(status, CBM_GO_RESOLVE_UNAVAILABLE);
+    ASSERT_EQ(output.count, 1);
+    ASSERT_TRUE(output.items == &existing);
+
+    CBMArena exhausted = {0};
+    status = cbm_run_go_lsp_cross_with_registry_status(
+        &exhausted, source, (int)sizeof(source) - 1, "test.app", "app.go", &registry,
+        NULL, NULL, 0, NULL, &output, &cancelled);
+    ASSERT_EQ(status, CBM_GO_RESOLVE_FAILED);
+    ASSERT_EQ(output.count, 1);
+    ASSERT_TRUE(output.items == &existing);
+
+    status = cbm_run_go_lsp_cross_with_registry_status(
+        &arena, source, (int)sizeof(source) - 1, "test.app", "app.go", &registry,
+        NULL, NULL, 0, NULL, &output, &cancelled);
+    ASSERT_EQ(status, CBM_GO_RESOLVE_COMPLETE);
+    ASSERT_EQ(output.count, 2);
+    ASSERT_STR_EQ(output.items[0].callee_qn, "prior.Callee");
+    ASSERT_STR_EQ(output.items[1].callee_qn, "Other");
+    ASSERT_STR_EQ(output.items[1].reason, "function_not_in_registry");
+    cbm_arena_destroy(&arena);
+    PASS();
+}
+
+#ifdef CBM_ENABLE_TEST_SEAMS
+TEST(golsp_cancelled_cross_walk_discards_metadata_and_ast_rows) {
+    static const char source[] = "package app\nfunc Run() { Other(); Other() }\n";
+    CBMFileResult *result = extract_go(source);
+    ASSERT_NOT_NULL(result);
+    CBMResolvedCallArray original = result->resolved_calls;
+    ASSERT_GTE(original.count, 2);
+    char *target = cbm_arena_sprintf(&result->arena, "%s.Other", result->module_qn);
+    ASSERT_NOT_NULL(target);
+    CBMLSPDef definition = {.qualified_name = target,
+                            .short_name = "Other",
+                            .label = "Function",
+                            .def_module_qn = result->module_qn,
+                            .lang = CBM_LANG_GO};
+    CBMArena project;
+    cbm_arena_init(&project);
+    CBMCrossLspRegistries registries = {
+        .go = cbm_go_build_cross_registry(&project, &definition, 1),
+    };
+    ASSERT_NOT_NULL(registries.go);
+
+    for (int staged = 0; staged <= 1; staged++) {
+        cbm_go_test_cancel_walk_after(staged);
+        cbm_pxc_dispatch_file(CBM_LANG_GO, result, source, (int)sizeof(source) - 1, "app.go",
+                               result->module_qn, &registries, NULL, &definition, 1, NULL, NULL,
+                               0, NULL, NULL);
+        cbm_go_test_cancel_walk_after(-1);
+        ASSERT_EQ(result->resolved_calls.count, original.count);
+        ASSERT_TRUE(result->resolved_calls.items == original.items);
+        ASSERT_TRUE(!result->has_error);
+    }
+
+    cbm_pxc_dispatch_file(CBM_LANG_GO, result, source, (int)sizeof(source) - 1, "app.go",
+                           result->module_qn, &registries, NULL, &definition, 1, NULL, NULL,
+                           0, NULL, NULL);
+    ASSERT_GT(result->resolved_calls.count, original.count);
+    ASSERT_GTE(find_resolved_arr_confident(&result->resolved_calls, "Run", "Other"), 0);
+    cbm_arena_destroy(&project);
+    cbm_free_result(result);
+    PASS();
+}
+
+TEST(golsp_cancelled_extraction_keeps_prior_facts) {
+    static const char source[] = "package app\nfunc Run() { Other(); Other() }\n";
+    _Atomic int cancelled = 1;
+    CBMFileResult *result = cbm_extract_file_ex_with_tests_cancellable(
+        source, (int)sizeof(source) - 1, CBM_LANG_GO, "test", "app.go", 0,
+        NULL, NULL, NULL, NULL, NULL, &cancelled);
+    ASSERT_NOT_NULL(result);
+    ASSERT_TRUE(result->lsp_skipped);
+    ASSERT_EQ(result->resolved_calls.count, 0);
+    ASSERT_GT(result->defs.count, 0);
+    cbm_free_result(result);
+
+    atomic_store(&cancelled, 0);
+    cbm_go_test_cancel_walk_after(1);
+    result = cbm_extract_file_ex_with_tests_cancellable(
+        source, (int)sizeof(source) - 1, CBM_LANG_GO, "test", "app.go", 0,
+        NULL, NULL, NULL, NULL, NULL, &cancelled);
+    cbm_go_test_cancel_walk_after(-1);
+    ASSERT_NOT_NULL(result);
+    ASSERT_TRUE(result->lsp_skipped);
+    ASSERT_EQ(result->resolved_calls.count, 0);
+    ASSERT_GT(result->defs.count, 0);
+    cbm_free_result(result);
+    PASS();
+}
+#endif
+
 /* ── Suite ─────────────────────────────────────────────────────── */
 
 SUITE(go_lsp) {
+    RUN_TEST(golsp_rust_walk_stages_results_until_complete);
+#ifdef CBM_ENABLE_TEST_SEAMS
+    RUN_TEST(golsp_cancelled_cross_walk_discards_metadata_and_ast_rows);
+    RUN_TEST(golsp_cancelled_extraction_keeps_prior_facts);
+#endif
     /* Single-file: param type inference */
     RUN_TEST(golsp_param_type_simple);
     RUN_TEST(golsp_param_type_multi);

@@ -59,3 +59,13 @@ pub(crate) fn copy_name(name: &CStr) -> Result<CString, ResolveFailure> {
     // SAFETY: The bytes are copied from a valid C string including its NUL.
     Ok(unsafe { CString::from_vec_with_nul_unchecked(owned) })
 }
+
+/// Completion of one file's resolution. Unresolved occurrences remain facts
+/// within a completed file and never stand in for interruption.
+#[derive(Clone, Copy, PartialEq, Eq)]
+#[repr(C)]
+pub(crate) enum ResolveStatus {
+    Complete,
+    Cancelled,
+    Failed,
+}

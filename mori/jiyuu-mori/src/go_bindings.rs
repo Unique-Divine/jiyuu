@@ -200,7 +200,9 @@ fn function(file: &File<'_>, node: Node<'_>) {
         return;
     };
     file.enter_function(node.as_raw(), function_name);
-    let _scope = file.push_scope();
+    let Some(_scope) = file.push_scope() else {
+        return;
+    };
 
     if let Some(params) = node.field(c"parameters") {
         bind_parameters(file, params, true, false);
@@ -227,6 +229,9 @@ pub(super) fn file(file: &File<'_>, root: Node<'_>) {
             b"var_declaration" | b"const_declaration"
         )
     }) {
+        if !file.keep_working() {
+            return;
+        }
         for spec in declaration.named_children() {
             statement(file, spec);
         }
@@ -237,6 +242,9 @@ pub(super) fn file(file: &File<'_>, root: Node<'_>) {
             b"function_declaration" | b"method_declaration"
         )
     }) {
+        if !file.keep_working() {
+            return;
+        }
         function(file, declaration);
     }
 }

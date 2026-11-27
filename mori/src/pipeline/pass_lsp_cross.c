@@ -1970,14 +1970,15 @@ void cbm_pxc_run_one(CBMLanguage lang, CBMFileResult *r, const char *source, int
                      const char *module_qn, CBMLSPDef *defs, int def_count, const char **imp_names,
                      const char **imp_qns, int imp_count) {
     cbm_pxc_run_one_with_php_bindings(lang, r, source, source_len, module_qn, NULL, defs, def_count,
-                                      imp_names, imp_qns, imp_count, NULL);
+                                      imp_names, imp_qns, imp_count, NULL, NULL);
 }
 
 void cbm_pxc_run_one_with_php_bindings(CBMLanguage lang, CBMFileResult *r, const char *source,
                                        int source_len, const char *module_qn, const char *rel_path,
                                        CBMLSPDef *defs, int def_count, const char **imp_names,
                                        const char **imp_qns, int imp_count,
-                                       const CBMPHPImportBindings *bindings) {
+                                       const CBMPHPImportBindings *bindings,
+                                       const _Atomic int *cancelled) {
     TSTree *tree = r->cached_tree; /* may be NULL — LSP re-parses then */
 
     CBMArena scratch;
@@ -1988,10 +1989,16 @@ void cbm_pxc_run_one_with_php_bindings(CBMLanguage lang, CBMFileResult *r, const
     memset(&synthetic_calls, 0, sizeof(synthetic_calls));
 
     switch (lang) {
-    case CBM_LANG_GO:
-        cbm_run_go_lsp_cross(&scratch, source, source_len, module_qn, rel_path, defs, def_count,
-                             imp_names, imp_qns, imp_count, tree, &out);
+    case CBM_LANG_GO: {
+        CBMGoResolveStatus status = cbm_run_go_lsp_cross_status(
+            &scratch, source, source_len, module_qn, rel_path, defs, def_count, imp_names,
+            imp_qns, imp_count, tree, &out, cancelled);
+        if (status == CBM_GO_RESOLVE_FAILED) {
+            r->has_error = true;
+            r->error_msg = CBM_GO_RESOLVE_ERROR;
+        }
         break;
+    }
     case CBM_LANG_C:
     case CBM_LANG_CPP:
     case CBM_LANG_CUDA: {
@@ -2180,9 +2187,16 @@ void cbm_pxc_dispatch_file_with_php_bindings(
         CBMCallArray synthetic_calls = {0};
         switch (lang) {
         case CBM_LANG_GO: {
+            CBMResolvedCallArray prior = result->resolved_calls;
             CBMGoResolveStatus status = cbm_go_resolve_cross_metadata(
                 result, prebuilt, imp_keys, imp_vals, imp_count, cancelled);
-            if (status != CBM_GO_RESOLVE_COMPLETE) {
+            if (status == CBM_GO_RESOLVE_COMPLETE) {
+                status = cbm_run_go_lsp_cross_with_registry_status(
+                    &scratch, source, source_len, def_module, rel, &overlay, imp_keys, imp_vals,
+                    imp_count, result->cached_tree, &out, cancelled);
+            }
+            if (status == CBM_GO_RESOLVE_FAILED || status == CBM_GO_RESOLVE_CANCELLED) {
+                result->resolved_calls = prior;
                 if (status == CBM_GO_RESOLVE_FAILED) {
                     result->has_error = true;
                     result->error_msg = CBM_GO_RESOLVE_ERROR;
@@ -2190,9 +2204,6 @@ void cbm_pxc_dispatch_file_with_php_bindings(
                 pxc_scratch_give(PXC_SCRATCH_DISPATCH, &scratch);
                 return;
             }
-            cbm_run_go_lsp_cross_with_registry(&scratch, source, source_len, def_module, rel,
-                                               &overlay, imp_keys, imp_vals, imp_count,
-                                               result->cached_tree, &out);
             used_prebuilt = true;
             break;
         }
@@ -2329,7 +2340,7 @@ void cbm_pxc_dispatch_file_with_php_bindings(
         } else {
             cbm_pxc_run_one_with_php_bindings(lang, result, source, source_len, def_module, rel,
                                               file_defs, file_def_count, imp_keys, imp_vals,
-                                              imp_count, bindings);
+                                              imp_count, bindings, cancelled);
         }
     } else if (lang == CBM_LANG_JAVASCRIPT || lang == CBM_LANG_TYPESCRIPT || lang == CBM_LANG_TSX) {
         bool js;
@@ -2341,7 +2352,7 @@ void cbm_pxc_dispatch_file_with_php_bindings(
     } else {
         cbm_pxc_run_one_with_php_bindings(lang, result, source, source_len, def_module, rel,
                                           file_defs, file_def_count, imp_keys, imp_vals, imp_count,
-                                          bindings);
+                                          bindings, cancelled);
     }
     free(filtered);
 }

@@ -30,7 +30,8 @@ typedef struct {
     const char* rel_path;    // repo-relative file path: init() QN suffix (#1910); NULL = flat
 
     // Output: resolved calls accumulate here
-    CBMResolvedCallArray* resolved_calls;
+    CBMResolvedCallArray *resolved_calls;
+    const _Atomic int *cancelled;
 
 } GoLSPContext;
 
@@ -234,14 +235,15 @@ typedef struct {
     bool (*scope_lookup)(GoLSPContext *, const char *, const CBMType **);
     const char *(*import)(GoLSPContext *, const char *);
     const CBMType *(*parse_type)(GoLSPContext *, const TSNode *);
-    CBMScope *(*push_scope)(GoLSPContext *);
+    bool (*push_scope)(GoLSPContext *, CBMScope **);
     void (*pop_scope)(GoLSPContext *, CBMScope *);
-    void (*bind)(GoLSPContext *, const char *, const CBMType *);
-    void (*bind_value)(GoLSPContext *, const char *, const CBMType *, const char *);
+    bool (*bind)(GoLSPContext *, const char *, const CBMType *);
+    bool (*bind_value)(GoLSPContext *, const char *, const CBMType *, const char *);
     void (*enter_function)(GoLSPContext *, const TSNode *, const char *);
     const char *(*scope_callable)(GoLSPContext *, const char *);
     void (*clear_callable)(GoLSPContext *, const char *);
-    void (*emit)(GoLSPContext *, const GoEvalOutput *);
+    bool (*emit)(GoLSPContext *, const GoEvalOutput *);
+    bool (*cancelled)(GoLSPContext *);
 } GoEvalOps;
 
 typedef struct {
@@ -259,7 +261,7 @@ typedef struct {
     size_t import_count;
 } GoEvalInput;
 
-extern void mori_go_walk_file(const GoEvalInput *input);
+extern CBMGoResolveStatus mori_go_walk_file(const GoEvalInput *input);
 
 static bool go_eval_scope_lookup(GoLSPContext *ctx, const char *name, const CBMType **out) {
     const CBMVarBinding *binding = cbm_scope_lookup_binding(ctx->current_scope, name);
@@ -274,23 +276,23 @@ static const CBMType *go_eval_parse_type(GoLSPContext *ctx, const TSNode *node) 
     return go_parse_type_node(ctx, *node);
 }
 
-static CBMScope *go_eval_push_scope(GoLSPContext *ctx) {
-    CBMScope *parent = ctx->current_scope;
-    ctx->current_scope = cbm_scope_push(ctx->arena, parent);
-    return parent;
+static bool go_eval_push_scope(GoLSPContext *ctx, CBMScope **parent) {
+    *parent = ctx->current_scope;
+    ctx->current_scope = cbm_scope_push(ctx->arena, *parent);
+    return ctx->current_scope != *parent;
 }
 
 static void go_eval_pop_scope(GoLSPContext *ctx, CBMScope *parent) {
     ctx->current_scope = parent;
 }
 
-static void go_eval_bind(GoLSPContext *ctx, const char *name, const CBMType *type) {
-    cbm_scope_bind(ctx->current_scope, name, type);
+static bool go_eval_bind(GoLSPContext *ctx, const char *name, const CBMType *type) {
+    return cbm_scope_bind_checked(ctx->current_scope, name, type);
 }
 
-static void go_eval_bind_value(GoLSPContext *ctx, const char *name, const CBMType *type,
+static bool go_eval_bind_value(GoLSPContext *ctx, const char *name, const CBMType *type,
                                const char *callable) {
-    cbm_scope_bind_callable(ctx->current_scope, name, type, callable);
+    return cbm_scope_bind_callable_checked(ctx->current_scope, name, type, callable);
 }
 
 static const char *go_eval_scope_callable(GoLSPContext *ctx, const char *name) {
@@ -301,9 +303,17 @@ static void go_eval_clear_callable(GoLSPContext *ctx, const char *name) {
     cbm_scope_update_callable(ctx->current_scope, name, NULL);
 }
 
-static void go_eval_emit(GoLSPContext *ctx, const GoEvalOutput *row) {
-    if (!ctx->resolved_calls || !ctx->enclosing_func_qn)
-        return;
+#ifdef CBM_ENABLE_TEST_SEAMS
+static _Thread_local int go_test_rows_before_cancel = -1;
+
+void cbm_go_test_cancel_walk_after(int rows) {
+    go_test_rows_before_cancel = rows;
+}
+#endif
+
+static bool go_eval_emit(GoLSPContext *ctx, const GoEvalOutput *row) {
+    if (!ctx->enclosing_func_qn)
+        return true;
     CBM_MSAN_WRITTEN(row, sizeof(*row));
     CBMResolvedCall call = {
         .caller_qn = ctx->enclosing_func_qn,
@@ -316,7 +326,26 @@ static void go_eval_emit(GoLSPContext *ctx, const GoEvalOutput *row) {
         .site_end_byte = row->end,
         .source_origin = (CBMSourceOrigin)row->origin,
     };
+    int prior = ctx->resolved_calls->count;
     cbm_resolvedcall_push(ctx->resolved_calls, ctx->arena, call);
+    bool emitted = ctx->resolved_calls->count > prior;
+#ifdef CBM_ENABLE_TEST_SEAMS
+    if (emitted && go_test_rows_before_cancel > 0)
+        go_test_rows_before_cancel--;
+#endif
+    return emitted;
+}
+
+static bool go_token_cancelled(const _Atomic int *cancelled) {
+    return cancelled && atomic_load_explicit(cancelled, memory_order_relaxed);
+}
+
+static bool go_eval_cancelled(GoLSPContext *ctx) {
+#ifdef CBM_ENABLE_TEST_SEAMS
+    if (go_test_rows_before_cancel == 0)
+        return true;
+#endif
+    return go_token_cancelled(ctx->cancelled);
 }
 
 typedef bool (*GoEvalVisitType)(void *, const CBMRegisteredType *);
@@ -348,9 +377,13 @@ static void go_eval_enter_function(GoLSPContext *ctx, const TSNode *node, const 
     }
 }
 
-static void go_lsp_process_file(GoLSPContext *ctx, TSNode node) {
+static CBMGoResolveStatus go_lsp_process_file(GoLSPContext *ctx, TSNode node) {
+    if (go_eval_cancelled(ctx))
+        return CBM_GO_RESOLVE_CANCELLED;
     if (ts_node_is_null(node) || !ctx->source || ctx->source_len < 0 || !ctx->package_qn)
-        return;
+        return CBM_GO_RESOLVE_UNAVAILABLE;
+    if (!ctx->current_scope || !ctx->resolved_calls)
+        return CBM_GO_RESOLVE_FAILED;
     static const GoEvalOps ops = {
         .scope_lookup = go_eval_scope_lookup,
         .import = resolve_import,
@@ -363,6 +396,7 @@ static void go_lsp_process_file(GoLSPContext *ctx, TSNode node) {
         .scope_callable = go_eval_scope_callable,
         .clear_callable = go_eval_clear_callable,
         .emit = go_eval_emit,
+        .cancelled = go_eval_cancelled,
     };
     GoEvalInput input = {
         .root = node,
@@ -378,7 +412,14 @@ static void go_lsp_process_file(GoLSPContext *ctx, TSNode node) {
         .import_values = ctx->import_package_qns,
         .import_count = (size_t)ctx->import_count,
     };
-    mori_go_walk_file(&input);
+    CBMResolvedCallArray *output = ctx->resolved_calls;
+    CBMResolvedCallArray staged = *output;
+    ctx->resolved_calls = &staged;
+    CBMGoResolveStatus status = mori_go_walk_file(&input);
+    ctx->resolved_calls = output;
+    if (status == CBM_GO_RESOLVE_COMPLETE)
+        *output = staged;
+    return status;
 }
 
 /* Copy names and lists from Rust before native code consumes them. Counts
@@ -827,9 +868,13 @@ static void go_register_definitions(GoAstRegistry ast, const void *defs, int cou
 
 // --- Entry point: build registry from file defs + run LSP ---
 
-void cbm_run_go_lsp(CBMArena *arena, CBMFileResult *result, const char *source, int source_len,
-                    TSNode root, const char *rel_path) {
-
+CBMGoResolveStatus cbm_run_go_lsp_status(
+    CBMArena *arena, CBMFileResult *result, const char *source, int source_len, TSNode root,
+    const char *rel_path, const _Atomic int *cancelled) {
+    if (go_token_cancelled(cancelled))
+        return CBM_GO_RESOLVE_CANCELLED;
+    if (!arena || !result || !source || source_len < 0 || ts_node_is_null(root))
+        return CBM_GO_RESOLVE_UNAVAILABLE;
     CBMTypeRegistry reg;
     cbm_registry_init(&reg, arena);
 
@@ -860,6 +905,7 @@ void cbm_run_go_lsp(CBMArena *arena, CBMFileResult *result, const char *source, 
     GoLSPContext lsp_ctx;
     go_lsp_init(&lsp_ctx, arena, source, source_len, &reg, module_qn, &result->resolved_calls);
     lsp_ctx.rel_path = rel_path;
+    lsp_ctx.cancelled = cancelled;
 
     // Add imports
     for (int i = 0; i < result->imports.count; i++) {
@@ -870,7 +916,17 @@ void cbm_run_go_lsp(CBMArena *arena, CBMFileResult *result, const char *source, 
     }
 
     // Process the file
-    go_lsp_process_file(&lsp_ctx, root);
+    CBMGoResolveStatus status = go_lsp_process_file(&lsp_ctx, root);
+    if (status == CBM_GO_RESOLVE_FAILED) {
+        result->has_error = true;
+        result->error_msg = CBM_GO_RESOLVE_ERROR;
+    }
+    return status;
+}
+
+void cbm_run_go_lsp(CBMArena *arena, CBMFileResult *result, const char *source, int source_len,
+                    TSNode root, const char *rel_path) {
+    (void)cbm_run_go_lsp_status(arena, result, source, source_len, root, rel_path, NULL);
 }
 
 // --- Phase 1c: Extract type parameters from generic function declarations ---
@@ -1031,12 +1087,15 @@ static void extract_type_params_from_ast(CBMArena *arena, CBMTypeRegistry *reg, 
 // Forward: tree-sitter Go language (from lang_specs.c)
 extern const TSLanguage *tree_sitter_go(void);
 
-void cbm_run_go_lsp_cross(CBMArena *arena, const char *source, int source_len,
-                          const char *module_qn, const char *rel_path, CBMLSPDef *defs,
-                          int def_count, const char **import_names, const char **import_qns,
-                          int import_count, TSTree *cached_tree, CBMResolvedCallArray *out) {
+CBMGoResolveStatus cbm_run_go_lsp_cross_status(
+    CBMArena *arena, const char *source, int source_len, const char *module_qn,
+    const char *rel_path, CBMLSPDef *defs, int def_count, const char **import_names,
+    const char **import_qns, int import_count, TSTree *cached_tree, CBMResolvedCallArray *out,
+    const _Atomic int *cancelled) {
+    if (go_token_cancelled(cancelled))
+        return CBM_GO_RESOLVE_CANCELLED;
     if (!source || source_len <= 0)
-        return;
+        return CBM_GO_RESOLVE_UNAVAILABLE;
 
     // 1. Use cached tree if available, otherwise parse fresh
     TSParser *parser = NULL;
@@ -1045,13 +1104,16 @@ void cbm_run_go_lsp_cross(CBMArena *arena, const char *source, int source_len,
     if (!tree) {
         parser = ts_parser_new();
         if (!parser)
-            return;
-        ts_parser_set_language(parser, tree_sitter_go());
+            return CBM_GO_RESOLVE_FAILED;
+        if (!ts_parser_set_language(parser, tree_sitter_go())) {
+            ts_parser_delete(parser);
+            return CBM_GO_RESOLVE_UNAVAILABLE;
+        }
         tree = cbm_parse_source(parser, source, (uint32_t)source_len, (TSParseOptions){0});
         owns_tree = true;
         if (!tree) {
             ts_parser_delete(parser);
-            return;
+            return CBM_GO_RESOLVE_UNAVAILABLE;
         }
     }
     TSNode root = ts_tree_root_node(tree);
@@ -1095,6 +1157,7 @@ void cbm_run_go_lsp_cross(CBMArena *arena, const char *source, int source_len,
     GoLSPContext ctx;
     go_lsp_init(&ctx, arena, source, source_len, &reg, module_qn, out);
     ctx.rel_path = rel_path;
+    ctx.cancelled = cancelled;
 
     for (int i = 0; i < import_count; i++) {
         if (import_names[i] && import_qns[i]) {
@@ -1102,7 +1165,7 @@ void cbm_run_go_lsp_cross(CBMArena *arena, const char *source, int source_len,
         }
     }
 
-    go_lsp_process_file(&ctx, root);
+    CBMGoResolveStatus status = go_lsp_process_file(&ctx, root);
 
     // 5. Cleanup — only free if we allocated
     if (owns_tree) {
@@ -1110,6 +1173,15 @@ void cbm_run_go_lsp_cross(CBMArena *arena, const char *source, int source_len,
         if (parser)
             ts_parser_delete(parser);
     }
+    return status;
+}
+
+void cbm_run_go_lsp_cross(
+    CBMArena *arena, const char *source, int source_len, const char *module_qn,
+    const char *rel_path, CBMLSPDef *defs, int def_count, const char **import_names,
+    const char **import_qns, int import_count, TSTree *cached_tree, CBMResolvedCallArray *out) {
+    (void)cbm_run_go_lsp_cross_status(arena, source, source_len, module_qn, rel_path, defs, def_count,
+                                     import_names, import_qns, import_count, cached_tree, out, NULL);
 }
 
 /* ── Tier 2: pre-built per-language registry (gopls package summary pattern) ──
@@ -1149,13 +1221,15 @@ CBMTypeRegistry *cbm_go_build_cross_registry(CBMArena *arena, CBMLSPDef *defs, i
     return reg;
 }
 
-void cbm_run_go_lsp_cross_with_registry(CBMArena *arena, const char *source, int source_len,
-                                        const char *module_qn, const char *rel_path,
-                                        CBMTypeRegistry *reg, const char **import_names,
-                                        const char **import_qns, int import_count,
-                                        TSTree *cached_tree, CBMResolvedCallArray *out) {
+CBMGoResolveStatus cbm_run_go_lsp_cross_with_registry_status(
+    CBMArena *arena, const char *source, int source_len, const char *module_qn,
+    const char *rel_path, CBMTypeRegistry *reg, const char **import_names,
+    const char **import_qns, int import_count, TSTree *cached_tree,
+    CBMResolvedCallArray *out, const _Atomic int *cancelled) {
+    if (go_token_cancelled(cancelled))
+        return CBM_GO_RESOLVE_CANCELLED;
     if (!source || source_len <= 0 || !reg)
-        return;
+        return CBM_GO_RESOLVE_UNAVAILABLE;
 
     TSParser *parser = NULL;
     TSTree *tree = cached_tree;
@@ -1163,13 +1237,16 @@ void cbm_run_go_lsp_cross_with_registry(CBMArena *arena, const char *source, int
     if (!tree) {
         parser = ts_parser_new();
         if (!parser)
-            return;
-        ts_parser_set_language(parser, tree_sitter_go());
+            return CBM_GO_RESOLVE_FAILED;
+        if (!ts_parser_set_language(parser, tree_sitter_go())) {
+            ts_parser_delete(parser);
+            return CBM_GO_RESOLVE_UNAVAILABLE;
+        }
         tree = cbm_parse_source(parser, source, (uint32_t)source_len, (TSParseOptions){0});
         owns_tree = true;
         if (!tree) {
             ts_parser_delete(parser);
-            return;
+            return CBM_GO_RESOLVE_UNAVAILABLE;
         }
     }
     TSNode root = ts_tree_root_node(tree);
@@ -1180,18 +1257,29 @@ void cbm_run_go_lsp_cross_with_registry(CBMArena *arena, const char *source, int
     GoLSPContext ctx;
     go_lsp_init(&ctx, arena, source, source_len, reg, module_qn, out);
     ctx.rel_path = rel_path;
+    ctx.cancelled = cancelled;
     for (int i = 0; i < import_count; i++) {
         if (import_names[i] && import_qns[i]) {
             go_lsp_add_import(&ctx, import_names[i], import_qns[i]);
         }
     }
-    go_lsp_process_file(&ctx, root);
+    CBMGoResolveStatus status = go_lsp_process_file(&ctx, root);
 
     if (owns_tree) {
         ts_tree_delete(tree);
         if (parser)
             ts_parser_delete(parser);
     }
+    return status;
+}
+
+void cbm_run_go_lsp_cross_with_registry(
+    CBMArena *arena, const char *source, int source_len, const char *module_qn,
+    const char *rel_path, CBMTypeRegistry *reg, const char **import_names,
+    const char **import_qns, int import_count, TSTree *cached_tree, CBMResolvedCallArray *out) {
+    (void)cbm_run_go_lsp_cross_with_registry_status(
+        arena, source, source_len, module_qn, rel_path, reg, import_names, import_qns, import_count,
+        cached_tree, out, NULL);
 }
 
 /* Stage Rust metadata results in a private array view until a whole file's
@@ -1237,7 +1325,7 @@ static GoCallableIdentity go_metadata_lookup(void *opaque, GoTypeBytes name) {
 
 static bool go_metadata_cancelled(void *opaque) {
     const GoMetadataContext *ctx = opaque;
-    return ctx->cancelled && atomic_load_explicit(ctx->cancelled, memory_order_relaxed);
+    return go_token_cancelled(ctx->cancelled);
 }
 
 static char *go_metadata_copy(CBMArena *arena, GoTypeBytes bytes) {

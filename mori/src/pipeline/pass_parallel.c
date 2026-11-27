@@ -1367,10 +1367,10 @@ static void extract_worker(int worker_id, void *ctx_ptr) {
                 ? cbm_pipeline_extract_objectscript_export(source, source_len, ec->project_name,
                                                            fi->rel_path, ec->macro_table,
                                                            ec->return_type_table)
-                : cbm_extract_file_ex_with_tests(source, source_len, fi->language, ec->project_name,
+                : cbm_extract_file_ex_with_tests_cancellable(source, source_len, fi->language, ec->project_name,
                                                  fi->rel_path, CBM_EXTRACT_BUDGET, NULL, NULL,
                                                  ec->macro_table, ec->return_type_table,
-                                                 ec->pctx->test_declarations);
+                                                 ec->pctx->test_declarations, ec->cancelled);
 
         uint64_t file_elapsed_ms = (extract_now_ns() - file_t0) / PP_USEC_PER_MS;
 
