@@ -136,13 +136,13 @@ typedef struct cbm_rust_swift_owner_index cbm_rust_swift_owner_index_t;
 
 extern cbm_rust_swift_owner_index_t *cbm_rust_swift_owners_new(void);
 extern void cbm_rust_swift_owners_free(cbm_rust_swift_owner_index_t *index);
-extern void cbm_rust_swift_owner_add(cbm_rust_swift_owner_index_t *index,
+extern bool cbm_rust_swift_owner_add(cbm_rust_swift_owner_index_t *index,
                                     const char *qn, const char *path, const char *imports,
                                     bool declaration, const char *file, size_t module_len,
                                     const char *manifest, const char *target_name);
-extern void cbm_rust_swift_owner_add_return(cbm_rust_swift_owner_index_t *index, const char *qn,
+extern bool cbm_rust_swift_owner_add_return(cbm_rust_swift_owner_index_t *index, const char *qn,
                                             const char *returned);
-extern void cbm_rust_swift_owners_finish(cbm_rust_swift_owner_index_t *index);
+extern bool cbm_rust_swift_owners_finish(cbm_rust_swift_owner_index_t *index);
 extern const swift_owner_t *cbm_rust_swift_owner_by_qn(const cbm_rust_swift_owner_index_t *index,
                                                        const char *qn);
 extern const swift_owner_t *
@@ -3703,13 +3703,14 @@ static const cbm_pkg_entry_t *swift_owner_target(const swift_owners_t *index, co
 typedef struct {
     const cbm_registry_t *registry;
     swift_owners_t *index;
+    bool failed;
 } swift_owner_collection_t;
 
 static void swift_owner_collect(const cbm_gbuf_node_t *node, void *userdata) {
-    const swift_owner_collection_t *collection = userdata;
+    swift_owner_collection_t *collection = userdata;
     const cbm_registry_t *r = collection->registry;
     swift_owners_t *index = collection->index;
-    if (!node->properties_json) {
+    if (collection->failed || !node->properties_json) {
         return;
     }
     const char *qn = cbm_ht_get_key(r->exact, node->qualified_name);
@@ -3724,10 +3725,9 @@ static void swift_owner_collect(const cbm_gbuf_node_t *node, void *userdata) {
     yyjson_doc *doc = yyjson_read(node->properties_json, strlen(node->properties_json), 0);
     yyjson_val *props = yyjson_doc_get_root(doc);
     const char *returned = has_signature ? yyjson_get_str(yyjson_obj_get(props, "return_type")) : NULL;
-    if (returned) {
-        cbm_rust_swift_owner_add_return(index->owners, qn, returned);
-    }
-    if (has_owner) {
+    if (returned && !cbm_rust_swift_owner_add_return(index->owners, qn, returned)) {
+        collection->failed = true;
+    } else if (has_owner) {
         const char *declaration = yyjson_get_str(yyjson_obj_get(props, "swift_type_path"));
         const char *path = declaration ? declaration
                                        : yyjson_get_str(yyjson_obj_get(props, "swift_extension"));
@@ -3736,10 +3736,11 @@ static void swift_owner_collect(const cbm_gbuf_node_t *node, void *userdata) {
             const cbm_pkg_entry_t *target = swift_owner_target(index, file);
             const char *imports = yyjson_get_str(yyjson_obj_get(props, "swift_imports"));
             size_t module_len = target ? strlen(file) : swift_owner_module_length(file);
-            cbm_rust_swift_owner_add(index->owners, node->qualified_name, path, imports ? imports : "",
-                                     declaration != NULL, file, module_len,
-                                     target ? target->manifest_rel : NULL,
-                                     target ? target->pkg_name : NULL);
+            collection->failed =
+                !cbm_rust_swift_owner_add(index->owners, node->qualified_name, path,
+                                         imports ? imports : "", declaration != NULL, file,
+                                         module_len, target ? target->manifest_rel : NULL,
+                                         target ? target->pkg_name : NULL);
         }
     }
     yyjson_doc_free(doc);
@@ -3766,7 +3767,9 @@ void cbm_registry_build_swift_owners(cbm_registry_t *r, const cbm_gbuf_t *graph,
     index->by_source_root = cbm_ht_create(CBM_SZ_512);
     index->by_manifest_root = cbm_ht_create(CBM_SZ_512);
     index->by_target_name = cbm_ht_create(CBM_SZ_512);
-    if (!index->by_source_root || !index->by_manifest_root || !index->by_target_name) {
+    index->owners = cbm_rust_swift_owners_new();
+    if (!index->by_source_root || !index->by_manifest_root || !index->by_target_name ||
+        !index->owners) {
         swift_owners_free(index);
         return;
     }
@@ -3790,10 +3793,13 @@ void cbm_registry_build_swift_owners(cbm_registry_t *r, const cbm_gbuf_t *graph,
             }
         }
     }
-    index->owners = cbm_rust_swift_owners_new();
     swift_owner_collection_t collection = {.registry = r, .index = index};
     cbm_gbuf_foreach_node(graph, swift_owner_collect, &collection);
-    cbm_rust_swift_owners_finish(index->owners);
+    /* A failed Rust build may have partial entries and links. */
+    if (collection.failed || !cbm_rust_swift_owners_finish(index->owners)) {
+        swift_owners_free(index);
+        return;
+    }
     r->swift_owners = index;
 }
 
