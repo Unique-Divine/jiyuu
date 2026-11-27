@@ -275,6 +275,9 @@ mod file_outline;
 #[cfg(feature = "native-engine-abi")]
 #[path = "store/fts_writer.rs"]
 mod fts_writer;
+#[cfg(any(feature = "native-engine-abi", test))]
+#[path = "store/leiden.rs"]
+mod leiden;
 #[cfg(feature = "native-engine-abi")]
 #[path = "store/store_digest/mod.rs"]
 mod store_digest;

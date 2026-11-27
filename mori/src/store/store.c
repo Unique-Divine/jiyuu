@@ -10073,8 +10073,9 @@ static int arch_file_tree(cbm_store_t *s, const char *project, const char *path,
     return CBM_STORE_OK;
 }
 
-/* ── Louvain community detection ───────────────────────────────── */
+/* ── Leiden community detection ─────────────────────────────────── */
 
+#ifdef CBM_ENABLE_TEST_SEAMS
 /* Build deduplicated, normalized edge weight arrays from raw edges.
  * Returns total number of unique edges in *out_wn. */
 /* Find the index of a node ID in the nodes array, or -1. */
@@ -10524,8 +10525,9 @@ static int leiden_aggregate(const cbm_lg_t *g, const int *refined, int r_count, 
     return CBM_STORE_OK;
 }
 
-int cbm_leiden(const int64_t *nodes, int node_count, const cbm_louvain_edge_t *edges,
-               int edge_count, double resolution, cbm_louvain_result_t **out, int *out_count) {
+int cbm_leiden_c_reference(const int64_t *nodes, int node_count,
+                           const cbm_louvain_edge_t *edges, int edge_count, double resolution,
+                           cbm_louvain_result_t **out, int *out_count) {
     if (node_count <= 0) {
         *out = NULL;
         *out_count = 0;
@@ -10621,6 +10623,37 @@ int cbm_leiden(const int64_t *nodes, int node_count, const cbm_louvain_edge_t *e
     lg_free(&g);
     *out = result;
     *out_count = n;
+    return CBM_STORE_OK;
+}
+#endif
+
+extern void cbm_rust_leiden_partition(const int64_t *nodes, int count,
+                                     const cbm_louvain_edge_t *edges, int edge_count,
+                                     double resolution, cbm_louvain_result_t *rows);
+
+int cbm_leiden(const int64_t *nodes, int node_count, const cbm_louvain_edge_t *edges,
+               int edge_count, double resolution, cbm_louvain_result_t **out, int *out_count) {
+    if (node_count <= 0) {
+        *out = NULL;
+        *out_count = 0;
+        return CBM_STORE_OK;
+    }
+    cbm_louvain_result_t *result;
+    if ((size_t)node_count > SIZE_MAX / sizeof(*result)) {
+        return CBM_NOT_FOUND;
+    }
+    result = cbm_alloc(CBM_MEM_CLASS_OTHER, (size_t)node_count * sizeof(*result));
+    if (!result) {
+        return CBM_NOT_FOUND;
+    }
+    for (int i = 0; i < node_count; i++) {
+        result[i].node_id = nodes[i];
+        result[i].community = i;
+    }
+
+    cbm_rust_leiden_partition(nodes, node_count, edges, edge_count, resolution, result);
+    *out = result;
+    *out_count = node_count;
     return CBM_STORE_OK;
 }
 
