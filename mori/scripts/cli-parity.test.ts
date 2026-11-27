@@ -79,8 +79,8 @@ exit ${code}
 describe("normalize", () => {
   test("replaces the program name before a version, keeping the version", () => {
     expect(normalize("mori 0.13.0\n", CTX)).toBe("<PROGRAM> 0.13.0\n")
-    expect(normalize("codebase-memory-mcp 0.14.0-dev\n", CTX)).toBe(
-      "<PROGRAM> 0.14.0-dev\n",
+    expect(normalize("codebase-memory-mcp 0.14.5\n", CTX)).toBe(
+      "<PROGRAM> 0.14.5\n",
     )
     expect(normalize("mori dev", CTX)).toBe("<PROGRAM> dev")
     // A bare program name in other text is left alone.

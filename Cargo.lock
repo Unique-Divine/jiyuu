@@ -1470,7 +1470,7 @@ dependencies = [
 
 [[package]]
 name = "jiyuu-mori"
-version = "0.14.0-dev"
+version = "0.14.5"
 dependencies = [
  "libc",
  "mori-native-sys",
@@ -1608,7 +1608,7 @@ dependencies = [
 
 [[package]]
 name = "mori-native-sys"
-version = "0.14.0-dev"
+version = "0.14.5"
 dependencies = [
  "serde_json",
 ]
