@@ -11,56 +11,74 @@
 #![cfg_attr(all(feature = "c-backend", not(test)), no_main)]
 
 #[cfg(all(feature = "c-backend", not(test)))]
+#[path = "cypher/cypher_ffi.rs"]
 mod cypher_ffi;
 #[cfg(all(feature = "c-backend", not(test)))]
+#[path = "cypher/cypher_linear/mod.rs"]
 mod cypher_linear;
 #[cfg(all(feature = "c-backend", not(test)))]
+#[path = "cli/export.rs"]
 mod export;
 #[cfg(all(feature = "c-backend", not(test)))]
 mod ffi;
 #[cfg(all(feature = "c-backend", not(test)))]
+#[path = "store/store.rs"]
 mod store;
 #[cfg(all(feature = "c-backend", not(test)))]
+#[path = "mcp/tools.rs"]
 mod tools;
 #[cfg(all(feature = "c-backend", not(test)))]
 mod ui;
 
 #[cfg(feature = "c-backend")]
+#[path = "mcp/search.rs"]
 mod search;
 
 #[cfg(feature = "c-backend")]
+#[path = "discover/path_verdict.rs"]
 mod path_verdict;
 
 #[cfg(feature = "c-backend")]
+#[path = "mcp/trace_predecessor.rs"]
 mod trace_predecessor;
 
 #[cfg(any(feature = "c-backend", test))]
+#[path = "mcp/index_route.rs"]
 mod index_route;
 
 #[cfg(any(feature = "c-backend", test))]
+#[path = "pipeline/importance.rs"]
 mod importance;
 
 #[cfg(any(feature = "c-backend", test))]
+#[path = "watcher/repair_recovery.rs"]
 mod repair_recovery;
 
 #[cfg(any(feature = "c-backend", test))]
+#[path = "watcher/named_watch.rs"]
 mod named_watch;
 
 #[cfg(any(feature = "c-backend", test))]
+#[path = "cli/query_cli.rs"]
 mod query_cli;
 
 #[cfg(any(feature = "c-backend", test))]
+#[path = "cli/cli_output.rs"]
 mod cli_output;
 
 #[cfg(any(feature = "c-backend", test))]
+#[path = "mcp/initialize.rs"]
 mod initialize;
 
 #[cfg(any(feature = "c-backend", test))]
+#[path = "traces/ingest_trace.rs"]
 mod ingest_trace;
 
 #[cfg(any(feature = "c-backend", test))]
+#[path = "mcp/mcp_dispatch/mod.rs"]
 mod mcp_dispatch;
 #[cfg(any(feature = "c-backend", test))]
+#[path = "mcp/tool_list.rs"]
 mod tool_list;
 
 #[cfg(not(feature = "c-backend"))]
