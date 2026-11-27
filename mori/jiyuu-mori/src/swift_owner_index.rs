@@ -1,8 +1,9 @@
 //! Build the nominal Swift owner index before call-resolution workers read it.
 
+use std::alloc::{Layout, alloc};
 use std::cell::Cell;
 use std::collections::HashMap;
-use std::ffi::{CStr, CString, c_char};
+use std::ffi::{CStr, c_char};
 use std::ptr;
 
 const MODULE_PATH_CAP: usize = 4096; // CBM_SZ_4K in the C lookups
@@ -35,7 +36,9 @@ struct Owner {
 
 struct OwnerEntry {
     view: Box<Owner>,
-    _strings: [CString; 4],
+    // The view's Vec::as_ptr pointers survive entry moves. These buffers are
+    // never mutated after the view is created.
+    _strings: [Vec<u8>; 4],
 }
 
 #[derive(Default)]
@@ -44,15 +47,42 @@ struct SwiftOwnerIndex {
     by_qn: HashMap<Vec<u8>, usize>,
     by_path: HashMap<Vec<u8>, Vec<usize>>,
     by_module_path: HashMap<Vec<u8>, usize>,
-    return_types: HashMap<Vec<u8>, CString>,
+    return_types: HashMap<Vec<u8>, Vec<u8>>,
 }
 
-fn module_path(module: &[u8], path: &[u8]) -> Vec<u8> {
-    let mut key = Vec::with_capacity(module.len() + 1 + path.len());
-    key.extend_from_slice(module);
+fn try_box<T>(value: T) -> Option<Box<T>> {
+    let layout = Layout::new::<T>();
+    if layout.size() == 0 {
+        return Some(Box::new(value));
+    }
+    // SAFETY: The layout has nonzero size.
+    let allocation = unsafe { alloc(layout).cast::<T>() };
+    if allocation.is_null() {
+        return None;
+    }
+    // SAFETY: The allocation uses the global allocator and the layout of T.
+    unsafe {
+        allocation.write(value);
+        Some(Box::from_raw(allocation))
+    }
+}
+
+fn copy_bytes(bytes: &[u8], extra: usize) -> Option<Vec<u8>> {
+    let mut copy = Vec::new();
+    copy.try_reserve_exact(bytes.len().checked_add(extra)?)
+        .ok()?;
+    copy.extend_from_slice(bytes);
+    Some(copy)
+}
+
+fn module_path(module: &[u8], path: &[u8], extra: usize) -> Option<Vec<u8>> {
+    let mut key = copy_bytes(
+        module,
+        1_usize.checked_add(path.len())?.checked_add(extra)?,
+    )?;
     key.push(b'\n');
     key.extend_from_slice(path);
-    key
+    Some(key)
 }
 
 impl Owner {
@@ -60,8 +90,8 @@ impl Owner {
         (!self.manifest.0.is_null()).then(|| self.manifest.bytes())
     }
 
-    fn key(&self) -> Vec<u8> {
-        module_path(self.module.bytes(), self.path.bytes())
+    fn key(&self) -> Option<Vec<u8>> {
+        module_path(self.module.bytes(), self.path.bytes(), 0)
     }
 
     fn imports(&self, name: &[u8]) -> bool {
@@ -79,32 +109,39 @@ impl SwiftOwnerIndex {
         &self.owners[id].view
     }
 
-    fn record_module_path(&mut self, id: usize) {
+    fn record_module_path(&mut self, id: usize) -> Option<()> {
         let owner = self.owner(id);
-        let key = owner.key();
+        let key = owner.key()?;
         if self
             .by_module_path
             .get(&key)
             .is_none_or(|&prior| owner.qn.bytes() < self.owner(prior).qn.bytes())
         {
+            self.by_module_path.try_reserve(1).ok()?;
             self.by_module_path.insert(key, id);
         }
+        Some(())
     }
 
-    fn add(&mut self, entry: OwnerEntry) {
+    fn add(&mut self, entry: OwnerEntry) -> Option<()> {
         let id = self.owners.len();
         let owner = &entry.view;
-        self.by_qn.insert(owner.qn.bytes().to_vec(), id);
+        let qn = copy_bytes(owner.qn.bytes(), 0)?;
+        self.by_qn.try_reserve(1).ok()?;
+        self.by_qn.insert(qn, id);
         if owner.declaration {
-            self.by_path
-                .entry(owner.path.bytes().to_vec())
-                .or_default()
-                .push(id);
+            let path = copy_bytes(owner.path.bytes(), 0)?;
+            self.by_path.try_reserve(1).ok()?;
+            let declarations = self.by_path.entry(path).or_default();
+            declarations.try_reserve(1).ok()?;
+            declarations.push(id);
         }
+        self.owners.try_reserve(1).ok()?;
         self.owners.push(entry);
         if self.owner(id).declaration {
-            self.record_module_path(id);
+            self.record_module_path(id)?;
         }
+        Some(())
     }
 
     fn imported_primary(&self, owner: &Owner) -> Option<usize> {
@@ -159,28 +196,30 @@ impl SwiftOwnerIndex {
         self.imported_primary(owner)
     }
 
-    fn finish(&mut self) {
+    fn finish(&mut self) -> Option<()> {
         // Resolve every primary against declarations before indexing extensions
         // of external types. The fallback groups those extensions by module.
-        let primaries: Vec<_> = self
-            .owners
-            .iter()
-            .map(|entry| self.primary(&entry.view))
-            .collect();
+        let mut primaries = Vec::new();
+        primaries.try_reserve_exact(self.owners.len()).ok()?;
+        primaries
+            .extend(self.owners.iter().map(|entry| self.primary(&entry.view)));
         for (id, primary) in primaries.iter().enumerate().rev() {
             if primary.is_none() {
-                self.record_module_path(id);
+                self.record_module_path(id)?;
             }
         }
         // Prepending in reverse graph order preserves graph order for callers.
         for (id, primary) in primaries.into_iter().enumerate().rev() {
             let owner = self.owner(id);
-            let primary =
-                primary.unwrap_or_else(|| self.by_module_path[&owner.key()]);
+            let primary = match primary {
+                Some(primary) => primary,
+                None => self.by_module_path[&owner.key()?],
+            };
             let primary = self.owner(primary);
             owner.primary.set(primary);
             owner.next_member.set(primary.members.replace(owner));
         }
+        Some(())
     }
 
     fn view(&self, id: Option<usize>) -> *const Owner {
@@ -190,7 +229,7 @@ impl SwiftOwnerIndex {
 
 #[unsafe(no_mangle)]
 extern "C" fn cbm_rust_swift_owners_new() -> *mut SwiftOwnerIndex {
-    Box::into_raw(Box::new(SwiftOwnerIndex::default()))
+    try_box(SwiftOwnerIndex::default()).map_or(ptr::null_mut(), Box::into_raw)
 }
 
 #[unsafe(no_mangle)]
@@ -212,56 +251,63 @@ unsafe extern "C" fn cbm_rust_swift_owner_add(
     module_len: usize,
     manifest: *const c_char,
     target_name: *const c_char,
-) {
-    // SAFETY: C supplies terminated strings from the graph, JSON and targets.
-    let (qn, path, imports, file) = unsafe {
-        (
-            CStr::from_ptr(qn),
-            CStr::from_ptr(path),
-            CStr::from_ptr(imports),
-            CStr::from_ptr(file),
-        )
-    };
-    let module_bytes = if !target_name.is_null() {
-        // SAFETY: A named target has a manifest and both strings outlive the index.
-        let (manifest, name) =
-            unsafe { (CStr::from_ptr(manifest), CStr::from_ptr(target_name)) };
-        module_path(manifest.to_bytes(), name.to_bytes())
-    } else {
-        file.to_bytes()[..module_len].to_vec()
-    };
-    let module =
-        CString::new(module_bytes).expect("module consists of C string bytes");
-    let module_name = if !target_name.is_null() {
-        target_name
-    } else if module_len == file.to_bytes().len() {
-        // An overlapping or unknown target uses the full file as its own module.
-        c"".as_ptr()
-    } else {
-        let leaf = module
-            .to_bytes()
-            .iter()
-            .rposition(|&b| b == b'/')
-            .map_or(0, |pos| pos + 1);
-        module.as_ptr().wrapping_add(leaf)
-    };
-    let strings = [qn.to_owned(), path.to_owned(), module, imports.to_owned()];
-    let [qn, path, module, imports] = &strings;
-    index.add(OwnerEntry {
-        view: Box::new(Owner {
-            qn: OwnerText(qn.as_ptr()),
-            path: OwnerText(path.as_ptr()),
-            module: OwnerText(module.as_ptr()),
-            module_name: OwnerText(module_name),
-            manifest: OwnerText(manifest),
-            imports: OwnerText(imports.as_ptr()),
-            declaration,
-            primary: Cell::new(ptr::null()),
-            members: Cell::new(ptr::null()),
-            next_member: Cell::new(ptr::null()),
-        }),
-        _strings: strings,
-    });
+) -> bool {
+    (|| {
+        // SAFETY: C supplies terminated strings from the graph, JSON and targets.
+        let (qn, path, imports, file) = unsafe {
+            (
+                CStr::from_ptr(qn),
+                CStr::from_ptr(path),
+                CStr::from_ptr(imports),
+                CStr::from_ptr(file),
+            )
+        };
+        let mut module = if !target_name.is_null() {
+            // SAFETY: A named target has a manifest and both strings outlive the index.
+            let (manifest, name) = unsafe {
+                (CStr::from_ptr(manifest), CStr::from_ptr(target_name))
+            };
+            module_path(manifest.to_bytes(), name.to_bytes(), 1)?
+        } else {
+            copy_bytes(&file.to_bytes()[..module_len], 1)?
+        };
+        module.push(0);
+        let strings = [
+            copy_bytes(qn.to_bytes_with_nul(), 0)?,
+            copy_bytes(path.to_bytes_with_nul(), 0)?,
+            module,
+            copy_bytes(imports.to_bytes_with_nul(), 0)?,
+        ];
+        let [qn, path, module, imports] = &strings;
+        let module_name = if !target_name.is_null() {
+            target_name
+        } else if module_len == file.to_bytes().len() {
+            // An overlapping or unknown target uses the full file as its own module.
+            c"".as_ptr()
+        } else {
+            let leaf = module
+                .iter()
+                .rposition(|&b| b == b'/')
+                .map_or(0, |pos| pos + 1);
+            module.as_ptr().wrapping_add(leaf).cast()
+        };
+        index.add(OwnerEntry {
+            view: try_box(Owner {
+                qn: OwnerText(qn.as_ptr().cast()),
+                path: OwnerText(path.as_ptr().cast()),
+                module: OwnerText(module.as_ptr().cast()),
+                module_name: OwnerText(module_name),
+                manifest: OwnerText(manifest),
+                imports: OwnerText(imports.as_ptr().cast()),
+                declaration,
+                primary: Cell::new(ptr::null()),
+                members: Cell::new(ptr::null()),
+                next_member: Cell::new(ptr::null()),
+            })?,
+            _strings: strings,
+        })
+    })()
+    .is_some()
 }
 
 #[unsafe(no_mangle)]
@@ -269,18 +315,23 @@ unsafe extern "C" fn cbm_rust_swift_owner_add_return(
     index: &mut SwiftOwnerIndex,
     qn: *const c_char,
     returned: *const c_char,
-) {
-    // SAFETY: C supplies terminated strings, copied before the call returns.
-    let (qn, returned) =
-        unsafe { (CStr::from_ptr(qn), CStr::from_ptr(returned)) };
-    index
-        .return_types
-        .insert(qn.to_bytes().to_vec(), returned.to_owned());
+) -> bool {
+    (|| {
+        // SAFETY: C supplies terminated strings, copied before the call returns.
+        let (qn, returned) =
+            unsafe { (CStr::from_ptr(qn), CStr::from_ptr(returned)) };
+        let key = copy_bytes(qn.to_bytes(), 0)?;
+        let value = copy_bytes(returned.to_bytes_with_nul(), 0)?;
+        index.return_types.try_reserve(1).ok()?;
+        index.return_types.insert(key, value);
+        Some(())
+    })()
+    .is_some()
 }
 
 #[unsafe(no_mangle)]
-extern "C" fn cbm_rust_swift_owners_finish(index: &mut SwiftOwnerIndex) {
-    index.finish();
+extern "C" fn cbm_rust_swift_owners_finish(index: &mut SwiftOwnerIndex) -> bool {
+    index.finish().is_some()
 }
 
 #[unsafe(no_mangle)]
@@ -346,5 +397,64 @@ unsafe extern "C" fn cbm_rust_swift_owner_return(
     index
         .return_types
         .get(qn.to_bytes())
-        .map_or(ptr::null(), |value| value.as_ptr())
+        .map_or(ptr::null(), |value| value.as_ptr().cast())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::ffi::CString;
+
+    #[test]
+    fn owner_text_survives_entry_moves() {
+        let mut index = SwiftOwnerIndex::default();
+        let file = c"Sources/App/Type.swift";
+        let cases = [
+            (0, None, &b""[..], &b""[..]),
+            (7, None, &b"Sources"[..], &b"Sources"[..]),
+            (11, None, &b"Sources/App"[..], &b"App"[..]),
+            (8, None, &b"Sources/"[..], &b""[..]),
+            (file.count_bytes(), None, file.to_bytes(), &b""[..]),
+            (
+                file.count_bytes(),
+                Some(c"App"),
+                &b"Package.swift\nApp"[..],
+                &b"App"[..],
+            ),
+        ];
+        for id in 0..64 {
+            let (module_len, target, _, _) = cases[id % cases.len()];
+            let qn = CString::new(format!("proj.Type{id}")).unwrap();
+            // SAFETY: Inputs are terminated. The borrowed target data is static.
+            assert!(unsafe {
+                cbm_rust_swift_owner_add(
+                    &mut index,
+                    qn.as_ptr(),
+                    c"Type".as_ptr(),
+                    c"Core.Submodule".as_ptr(),
+                    false,
+                    file.as_ptr(),
+                    module_len,
+                    target.map_or(ptr::null(), |_| c"Package.swift".as_ptr()),
+                    target.map_or(ptr::null(), CStr::as_ptr),
+                )
+            });
+        }
+        index.finish().unwrap();
+        for id in 0..index.owners.len() {
+            let (_, _, module, leaf) = cases[id % cases.len()];
+            let qn = CString::new(format!("proj.Type{id}")).unwrap();
+            // SAFETY: The lookup receives a terminated QN.
+            let view =
+                unsafe { cbm_rust_swift_owner_by_qn(&index, qn.as_ptr()) };
+            assert!(!view.is_null());
+            // SAFETY: The non-null view is borrowed from the live index.
+            let owner = unsafe { &*view };
+            assert_eq!(owner.qn.bytes(), qn.to_bytes());
+            assert_eq!(owner.path.bytes(), b"Type");
+            assert_eq!(owner.module.bytes(), module);
+            assert_eq!(owner.module_name.bytes(), leaf);
+            assert!(owner.imports(b"Core"));
+        }
+    }
 }
