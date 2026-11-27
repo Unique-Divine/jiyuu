@@ -1,9 +1,12 @@
 /* ABI for C layouts and yyjson's inline API used by the Rust package map. */
 #include "discover/discover.h"
+#include "foundation/compat.h"
 #include "foundation/compat_fs.h"
 #include "foundation/constants.h"
 #include "foundation/platform.h"
+#include "foundation/win_utf8.h"
 #include "pipeline/pkgmap_bridge.h"
+#include <sys/stat.h>
 
 void *cbm_pkgmap_tracked_calloc(size_t size) {
     return cbm_calloc(CBM_MEM_CLASS_OTHER, size);
@@ -82,6 +85,44 @@ char *cbm_pkgmap_read_manifest(const char *path, int *out_len) {
 
 void cbm_pkgmap_free_manifest(char *source) {
     cbm_free(CBM_MEM_CLASS_EXTRACT, source);
+}
+
+const char *cbm_pkgmap_dir_next(cbm_dir_t *dir) {
+    const cbm_dirent_t *entry = cbm_readdir(dir);
+    return entry ? entry->name : NULL;
+}
+
+int cbm_pkgmap_path_kind(const char *path) {
+    enum { PKGMAP_SKIP_ENTRY = 0, PKGMAP_DIRECTORY = 1, PKGMAP_REGULAR_FILE = 2 };
+#ifdef _WIN32
+    /* The compatibility layer normalizes / in extended-length paths. */
+    wchar_t *wide = cbm_path_to_wide_in(CBM_MEM_CLASS_OTHER, path);
+    if (!wide) {
+        return PKGMAP_SKIP_ENTRY;
+    }
+    struct _stat64 info;
+    int rc = _wstat64(wide, &info);
+    int kind = PKGMAP_SKIP_ENTRY;
+    if (rc == 0 && S_ISDIR(info.st_mode)) {
+        DWORD attributes = GetFileAttributesW(wide);
+        if (attributes == INVALID_FILE_ATTRIBUTES || !(attributes & FILE_ATTRIBUTE_REPARSE_POINT)) {
+            kind = PKGMAP_DIRECTORY;
+        }
+    } else if (rc == 0 && S_ISREG(info.st_mode)) {
+        kind = PKGMAP_REGULAR_FILE;
+    }
+    cbm_free(CBM_MEM_CLASS_OTHER, wide);
+    return kind;
+#else
+    cbm_path_info_t info;
+    if (cbm_path_info_utf8(path, &info) != CBM_PATH_INFO_OK || info.is_symlink) {
+        return PKGMAP_SKIP_ENTRY;
+    }
+    if (info.is_directory) {
+        return PKGMAP_DIRECTORY;
+    }
+    return info.is_regular ? PKGMAP_REGULAR_FILE : PKGMAP_SKIP_ENTRY;
+#endif
 }
 
 bool cbm_pkgmap_skip_dir(const char *name, const char *rel, char *const *excluded, int count) {

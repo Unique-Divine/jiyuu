@@ -1,6 +1,7 @@
 #ifndef CBM_PKGMAP_BRIDGE_H
 #define CBM_PKGMAP_BRIDGE_H
 
+#include "foundation/compat_fs.h"
 #include "pipeline/pipeline_internal.h"
 #include <yyjson/yyjson.h>
 
@@ -19,6 +20,8 @@ const yyjson_val *cbm_pkgmap_json_next_pair(const yyjson_val **next);
 char *cbm_pkgmap_read_manifest(const char *path, int *len);
 void cbm_pkgmap_free_manifest(char *source);
 
+const char *cbm_pkgmap_dir_next(cbm_dir_t *dir);
+int cbm_pkgmap_path_kind(const char *path);
 bool cbm_pkgmap_skip_dir(const char *name, const char *rel, char *const *excluded, int count);
 
 #endif

@@ -2,7 +2,7 @@
 //! precedence, including duplicate Composer keys and Python's src-layout entry.
 
 use super::json::Document;
-use super::{c_bytes, dirname, join, limit, trimmed_c_string};
+use super::{PATH_LIMIT, c_bytes, dirname, trimmed_c_string};
 use std::ffi::{CStr, c_char, c_int};
 
 #[derive(Clone, Copy)]
@@ -20,9 +20,45 @@ pub(super) enum Manifest {
     Swift,
 }
 
-pub(super) struct Entry {
-    pub name: Vec<u8>,
-    pub path: Vec<u8>,
+// Keep the native path limit, including for unusually wide Composer maps.
+struct EntryPath {
+    bytes: [u8; PATH_LIMIT],
+    len: usize,
+}
+
+impl EntryPath {
+    fn from_parts(parts: &[&[u8]]) -> Self {
+        let mut path = Self {
+            bytes: [0; PATH_LIMIT],
+            len: 0,
+        };
+        for part in parts {
+            path.extend(part);
+        }
+        path
+    }
+
+    fn join(dir: &[u8], parts: &[&[u8]]) -> Self {
+        let mut path = if dir.is_empty() {
+            Self::from_parts(&[])
+        } else {
+            Self::from_parts(&[dir, b"/"])
+        };
+        for part in parts {
+            path.extend(part);
+        }
+        path
+    }
+
+    fn extend(&mut self, bytes: &[u8]) {
+        let count = bytes.len().min(PATH_LIMIT - self.len);
+        self.bytes[self.len..self.len + count].copy_from_slice(&bytes[..count]);
+        self.len += count;
+    }
+
+    fn bytes(&self) -> &[u8] {
+        &self.bytes[..self.len]
+    }
 }
 
 impl Manifest {
@@ -43,15 +79,13 @@ impl Manifest {
         })
     }
 
-    pub fn parse(self, path: &[u8], source: &[u8]) -> Vec<Entry> {
+    pub fn parse(
+        self,
+        path: &[u8],
+        source: &[u8],
+        mut emit: impl FnMut(&[u8], &[u8]),
+    ) {
         let dir = dirname(path);
-        let mut entries = Vec::new();
-        let mut push = |name: &[u8], path: Vec<u8>| {
-            entries.push(Entry {
-                name: trimmed_c_string(name).to_vec(),
-                path,
-            })
-        };
         match self {
             Self::Node => {
                 if let Some(doc) = Document::read(source) {
@@ -76,18 +110,17 @@ impl Manifest {
                             })
                             .unwrap_or(b"src/index.ts");
                         if !entry.is_empty() {
-                            let mut entry = join(
+                            let entry = EntryPath::join(
                                 dir,
-                                entry.strip_prefix(b"./").unwrap_or(entry),
+                                &[entry.strip_prefix(b"./").unwrap_or(entry)],
                             );
-                            if let Some(dot) = entry
+                            let bytes = entry.bytes();
+                            let end = bytes
                                 .iter()
                                 .rposition(|&byte| byte == b'.' || byte == b'/')
-                                .filter(|&position| entry[position] == b'.')
-                            {
-                                entry.truncate(dot);
-                            }
-                            push(name, entry);
+                                .filter(|&position| bytes[position] == b'.')
+                                .unwrap_or(bytes.len());
+                            emit(name, &bytes[..end]);
                         }
                     }
                 }
@@ -96,30 +129,35 @@ impl Manifest {
                 let module = line_value(source, b"module ")
                     .and_then(|value| token(trim_horizontal(value), b"\n\r "));
                 if let Some(name) = module {
-                    push(name, dir.to_vec());
+                    emit(name, dir);
                 }
             }
             Self::Cargo => {
                 if let Some(name) = toml_name(source, b"[package]") {
-                    push(name, join(dir, b"src/lib"));
+                    emit(name, EntryPath::join(dir, &[b"src/lib"]).bytes());
                 }
             }
             Self::Python => {
                 if let Some(name) = toml_name(source, b"[project]") {
-                    let name = trimmed_c_string(name)
-                        .iter()
-                        .map(|&byte| if byte == b'-' { b'_' } else { byte })
-                        .collect::<Vec<_>>();
-                    push(
-                        &name,
-                        join(
+                    let name = trimmed_c_string(name);
+                    let mut stem = EntryPath::from_parts(&[name]);
+                    for byte in &mut stem.bytes[..stem.len] {
+                        if *byte == b'-' {
+                            *byte = b'_';
+                        }
+                    }
+                    emit(
+                        name,
+                        EntryPath::join(
                             dir,
-                            &limit([b"src/", &name[..], b"/__init__"].concat()),
-                        ),
+                            &[b"src/", stem.bytes(), b"/__init__"],
+                        )
+                        .bytes(),
                     );
-                    push(
-                        &name,
-                        join(dir, &limit([&name[..], b"/__init__"].concat())),
+                    emit(
+                        name,
+                        EntryPath::join(dir, &[stem.bytes(), b"/__init__"])
+                            .bytes(),
                     );
                 }
             }
@@ -131,7 +169,7 @@ impl Manifest {
                         .string()
                         .filter(|name| !name.is_empty())
                     {
-                        push(name, dir.to_vec());
+                        emit(name, dir);
                     }
                     for section in [c"autoload", c"autoload-dev"] {
                         for (key, value) in
@@ -148,11 +186,12 @@ impl Manifest {
                                 if location == b"." {
                                     location = b"";
                                 }
-                                let mut entry = join(dir, location);
-                                if entry.last() == Some(&b'/') {
-                                    entry.pop();
-                                }
-                                push(key, entry);
+                                let entry = EntryPath::join(dir, &[location]);
+                                let bytes = entry.bytes();
+                                emit(
+                                    key,
+                                    bytes.strip_suffix(b"/").unwrap_or(bytes),
+                                );
                             }
                         }
                     }
@@ -169,7 +208,7 @@ impl Manifest {
                         if let Some(name) = unsafe { c_bytes(name) }
                             .filter(|name| !name.is_empty())
                         {
-                            push(name, join(dir, b"lib"));
+                            emit(name, EntryPath::join(dir, &[b"lib"]).bytes());
                         }
                         unsafe { cbm_yaml_free(doc) };
                     }
@@ -182,19 +221,21 @@ impl Manifest {
                 ) {
                     let group = trimmed_c_string(group);
                     let artifact = trimmed_c_string(artifact);
-                    let entry = join(dir, b"src/main/java");
-                    push(
-                        &limit([group, b".", artifact].concat()),
-                        entry.clone(),
-                    );
-                    push(group, entry);
+                    let entry = EntryPath::join(dir, &[b"src/main/java"]);
+                    let package =
+                        EntryPath::from_parts(&[group, b".", artifact]);
+                    emit(package.bytes(), entry.bytes());
+                    emit(group, entry.bytes());
                 }
             }
             Self::Gradle => {
                 if let Some(group) =
                     line_value(source, b"group").and_then(quoted)
                 {
-                    push(group, join(dir, b"src/main/java"));
+                    emit(
+                        group,
+                        EntryPath::join(dir, &[b"src/main/java"]).bytes(),
+                    );
                 }
             }
             Self::Elixir => {
@@ -203,32 +244,31 @@ impl Manifest {
                     .and_then(|value| token(value, b",\n )"))
                 {
                     let name = trimmed_c_string(name);
-                    push(
-                        &limit(name.to_vec()),
-                        join(dir, &[b"lib/", name].concat()),
+                    let atom = EntryPath::from_parts(&[name]);
+                    emit(
+                        atom.bytes(),
+                        EntryPath::join(dir, &[b"lib/", name]).bytes(),
                     );
                 }
             }
             Self::Ruby => {
-                let source = trimmed_c_string(source);
-                if let Some(name) = source
+                if let Some(name) = trimmed_c_string(source)
                     .windows(5)
                     .enumerate()
                     .filter(|(_, window)| *window == b".name")
                     .find_map(|(index, _)| quoted(&source[index + 5..]))
                 {
-                    push(name, join(dir, &[b"lib/", name].concat()));
+                    emit(
+                        name,
+                        EntryPath::join(dir, &[b"lib/", trimmed_c_string(name)])
+                            .bytes(),
+                    );
                 }
             }
-            Self::Swift => crate::swift_package_map::scan_targets(
-                source,
-                path,
-                |name, entry| {
-                    push(name, entry.to_vec());
-                },
-            ),
+            Self::Swift => {
+                crate::swift_package_map::scan_targets(source, path, emit)
+            }
         }
-        entries
     }
 }
 

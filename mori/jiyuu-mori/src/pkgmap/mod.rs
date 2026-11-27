@@ -75,7 +75,16 @@ impl PackageEntries {
             self.items = items;
             self.capacity = capacity;
         }
-        unsafe { self.items.add(self.count as usize).write(entry) };
+        let slot = unsafe { self.items.add(self.count as usize) };
+        unsafe {
+            slot.write(entry);
+            // The C worker reader sees the initialized fields, excluding trailing padding.
+            cbm_ffi_mark_written(
+                slot.cast(),
+                std::mem::offset_of!(PackageEntry, sequence)
+                    + std::mem::size_of::<c_int>(),
+            );
+        }
         self.count += 1;
     }
 
@@ -85,9 +94,10 @@ impl PackageEntries {
         if swift && path.is_none() {
             return;
         }
-        for entry in kind.parse(path.map_or(b"", CStr::to_bytes), source) {
-            let name = duplicate(&entry.name);
-            let entry_path = duplicate(&entry.path);
+        kind.parse(path.map_or(b"", CStr::to_bytes), source, |name, entry| {
+            let normalize_name = matches!(kind, Manifest::Python);
+            let name = duplicate_name(name, normalize_name);
+            let entry_path = duplicate(entry);
             let entry = PackageEntry {
                 name,
                 path: entry_path,
@@ -109,7 +119,7 @@ impl PackageEntries {
                     added.manifest = tracked_duplicate(path);
                 }
             }
-        }
+        });
         if path.is_some() {
             for index in before..self.count {
                 let entry = unsafe { &mut *self.items.add(index as usize) };
@@ -278,6 +288,9 @@ fn build_from_files(
         let files = CString::new(discovered.to_string()).unwrap();
         let walk = CString::new(walked.to_string()).unwrap();
         let total = CString::new(entries.count.to_string()).unwrap();
+        for value in [&files, &walk, &total] {
+            mark_cstr(value);
+        }
         unsafe {
             cbm_log(
                 1,
@@ -304,7 +317,13 @@ fn build_from_files(
 pub(crate) unsafe extern "C" fn cbm_pkg_entries_init(
     entries: *mut PackageEntries,
 ) {
-    unsafe { entries.write(PackageEntries::empty()) };
+    unsafe {
+        entries.write(PackageEntries::empty());
+        cbm_ffi_mark_written(
+            entries.cast(),
+            std::mem::size_of::<PackageEntries>(),
+        );
+    };
 }
 
 #[unsafe(no_mangle)]
@@ -454,20 +473,18 @@ fn dirname(path: &[u8]) -> &[u8] {
         .map_or(b"", |index| &path[..index])
 }
 
-fn limit(mut bytes: Vec<u8>) -> Vec<u8> {
-    bytes.truncate(PATH_LIMIT);
-    bytes
-}
-
-fn join(directory: &[u8], suffix: &[u8]) -> Vec<u8> {
-    if directory.is_empty() {
-        limit(suffix.to_vec())
-    } else {
-        limit([directory, b"/", suffix].concat())
-    }
+fn mark_cstr(value: &CStr) {
+    // The bytes may have been constructed by Rust without native instrumentation.
+    unsafe {
+        cbm_ffi_mark_written(value.as_ptr().cast(), value.count_bytes() + 1)
+    };
 }
 
 fn duplicate(bytes: &[u8]) -> *mut c_char {
+    duplicate_name(bytes, false)
+}
+
+fn duplicate_name(bytes: &[u8], python_name: bool) -> *mut c_char {
     let bytes = trimmed_c_string(bytes);
     let result =
         unsafe { realloc(null_mut(), bytes.len() + 1) }.cast::<c_char>();
@@ -476,7 +493,17 @@ fn duplicate(bytes: &[u8]) -> *mut c_char {
             result
                 .cast::<u8>()
                 .copy_from_nonoverlapping(bytes.as_ptr(), bytes.len());
+            if python_name {
+                let name =
+                    slice::from_raw_parts_mut(result.cast::<u8>(), bytes.len());
+                for byte in name {
+                    if *byte == b'-' {
+                        *byte = b'_';
+                    }
+                }
+            }
             result.add(bytes.len()).write(0);
+            cbm_ffi_mark_written(result.cast(), bytes.len() + 1);
         }
     }
     result
@@ -508,6 +535,7 @@ unsafe fn insert(
 }
 
 unsafe extern "C" {
+    fn cbm_ffi_mark_written(address: *const c_void, size: usize);
     fn realloc(ptr: *mut c_void, size: usize) -> *mut c_void;
     fn free(ptr: *mut c_void);
     fn cbm_ht_foreach(

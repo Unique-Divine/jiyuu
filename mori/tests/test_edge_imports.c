@@ -2716,6 +2716,47 @@ TEST(ei_pkgmap_walk_keeps_swift_boundaries_and_exclusions) {
     PASS();
 }
 
+#ifdef _WIN32
+TEST(ei_pkgmap_walk_accepts_extended_length_win32_root) {
+    th_windows_long_path_t fixture = {0};
+    ASSERT_EQ(th_windows_long_path_init(&fixture, 640U), 0);
+    ASSERT_EQ(th_write_file(TH_PATH(fixture.path, "Web/package.json"),
+                            "{\"name\":\"fixture-web\",\"main\":\"entry.js\"}"),
+              0);
+    ASSERT_EQ(th_write_file(TH_PATH(fixture.path, "Core/Package.swift"),
+                            "let package = Package(targets: [.target(name: \"Core\")])"),
+              0);
+
+    cbm_pkg_entries_t entries;
+    cbm_pkg_entries_init(&entries);
+    ASSERT_EQ(cbm_pkgmap_scan_repo(fixture.path, &entries, NULL, 0), 2);
+    ASSERT_EQ(entries.count, 2);
+    bool found_web = false;
+    for (int i = 0; i < entries.count; i++) {
+        if (strcmp(entries.items[i].pkg_name, "fixture-web") == 0) {
+            ASSERT_STR_EQ("Web/entry", entries.items[i].entry_rel);
+            ASSERT_STR_EQ("Web/package.json", entries.items[i].source_rel);
+            found_web = true;
+        }
+    }
+    ASSERT_TRUE(found_web);
+    cbm_pkg_entries_free(&entries);
+
+    ASSERT_EQ(cbm_pkgmap_scan_swift_targets(fixture.path, &entries, NULL, 0), 1);
+    ASSERT_EQ(entries.count, 2);
+    ASSERT_STR_EQ("Core/Sources/Core", entries.items[0].entry_rel);
+    ASSERT_STR_EQ("Core/Package.swift", entries.items[0].manifest_rel);
+    ASSERT_NULL(entries.items[1].pkg_name);
+    ASSERT_STR_EQ("Core", entries.items[1].entry_rel);
+    ASSERT_STR_EQ("Core/Package.swift", entries.items[1].manifest_rel);
+    cbm_pkg_entries_free(&entries);
+
+    ASSERT_EQ(th_rmtree(fixture.path), 0);
+    ASSERT_EQ(th_windows_long_path_cleanup(&fixture), 0);
+    PASS();
+}
+#endif
+
 static cbm_pipeline_t *ei_pkgmap_cancel_pipeline;
 
 static void ei_pkgmap_cancel_after_merge(const char *line) {
@@ -2769,6 +2810,9 @@ TEST(ei_pkgmap_cancel_during_build_leaves_no_published_graph) {
 SUITE(edge_imports) {
     RUN_TEST(ei_pkgmap_manifest_rows_preserve_precedence);
     RUN_TEST(ei_pkgmap_walk_keeps_swift_boundaries_and_exclusions);
+#ifdef _WIN32
+    RUN_TEST(ei_pkgmap_walk_accepts_extended_length_win32_root);
+#endif
     RUN_TEST(ei_pkgmap_cancel_during_build_leaves_no_published_graph);
     RUN_TEST(ei_relative_astro_css_imports_issue2558);
     RUN_TEST(ei_nix_parent_relative_import_issue2797);

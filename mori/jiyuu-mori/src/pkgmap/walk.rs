@@ -1,55 +1,33 @@
-use super::{Manifest, PATH_LIMIT, PackageEntries, cbm_log, cbm_log_int};
-use std::ffi::{CStr, CString, OsStr, c_char, c_int};
-use std::fs::{self, Metadata};
-use std::path::Path;
+use super::{
+    Manifest, PATH_LIMIT, PackageEntries, cbm_log, cbm_log_int, mark_cstr,
+};
+use std::ffi::{CStr, c_char, c_int, c_void};
 use std::ptr::{NonNull, null};
 use std::slice;
 
 const MAX_DEPTH: usize = 64;
+// Matches the C path-kind adapter.
+const DIRECTORY: c_int = 1;
+const REGULAR_FILE: c_int = 2;
 
-#[cfg(unix)]
-fn os_path(bytes: &[u8]) -> Option<&OsStr> {
-    use std::os::unix::ffi::OsStrExt;
-    Some(OsStr::from_bytes(bytes))
-}
+struct Directory(NonNull<c_void>);
 
-#[cfg(windows)]
-fn os_path(bytes: &[u8]) -> Option<&OsStr> {
-    Some(OsStr::new(std::str::from_utf8(bytes).ok()?))
-}
-
-#[cfg(unix)]
-fn name_bytes(name: &OsStr) -> Option<&[u8]> {
-    use std::os::unix::ffi::OsStrExt;
-    Some(name.as_bytes())
-}
-
-#[cfg(windows)]
-fn name_bytes(name: &OsStr) -> Option<&[u8]> {
-    Some(name.to_str()?.as_bytes())
-}
-
-#[cfg(unix)]
-fn metadata(path: &Path) -> Option<Metadata> {
-    let meta = fs::symlink_metadata(path).ok()?;
-    (!meta.file_type().is_symlink()).then_some(meta)
-}
-
-#[cfg(windows)]
-fn metadata(path: &Path) -> Option<Metadata> {
-    use std::os::windows::fs::MetadataExt;
-    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
-    // The reference follows metadata for file links on Windows, while
-    // directory links and junctions must never be traversed.
-    let meta = fs::metadata(path).ok()?;
-    if meta.is_dir()
-        && fs::symlink_metadata(path).ok()?.file_attributes()
-            & FILE_ATTRIBUTE_REPARSE_POINT
-            != 0
-    {
-        return None;
+impl Directory {
+    fn open(path: &CStr) -> Option<Self> {
+        NonNull::new(unsafe { cbm_opendir(path.as_ptr()) }).map(Self)
     }
-    Some(meta)
+
+    fn next(&mut self) -> Option<&CStr> {
+        // Compatibility directory entries are borrowed until the next read.
+        let name = unsafe { cbm_pkgmap_dir_next(self.0.as_ptr()) };
+        (!name.is_null()).then(|| unsafe { CStr::from_ptr(name) })
+    }
+}
+
+impl Drop for Directory {
+    fn drop(&mut self) {
+        unsafe { cbm_closedir(self.0.as_ptr()) };
+    }
 }
 
 pub(super) struct ManifestSource {
@@ -83,6 +61,29 @@ pub(super) fn read(path: &CStr) -> Option<ManifestSource> {
     (len > 0).then_some(source)
 }
 
+fn child_path<'a>(
+    parent: &CStr,
+    name: &CStr,
+    out: &'a mut [u8; PATH_LIMIT + 1],
+) -> Option<&'a CStr> {
+    let parent = parent.to_bytes();
+    let name = name.to_bytes();
+    let offset = parent.len() + usize::from(!parent.is_empty());
+    let len = offset + name.len();
+    if len > PATH_LIMIT {
+        return None;
+    }
+    out[..parent.len()].copy_from_slice(parent);
+    if !parent.is_empty() {
+        out[parent.len()] = b'/';
+    }
+    out[offset..len].copy_from_slice(name);
+    out[len] = 0;
+    let path = CStr::from_bytes_with_nul(&out[..=len]).ok()?;
+    mark_cstr(path);
+    Some(path)
+}
+
 struct Walker<'a> {
     entries: &'a mut PackageEntries,
     excluded: *mut *mut c_char,
@@ -106,39 +107,21 @@ impl Walker<'_> {
             return 0;
         }
 
-        let Some(dir) =
-            os_path(abs.to_bytes()).and_then(|path| fs::read_dir(path).ok())
-        else {
+        let Some(mut dir) = Directory::open(abs) else {
             return 0;
         };
         let mut parsed = 0;
-        for entry in dir.flatten() {
-            let name = entry.file_name();
-            let Some(name) = name_bytes(&name) else {
-                continue;
-            };
-            let child = [abs.to_bytes(), b"/", name].concat();
-            let child_rel = if rel.is_empty() {
-                name.to_vec()
-            } else {
-                [rel.to_bytes(), b"/", name].concat()
-            };
-            if child.len() > PATH_LIMIT || child_rel.len() > PATH_LIMIT {
-                continue;
-            }
-            let (Ok(child), Ok(child_rel), Ok(name)) = (
-                CString::new(child),
-                CString::new(child_rel),
-                CString::new(name),
+        while let Some(name) = dir.next() {
+            let mut absolute = [0; PATH_LIMIT + 1];
+            let mut relative = [0; PATH_LIMIT + 1];
+            let (Some(child), Some(child_rel)) = (
+                child_path(abs, name, &mut absolute),
+                child_path(rel, name, &mut relative),
             ) else {
                 continue;
             };
-            let Some(meta) = os_path(child.to_bytes())
-                .and_then(|path| metadata(Path::new(path)))
-            else {
-                continue;
-            };
-            if meta.is_dir() {
+            let kind = unsafe { cbm_pkgmap_path_kind(child.as_ptr()) };
+            if kind == DIRECTORY {
                 let excluded = unsafe {
                     cbm_pkgmap_skip_dir(
                         name.as_ptr(),
@@ -148,19 +131,19 @@ impl Walker<'_> {
                     )
                 };
                 if !excluded {
-                    parsed += self.visit(&child, &child_rel, depth + 1);
+                    parsed += self.visit(child, child_rel, depth + 1);
                 }
-            } else if meta.is_file() {
+            } else if kind == REGULAR_FILE {
                 let Some(kind) = Manifest::detect(name.to_bytes()) else {
                     continue;
                 };
                 if self.swift_only && !matches!(kind, Manifest::Swift) {
                     continue;
                 }
-                if let Some(source) = read(&child) {
-                    self.entries.parse(kind, Some(&child_rel), source.bytes());
+                if let Some(source) = read(child) {
+                    self.entries.parse(kind, Some(child_rel), source.bytes());
                     if self.swift_only {
-                        self.entries.swift_boundary(&child_rel);
+                        self.entries.swift_boundary(child_rel);
                     }
                     parsed += 1;
                 }
@@ -201,6 +184,10 @@ pub(super) fn scan(
 }
 
 unsafe extern "C" {
+    fn cbm_opendir(path: *const c_char) -> *mut c_void;
+    fn cbm_closedir(dir: *mut c_void);
+    fn cbm_pkgmap_dir_next(dir: *mut c_void) -> *const c_char;
+    fn cbm_pkgmap_path_kind(path: *const c_char) -> c_int;
     fn cbm_pkgmap_read_manifest(
         path: *const c_char,
         len: *mut c_int,
