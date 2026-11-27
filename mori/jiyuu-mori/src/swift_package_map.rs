@@ -1,7 +1,4 @@
-//! Literal SwiftPM target discovery for `pass_pkgmap.c`.
-
-use std::ffi::{CStr, c_char, c_void};
-use std::slice;
+//! Literal SwiftPM target discovery.
 
 const PATH_BUFFER: usize = 1024;
 const TARGETS: [(&[u8], &[u8]); 5] = [
@@ -176,7 +173,7 @@ fn target_path<'a>(
     normalize_target_path(path, normalized)
 }
 
-fn scan_targets(
+pub(super) fn scan_targets(
     mut source: &[u8],
     manifest: &[u8],
     mut emit: impl FnMut(&[u8], &[u8]),
@@ -222,36 +219,6 @@ fn scan_targets(
         // A nested dependency target belongs to the enclosing call.
         source = &source[close + 1..];
     }
-}
-
-type EmitTarget =
-    unsafe extern "C" fn(*mut c_void, *const u8, usize, *const u8, usize);
-
-/// The caller provides readable source bytes and a NUL-terminated manifest path.
-/// The sink copies both byte spans before returning.
-#[unsafe(no_mangle)]
-unsafe extern "C" fn cbm_rust_swift_scan_targets(
-    source: *const u8,
-    source_len: usize,
-    manifest: *const c_char,
-    context: *mut c_void,
-    emit: EmitTarget,
-) {
-    // SAFETY: The C adapter owns both inputs for the duration of this call.
-    let source = unsafe { slice::from_raw_parts(source, source_len) };
-    let manifest = unsafe { CStr::from_ptr(manifest) }.to_bytes();
-    scan_targets(source, manifest, |name, entry| {
-        // SAFETY: Both spans are readable until the synchronous sink returns.
-        unsafe {
-            emit(
-                context,
-                name.as_ptr(),
-                name.len(),
-                entry.as_ptr(),
-                entry.len(),
-            )
-        };
-    });
 }
 
 #[cfg(test)]
