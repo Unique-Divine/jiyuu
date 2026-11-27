@@ -10,6 +10,9 @@ use crate::native_tree::BorrowedNode;
 mod native;
 use native::{Callable, File, NameList, Signature, Type, TypeView};
 
+#[path = "go_bindings.rs"]
+mod bindings;
+
 type Node<'tree> = BorrowedNode<'tree>;
 
 const MAX_GENERIC_ARGS: usize = 16;

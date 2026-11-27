@@ -56,9 +56,6 @@ const CBMType* go_eval_expr_type(GoLSPContext* ctx, TSNode node);
 // Parse a Go type AST node into a CBMType.
 const CBMType* go_parse_type_node(GoLSPContext* ctx, TSNode node);
 
-// Process a Go statement, binding variables into the current scope.
-void go_process_statement(GoLSPContext* ctx, TSNode node);
-
 // Look up a field or method on a type, traversing embedded types.
 const CBMRegisteredFunc* go_lookup_field_or_method(GoLSPContext* ctx,
     const char* type_qn, const char* member_name);

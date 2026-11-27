@@ -17,6 +17,8 @@ const TYPE_SLICE: u32 = 3;
 const TYPE_MAP: u32 = 4;
 const TYPE_CHANNEL: u32 = 5;
 const TYPE_FUNC: u32 = 6;
+const TYPE_BUILTIN: u32 = 9;
+const TYPE_TUPLE: u32 = 10;
 const TYPE_PARAM: u32 = 11;
 
 /// The fields of the native type union read by Go expression evaluation.
@@ -32,6 +34,7 @@ union Data {
     element: Type,
     map: Map,
     signature: Signature,
+    tuple: Tuple,
 }
 
 #[derive(Clone, Copy)]
@@ -39,6 +42,13 @@ union Data {
 struct Map {
     key: Type,
     value: Type,
+}
+
+#[derive(Clone, Copy)]
+#[repr(C)]
+struct Tuple {
+    elems: TypeList,
+    count: c_int,
 }
 
 #[derive(Clone, Copy)]
@@ -66,6 +76,7 @@ struct Function {
 pub(super) enum TypeView<'file> {
     Unknown,
     Named(&'file CStr),
+    Builtin(&'file CStr),
     Pointer(Type),
     Slice(Type),
     Map(Type, Type),
@@ -125,6 +136,12 @@ struct Operations {
     pop_scope: unsafe extern "C" fn(*mut GoContext, *mut Scope),
     bind: unsafe extern "C" fn(*mut GoContext, *const c_char, Type),
     walk: unsafe extern "C" fn(*mut GoContext, *const RawNode),
+    exact_callable:
+        unsafe extern "C" fn(*mut GoContext, *const RawNode) -> *const c_char,
+    bind_value:
+        unsafe extern "C" fn(*mut GoContext, *const c_char, Type, *const c_char),
+    enter_function:
+        unsafe extern "C" fn(*mut GoContext, *const RawNode, *const c_char),
 }
 
 #[repr(C)]
@@ -145,6 +162,7 @@ unsafe extern "C" {
     fn cbm_type_named(arena: *mut Arena, name: *const c_char) -> Type;
     fn cbm_type_builtin(arena: *mut Arena, name: *const c_char) -> Type;
     fn cbm_type_pointer(arena: *mut Arena, element: Type) -> Type;
+    fn cbm_type_slice(arena: *mut Arena, element: Type) -> Type;
     fn cbm_type_deref(ty: Type) -> Type;
     fn cbm_registry_lookup_type(
         registry: *const Registry,
@@ -234,6 +252,9 @@ impl<'file> File<'file> {
                 }
                 TYPE_CHANNEL => TypeView::Channel((*ty).data.element),
                 TYPE_FUNC => TypeView::Function((*ty).data.signature),
+                TYPE_BUILTIN if !(*ty).data.name.is_null() => {
+                    TypeView::Builtin(CStr::from_ptr((*ty).data.name))
+                }
                 TYPE_PARAM if !(*ty).data.name.is_null() => {
                     TypeView::Parameter(CStr::from_ptr((*ty).data.name))
                 }
@@ -333,6 +354,51 @@ impl<'file> File<'file> {
         unsafe { (self.ops.parse_type)(self.context, node) }
     }
 
+    pub(super) fn exact_callable(&self, node: &RawNode) -> Option<&'file CStr> {
+        let callable = unsafe { (self.ops.exact_callable)(self.context, node) };
+        (!callable.is_null()).then(|| unsafe { CStr::from_ptr(callable) })
+    }
+
+    pub(super) fn bind_value(
+        &self,
+        name: &CStr,
+        ty: Type,
+        callable: Option<&CStr>,
+    ) {
+        unsafe {
+            (self.ops.bind_value)(
+                self.context,
+                name.as_ptr(),
+                ty,
+                callable.map_or(ptr::null(), CStr::as_ptr),
+            )
+        }
+    }
+
+    pub(super) fn enter_function(&self, node: &RawNode, name: &CStr) {
+        unsafe { (self.ops.enter_function)(self.context, node, name.as_ptr()) };
+    }
+
+    pub(super) fn tuple_element(&self, ty: Type, index: usize) -> Option<Type> {
+        // SAFETY: The discriminator and tuple data borrow the current native arena.
+        unsafe {
+            if ty.is_null() || (*ty).kind != TYPE_TUPLE {
+                return None;
+            }
+            let tuple = (*ty).data.tuple;
+            if index >= usize::try_from(tuple.count).ok()?
+                || tuple.elems.is_null()
+            {
+                return None;
+            }
+            Some(*tuple.elems.add(index))
+        }
+    }
+
+    pub(super) fn slice(&self, element: Type) -> Type {
+        unsafe { cbm_type_slice(self.arena, element) }
+    }
+
     pub(super) fn pointer(&self, element: Type) -> Type {
         unsafe { cbm_type_pointer(self.arena, element) }
     }
@@ -397,8 +463,10 @@ impl Drop for ScopeGuard<'_, '_> {
     }
 }
 
-#[unsafe(no_mangle)]
-unsafe extern "C" fn mori_go_eval_expr(input: *const Input) -> Type {
+unsafe fn with_input<T>(
+    input: *const Input,
+    operation: impl FnOnce(&File<'_>, crate::native_tree::BorrowedNode<'_>) -> T,
+) -> T {
     // SAFETY: C lends the source and tree, arena, and current registry context.
     let input = unsafe { &*input };
     let file = File {
@@ -414,5 +482,22 @@ unsafe extern "C" fn mori_go_eval_expr(input: *const Input) -> Type {
     };
     let root =
         unsafe { crate::native_tree::BorrowedNode::from_root(&input.root) };
-    super::evaluate(&file, Some(root), 0)
+    operation(&file, root)
+}
+
+#[unsafe(no_mangle)]
+unsafe extern "C" fn mori_go_eval_expr(input: *const Input) -> Type {
+    unsafe {
+        with_input(input, |file, root| super::evaluate(file, Some(root), 0))
+    }
+}
+
+#[unsafe(no_mangle)]
+unsafe extern "C" fn mori_go_bind_statement(input: *const Input) {
+    unsafe { with_input(input, super::bindings::statement) };
+}
+
+#[unsafe(no_mangle)]
+unsafe extern "C" fn mori_go_walk_file(input: *const Input) {
+    unsafe { with_input(input, super::bindings::file) };
 }
