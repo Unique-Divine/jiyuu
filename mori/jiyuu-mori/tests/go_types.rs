@@ -96,7 +96,7 @@ impl TypeContext for FileScope<'_> {
                 children: children.into(),
                 params,
             },
-            Type::TypeParameter(name) => Resolved::TypeParameter(name.into()),
+            Type::Parameter(name) => Resolved::TypeParameter(name.into()),
             Type::Interface => Resolved::Interface,
             Type::Struct => Resolved::Struct,
             Type::Tuple(items) => Resolved::Tuple(items.into()),

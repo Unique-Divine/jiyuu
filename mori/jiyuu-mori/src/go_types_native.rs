@@ -5,7 +5,7 @@ use std::ffi::{CStr, c_char, c_int, c_void};
 use crate::go_types::{
     Channel, GoTypeFacts, Type, TypeContext, TypeMode, TypeTree,
 };
-use crate::native_tree::RawNode;
+use crate::native_tree::{BorrowedNode, RawNode};
 
 type TypeId = *const c_void;
 
@@ -51,30 +51,21 @@ type MakeType = unsafe extern "C" fn(
     c_int,
 ) -> TypeId;
 
-/// Private wrapper for a non-null node in the tree lent to `mori_go_parse_type`.
-#[derive(Clone, Copy)]
-struct Node(RawNode);
-
-impl TypeTree for Node {
+impl TypeTree for BorrowedNode<'_> {
     fn kind(self) -> &'static [u8] {
-        // SAFETY: The parser lends the tree for the walk. The pinned Go
-        // grammar's node-kind strings are static.
-        unsafe { self.0.kind() }.to_bytes()
+        self.kind().to_bytes()
     }
 
     fn span(self) -> std::ops::Range<usize> {
-        // SAFETY: The parser lends the tree for the walk.
-        unsafe { self.0.range() }
+        self.range()
     }
 
     fn field(self, name: &'static CStr) -> Option<Self> {
-        // SAFETY: The parser lends the tree for the walk.
-        unsafe { self.0.field(name) }.map(Self)
+        self.field(name)
     }
 
     fn children(self) -> impl Iterator<Item = Self> {
-        // SAFETY: The cursor is used and dropped within the parse callback.
-        unsafe { self.0.named_children() }.map(Self)
+        self.named_children()
     }
 }
 
@@ -163,7 +154,7 @@ impl TypeContext for NativeContext<'_> {
                 detail = params as c_int;
                 (Kind::Function, children)
             }
-            Type::TypeParameter(value) => {
+            Type::Parameter(value) => {
                 name = value;
                 (Kind::TypeParameter, &[][..])
             }
@@ -205,7 +196,9 @@ unsafe extern "C" fn mori_go_parse_type(
     } else {
         TypeMode::Signature
     };
-    GoTypeFacts::extract(Node(root), mode).resolve(
+    // SAFETY: The C caller keeps the tree live throughout this invocation.
+    let root = unsafe { BorrowedNode::from_root(&root) };
+    GoTypeFacts::extract(root, mode).resolve(
         source,
         &NativeContext {
             package,

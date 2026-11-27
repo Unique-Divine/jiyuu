@@ -2,7 +2,7 @@
 
 use std::ffi::{c_char, c_void};
 
-use crate::native_tree::RawNode;
+use crate::native_tree::{BorrowedNode, RawNode};
 
 #[derive(Debug, PartialEq, Eq)]
 struct GoImport<'a> {
@@ -58,17 +58,16 @@ unsafe extern "C" fn mori_go_extract_imports(
     // SAFETY: C lends the source bytes and the corresponding live tree.
     let source =
         unsafe { std::slice::from_raw_parts(source.cast::<u8>(), source_len) };
-    let emit = |spec: RawNode| {
-        // SAFETY: The field nodes borrow the same tree as root.
-        let import = unsafe {
-            let path = spec
-                .field(c"path")
-                .and_then(|node| source.get(node.range()));
-            let alias = spec
-                .field(c"name")
-                .and_then(|node| source.get(node.range()));
-            path.and_then(|path| GoImport::from_spelling(path, alias))
-        };
+    // SAFETY: The input node and source are valid for the callback.
+    let root = unsafe { BorrowedNode::from_root(&root) };
+    let emit = |spec: BorrowedNode<'_>| {
+        let path = spec
+            .field(c"path")
+            .and_then(|node| source.get(node.range()));
+        let alias = spec
+            .field(c"name")
+            .and_then(|node| source.get(node.range()));
+        let import = path.and_then(|path| GoImport::from_spelling(path, alias));
         if let Some(GoImport {
             module_path,
             local_name,
@@ -87,21 +86,19 @@ unsafe extern "C" fn mori_go_extract_imports(
         }
     };
 
-    // SAFETY: All yielded nodes borrow the live tree for this call.
-    unsafe {
-        for declaration in root
-            .children()
-            .filter(|node| node.is(c"import_declaration"))
-        {
-            for child in declaration.children() {
-                if child.is(c"import_spec") {
-                    emit(child);
-                } else if child.is(c"import_spec_list") {
-                    for spec in
-                        child.children().filter(|node| node.is(c"import_spec"))
-                    {
-                        emit(spec);
-                    }
+    for declaration in root
+        .children()
+        .filter(|node| node.kind() == c"import_declaration")
+    {
+        for child in declaration.children() {
+            if child.kind() == c"import_spec" {
+                emit(child);
+            } else if child.kind() == c"import_spec_list" {
+                for spec in child
+                    .children()
+                    .filter(|node| node.kind() == c"import_spec")
+                {
+                    emit(spec);
                 }
             }
         }

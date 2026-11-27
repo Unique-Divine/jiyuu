@@ -1,6 +1,8 @@
 //! Node access to Mori's pinned Tree-sitter runtime.
 
 use std::ffi::{CStr, c_char, c_void};
+use std::marker::PhantomData;
+use std::ops::Range;
 
 /// Matches the pinned Tree-sitter header. A node borrows its source tree.
 #[repr(C)]
@@ -154,5 +156,55 @@ impl RawNode {
             cbm_ffi_ts_node_start_byte(&self) as usize
                 ..cbm_ffi_ts_node_end_byte(&self) as usize
         }
+    }
+}
+
+/// A node that cannot outlive the borrowed tree handle supplied by the
+/// parser bridge. Child nodes and child iterators carry the same lifetime.
+#[derive(Clone, Copy)]
+pub(crate) struct BorrowedNode<'tree> {
+    raw: RawNode,
+    tree: PhantomData<&'tree RawNode>,
+}
+
+impl<'tree> BorrowedNode<'tree> {
+    /// # Safety
+    ///
+    /// The native tree behind `raw` must stay live during the borrow.
+    pub(crate) unsafe fn from_root(raw: &'tree RawNode) -> Self {
+        Self {
+            raw: *raw,
+            tree: PhantomData,
+        }
+    }
+
+    fn with_raw(self, raw: RawNode) -> Self {
+        Self { raw, ..self }
+    }
+
+    pub(crate) fn kind(self) -> &'static CStr {
+        // SAFETY: The borrow guarantees the tree remains live.
+        unsafe { self.raw.kind() }
+    }
+
+    pub(crate) fn range(self) -> Range<usize> {
+        // SAFETY: The borrow guarantees the tree remains live.
+        unsafe { self.raw.range() }
+    }
+
+    pub(crate) fn field(self, name: &CStr) -> Option<Self> {
+        // SAFETY: The child field belongs to the same borrowed tree.
+        unsafe { self.raw.field(name) }.map(|child| self.with_raw(child))
+    }
+
+    pub(crate) fn children(self) -> impl Iterator<Item = Self> {
+        // SAFETY: The iterator owns a copy of this borrow.
+        unsafe { self.raw.children() }.map(move |child| self.with_raw(child))
+    }
+
+    pub(crate) fn named_children(self) -> impl Iterator<Item = Self> {
+        // SAFETY: The iterator owns a copy of this borrow.
+        unsafe { self.raw.named_children() }
+            .map(move |child| self.with_raw(child))
     }
 }

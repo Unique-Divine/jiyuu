@@ -1,6 +1,8 @@
 //! Verify typed call ownership and provenance through both index drivers.
 #![cfg(all(feature = "c-backend", unix))]
 
+mod support;
+
 use std::ffi::OsStr;
 use std::fs;
 use std::os::unix::ffi::OsStrExt;
@@ -39,7 +41,13 @@ struct Edge {
     properties: Value,
 }
 
-fn index(scratch: &Path, repo: &Path, workers: &str) -> Vec<Edge> {
+fn index(
+    bin: &Path,
+    scratch: &Path,
+    repo: &Path,
+    workers: &str,
+    expected_mode: Option<&str>,
+) -> Vec<Edge> {
     let cache = scratch.join("db");
     let runtime = scratch.join("rt");
     for path in [&cache, &runtime] {
@@ -50,7 +58,7 @@ fn index(scratch: &Path, repo: &Path, workers: &str) -> Vec<Edge> {
             .unwrap();
     }
     let command = || {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_mori"));
+        let mut command = Command::new(bin);
         command
             .current_dir("/")
             .env_clear()
@@ -58,6 +66,7 @@ fn index(scratch: &Path, repo: &Path, workers: &str) -> Vec<Edge> {
             .env("HOME", std::env::var_os("HOME").unwrap_or_default())
             .env("CBM_CACHE_DIR", &cache)
             .env("CBM_RUNTIME_DIR", &runtime)
+            .env("CBM_LOG_LEVEL", "debug")
             .env("CBM_WORKERS", workers);
         command
     };
@@ -72,6 +81,22 @@ fn index(scratch: &Path, repo: &Path, workers: &str) -> Vec<Edge> {
     assert!(result.status.success(), "{result:?}");
     let response: Value = serde_json::from_slice(&result.stdout).unwrap();
     assert_eq!(response["status"], "indexed", "{response}");
+
+    if let Some(mode) = expected_mode {
+        let expected = format!("msg=pipeline.mode mode={mode}");
+        let logs = fs::read_dir(cache.join("logs")).unwrap();
+        assert!(
+            logs.filter_map(Result::ok).any(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".worker-log-")
+                    && fs::read_to_string(entry.path())
+                        .is_ok_and(|log| log.contains(&expected))
+            }),
+            "missing worker log {expected}",
+        );
+    }
 
     let db = Connection::open_with_flags(
         cache.join("go-types.db"),
@@ -145,21 +170,40 @@ func CrossUse(value *api.External) int { return value.Mark() }
         )
         .unwrap();
     }
-    for workers in ["1", "2"] {
-        let rust = index(&scratch.0.join(format!("r{workers}")), &repo, workers);
-        assert_eq!(rust.len(), 2, "{rust:?}");
-        for (edge, (caller, target)) in rust
-            .iter()
-            .zip([("CrossUse", "lib/methods.go"), ("LocalUse", "app/app.go")])
-        {
-            assert_eq!(edge.caller, caller);
-            assert_eq!(edge.target, target);
-            assert!(
-                edge.properties["strategy"]
-                    .as_str()
-                    .is_some_and(|strategy| strategy.starts_with("lsp_")),
-                "{edge:?}",
-            );
-        }
+    let candidate = Path::new(env!("CARGO_BIN_EXE_mori"));
+    let serial = index(
+        candidate,
+        &scratch.0.join("serial"),
+        &repo,
+        "1",
+        Some("sequential"),
+    );
+    let parallel = index(
+        candidate,
+        &scratch.0.join("parallel"),
+        &repo,
+        "2",
+        Some("parallel"),
+    );
+    assert_eq!(serial, parallel);
+
+    if let Some(reference) = support::c_reference_bin() {
+        let expected =
+            index(&reference, &scratch.0.join("reference"), &repo, "1", None);
+        assert_eq!(serial, expected);
+    }
+    assert_eq!(serial.len(), 2, "{serial:?}");
+    for (edge, (caller, target)) in serial
+        .iter()
+        .zip([("CrossUse", "lib/methods.go"), ("LocalUse", "app/app.go")])
+    {
+        assert_eq!(edge.caller, caller);
+        assert_eq!(edge.target, target);
+        assert!(
+            edge.properties["strategy"]
+                .as_str()
+                .is_some_and(|strategy| strategy.starts_with("lsp_")),
+            "{edge:?}",
+        );
     }
 }

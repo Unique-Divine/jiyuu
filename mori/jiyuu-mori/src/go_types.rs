@@ -33,7 +33,7 @@ pub(crate) enum Type<'a, T> {
     Map(T, T),
     Channel(T, Channel),
     Function { children: &'a [T], params: usize },
-    TypeParameter(&'a [u8]),
+    Parameter(&'a [u8]),
     Interface,
     Struct,
     Tuple(&'a [T]),
@@ -239,7 +239,7 @@ impl GoTypeFacts {
                         if self.mode == TypeMode::Signature
                             && ctx.type_parameter(name) =>
                     {
-                        Type::TypeParameter(name)
+                        Type::Parameter(name)
                     }
                     Some(name) if is_builtin(name, self.mode) => {
                         Type::Builtin(name)

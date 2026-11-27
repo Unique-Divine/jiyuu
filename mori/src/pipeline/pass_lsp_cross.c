@@ -17,6 +17,7 @@
 
 #include "pipeline/lsp_surface.h"
 #include "foundation/mem_core.h"
+#include "foundation/sanitized.h"
 #include "result_spill.h"
 #include "resolve_stats.h"
 #include "pipeline/pipeline_internal.h"
@@ -183,7 +184,12 @@ extern const char *mori_go_encode_results(const char *raw, void *context,
                                           pxc_go_results_alloc_fn alloc);
 
 static char *pxc_go_results_arena_alloc(void *context, size_t len) {
-    return cbm_arena_alloc(context, len);
+    char *result = cbm_arena_alloc(context, len);
+    /* The encoder fills this entire buffer before returning it to C. */
+    if (result) {
+        CBM_MSAN_WRITTEN(result, len);
+    }
+    return result;
 }
 
 static const char *pxc_go_result_list(CBMArena *arena, const char *raw) {

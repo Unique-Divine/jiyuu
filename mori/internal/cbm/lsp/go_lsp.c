@@ -162,6 +162,10 @@ static const CBMType *go_type_make(void *opaque, GoTypeKind kind, GoTypeBytes pa
                                    GoTypeBytes name, const CBMType **children, size_t count,
                                    int detail) {
     CBMArena *arena = ((GoLSPContext *)opaque)->arena;
+    /* Rust writes the child array before passing it to the native constructors. */
+    if (count) {
+        CBM_MSAN_WRITTEN(children, count * sizeof(*children));
+    }
     switch (kind) {
     case GO_TYPE_BUILTIN:
         return cbm_type_builtin(arena, cbm_arena_strndup(arena, (const char *)name.data, name.len));
