@@ -28,9 +28,9 @@ Then ask the graph: "who calls `find_route_handler`", "trace
 | `internal/cbm/extract_calls.c` | Operation text from call arguments and constants |
 | `internal/cbm/service_patterns.c` | Client library names; operation parser and field paths |
 | `src/pipeline/pass_route_nodes.c` | Server Route discovery and C graph adapter |
-| `jiyuu-mori/src/graphql_ffi.rs`, `gqlgen.rs`, `route_writer.rs` | GraphQL Route planning, resolver selection, and metadata |
+| `src/pipeline/graphql_ffi.rs`, `gqlgen.rs`, `route_writer.rs` | GraphQL Route planning, resolver selection, and metadata |
 | `src/pipeline/pass_parallel.c`, `pass_calls.c` | Client `GRAPHQL_CALLS` edges (large and small repos) |
-| `jiyuu-mori/src/graphql_link.rs` | Match GraphQL operations to indexed providers |
+| `src/pipeline/graphql_link.rs` | Match GraphQL operations to indexed providers |
 | `src/pipeline/pass_cross_repo.c` | Cross-repo persistence and C graph adapter |
 | `src/pipeline/pipeline_incremental.c` | When an edit forces a full rebuild |
 

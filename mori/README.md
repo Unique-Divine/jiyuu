@@ -1213,9 +1213,13 @@ event of `${CBM_CACHE_DIR}/logs/cbm-daemon.log`.
 
 ## Source Layout
 
+Rust and C share the subsystem directories under `src/` and
+`internal/cbm/`. The `jiyuu-mori` crate points to `src/lib.rs` and
+`src/main.rs`.
+
 ```text
 src/
-  main.c              Entry point: MCP stdio server, CLI, config
+  main.c, main.rs     Process entry points
   daemon/             Per-account session coordination, IPC, shared jobs and watchers
   mcp/                MCP server: tools, JSON-RPC 2.0, auto-index
   cli/                CLI commands and agent installer code from the import
@@ -1229,7 +1233,7 @@ src/
   foundation/         Platform layer: threads, filesystem, logging, memory
 graph-ui/             Graph UI: React, Monaco, and three.js
 internal/cbm/         Tree-sitter grammars (fetched at build time) and the extraction engine
-jiyuu-mori/           Rust crate jiyuu-mori and its mori binary
+jiyuu-mori/           Cargo manifest, native-link build script, and Rust integration tests
 ```
 
 Terms used in Mori's code and design docs are in [LEXICON.md](LEXICON.md).

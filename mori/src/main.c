@@ -1288,7 +1288,7 @@ static int main_run_allow_root(int argc, char **argv) {
     return 0;
 }
 
-/* Keep the values in sync with Subcommand in jiyuu-mori/src/startup.rs. */
+/* Keep the values in sync with Subcommand in src/cli/startup.rs. */
 typedef enum {
     MAIN_SUBCOMMAND_NONE = 0,
     MAIN_SUBCOMMAND_VERSION,
