@@ -13,8 +13,8 @@ use super::{
 use crate::native_graph_buffer::cbm_gbuf_node_set_properties_json;
 use crate::native_tree::RawNode;
 use std::ffi::{CStr, c_char, c_int, c_uint, c_void};
-use std::mem::MaybeUninit;
-use std::ptr::{null, null_mut};
+use std::mem::{ManuallyDrop, MaybeUninit};
+use std::ptr::{NonNull, null, null_mut};
 
 const CLASS: c_uint = 0;
 const FUNCTION: c_uint = 1;
@@ -281,12 +281,48 @@ fn binding<'a>(
     Some(result)
 }
 
+struct BindingScratch<T> {
+    values: NonNull<T>,
+    len: usize,
+}
+
+impl<T: Copy> BindingScratch<T> {
+    fn new(len: usize, value: T) -> Option<Self> {
+        let size = len.max(1).checked_mul(size_of::<T>())?;
+        if size > isize::MAX as usize {
+            return None;
+        }
+        let values = NonNull::new(
+            unsafe { cbm_pkgmap_tracked_calloc(size) }.cast::<T>(),
+        )?;
+        // The tracked allocator provides storage aligned for the binding rows.
+        for index in 0..len {
+            unsafe { values.as_ptr().add(index).write(value) };
+        }
+        Some(Self { values, len })
+    }
+
+    fn as_mut_slice(&mut self) -> &mut [T] {
+        unsafe { std::slice::from_raw_parts_mut(self.values.as_ptr(), self.len) }
+    }
+
+    fn into_raw(self) -> *mut T {
+        ManuallyDrop::new(self).values.as_ptr()
+    }
+}
+
+impl<T> Drop for BindingScratch<T> {
+    fn drop(&mut self) {
+        unsafe { cbm_pkgmap_tracked_free(self.values.as_ptr().cast()) };
+    }
+}
+
 fn binding_snapshot(
     graph: &Buffer,
     file_id: i64,
     imports: &[Import],
     json: &[u8],
-) -> Option<Vec<*const c_char>> {
+) -> Option<BindingScratch<*const c_char>> {
     if !json.starts_with(COMPLETE) {
         return None;
     }
@@ -307,14 +343,18 @@ fn binding_snapshot(
         return None;
     }
     let edges = graph.imports(file_id)?;
-    let mut targets = Vec::with_capacity(imports.len());
-    for (entry, import) in manifest.zip(imports) {
+    let mut snapshot = BindingScratch::new(imports.len(), null())?;
+    let targets = snapshot.as_mut_slice();
+    let mut seen_scratch: BindingScratch<c_int> =
+        BindingScratch::new(imports.len(), 0)?;
+    let seen = seen_scratch.as_mut_slice();
+    for ((entry, import), slot) in manifest.zip(imports).zip(targets.iter_mut())
+    {
         if !same_binding(entry, import) {
             return None;
         }
         let target = entry.get(TARGET);
         if target.is_null() {
-            targets.push(null());
             continue;
         }
         let node = graph.qn(target.string()?)?;
@@ -324,10 +364,9 @@ fn binding_snapshot(
         {
             return None;
         }
-        targets.push(node.qualified_name);
+        *slot = node.qualified_name;
     }
 
-    let mut seen = vec![false; targets.len()];
     for &edge in edges {
         let edge = unsafe { edge.as_ref()? };
         let target = graph.id(edge.target)?.qn()?;
@@ -351,16 +390,16 @@ fn binding_snapshot(
                 },
             );
             let (index, _) = matching.next()?;
-            if matching.next().is_some() || seen[index] {
+            if matching.next().is_some() || seen[index] != 0 {
                 return None;
             }
-            seen[index] = true;
+            seen[index] = 1;
         }
     }
-    seen.into_iter()
-        .zip(&targets)
-        .all(|(seen, qn)| seen != qn.is_null())
-        .then_some(targets)
+    seen.iter()
+        .zip(targets)
+        .all(|(seen, qn)| (*seen != 0) != qn.is_null())
+        .then_some(snapshot)
 }
 
 #[repr(C)]
@@ -439,23 +478,11 @@ pub(crate) unsafe extern "C" fn cbm_pipeline_php_vendor_names_build(
     else {
         return;
     };
-    let Some(size) = targets
-        .len()
-        .max(1)
-        .checked_mul(std::mem::size_of::<*const c_char>())
-    else {
-        return;
-    };
-    let saved =
-        unsafe { cbm_pkgmap_tracked_calloc(size) }.cast::<*const c_char>();
-    if !saved.is_null() {
-        unsafe {
-            saved.copy_from_nonoverlapping(targets.as_ptr(), targets.len());
-            out.write(VendorNames {
-                imports,
-                targets: saved,
-            });
-        }
+    unsafe {
+        out.write(VendorNames {
+            imports,
+            targets: targets.into_raw(),
+        });
     }
 }
 
@@ -478,11 +505,6 @@ pub(crate) unsafe extern "C" fn cbm_pipeline_php_vendor_bound(
         .is_some_and(|(names, name)| names.contains(name, Some(CLASS)))
 }
 
-struct Target {
-    id: i64,
-    qn: *const c_char,
-}
-
 fn write_bindings(
     res: &Resolution<'_>,
     file_id: i64,
@@ -491,6 +513,8 @@ fn write_bindings(
     map: Option<&HashTable>,
     written: &mut c_int,
 ) -> Option<Text> {
+    let mut target_scratch = BindingScratch::new(imports.len(), null::<Node>())?;
+    let targets = target_scratch.as_mut_slice();
     let doc = Writer::new()?;
     let root = doc.object()?;
     let manifest = doc.array()?;
@@ -514,29 +538,26 @@ fn write_bindings(
         .modules
         .source
         .map_or(Language::Other, |path| language(leaf(path.to_bytes())));
-    let mut targets = Vec::with_capacity(imports.len());
     let mut complete = true;
-    for import in imports {
+    for (import, slot) in imports.iter().zip(targets.iter_mut()) {
         let target =
             import_node(res, import, map).filter(|node| node.id != file_id);
         if target.is_none() && !known_absent(res, lang, import, map) {
             complete = false;
         }
         doc.append(manifest, binding(&doc, import, target.and_then(Node::qn))?)?;
-        targets.push(target.map(|node| Target {
-            id: node.id,
-            qn: node.qualified_name,
-        }));
+        *slot = target.map_or(null(), std::ptr::from_ref);
     }
 
     let matches = |index: usize, id, name| {
-        targets[index]
-            .as_ref()
-            .is_some_and(|target| target.id == id)
+        // Edge insertion keeps the target node addresses stable.
+        unsafe { targets[index].as_ref() }.is_some_and(|target| target.id == id)
             && imports[index].local() == Some(name)
     };
     for (index, target) in targets.iter().enumerate() {
-        let Some(target) = target else { continue };
+        let Some(target) = (unsafe { target.as_ref() }) else {
+            continue;
+        };
         let local = imports[index].local().filter(|local| !local.is_empty())?;
         if (0..index).any(|prior| matches(prior, target.id, local)) {
             continue;
@@ -547,7 +568,7 @@ fn write_bindings(
         doc.put(edge, BINDINGS.to_bytes(), rows)?;
         for other in index..targets.len() {
             if matches(other, target.id, local) {
-                let qn = unsafe { c_bytes(targets[other].as_ref()?.qn) };
+                let qn = unsafe { targets[other].as_ref() }?.qn();
                 doc.append(rows, binding(&doc, &imports[other], qn)?)?;
             }
         }
