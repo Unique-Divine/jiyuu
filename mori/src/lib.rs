@@ -109,11 +109,11 @@ mod terraform;
 #[path = "cli/test_impact_cli.rs"]
 mod test_impact_cli;
 #[cfg(feature = "native-engine-abi")]
-#[path = "mcp/test_impact_git.rs"]
-mod test_impact_git;
-#[cfg(feature = "native-engine-abi")]
 #[path = "mcp/test_impact_engine_reach/mod.rs"]
 mod test_impact_engine_reach;
+#[cfg(feature = "native-engine-abi")]
+#[path = "mcp/test_impact_git.rs"]
+mod test_impact_git;
 
 #[cfg(any(feature = "native-engine-abi", test))]
 #[path = "cli/config_cli/mod.rs"]
