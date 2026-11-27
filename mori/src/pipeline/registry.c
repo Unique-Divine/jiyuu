@@ -101,9 +101,22 @@ typedef struct {
 
 typedef struct {
     uint64_t defaults;
+    const char *selector;
     uint8_t count;
-    char selector[];
 } swift_signature_t;
+typedef struct cbm_rust_swift_signature_index cbm_rust_swift_signature_index_t;
+
+/* The exact map owns QNs. Rust owns selectors and overload buckets until
+ * the next signature update or until the registry is freed. */
+extern void cbm_rust_swift_signature_set(cbm_rust_swift_signature_index_t **index,
+                                        const char *canonical_qn, size_t base_len,
+                                        uint64_t defaults, uint8_t count, const char *selector);
+extern swift_signature_t
+cbm_rust_swift_signature_get(const cbm_rust_swift_signature_index_t *index, const char *canonical_qn);
+extern const char *const *cbm_rust_swift_overloads(const cbm_rust_swift_signature_index_t *index,
+                                                  const char *base, size_t *count);
+extern void cbm_rust_swift_signature_free(cbm_rust_swift_signature_index_t *index);
+
 typedef struct swift_owner swift_owner_t;
 struct swift_owner {
     const char *qn;
@@ -147,8 +160,7 @@ struct cbm_registry {
 
     /* byName: simpleName → qn_array_t* (heap-owned) */
     CBMHashTable *by_name;
-    CBMHashTable *swift_signatures; /* borrowed exact-map keys; owned values */
-    CBMHashTable *swift_overloads;  /* base callable QN -> overloads */
+    cbm_rust_swift_signature_index_t *swift_signatures;
     swift_owners_t *swift_owners;
 };
 
@@ -1651,20 +1663,6 @@ static void free_qn_array(const char *key, void *value, void *ud) {
     free((void *)key);
 }
 
-static void free_swift_signature(const char *key, void *value, void *ud) {
-    (void)key;
-    (void)ud;
-    cbm_free(CBM_MEM_CLASS_OTHER, value);
-}
-
-static void free_swift_overloads(const char *key, void *value, void *ud) {
-    (void)ud;
-    qn_array_t *overloads = value;
-    cbm_da_free(overloads);
-    cbm_free(CBM_MEM_CLASS_OTHER, overloads);
-    cbm_free(CBM_MEM_CLASS_OTHER, (void *)key);
-}
-
 static void swift_owners_free(swift_owners_t *index) {
     if (!index) {
         return;
@@ -1688,15 +1686,8 @@ void cbm_registry_free(cbm_registry_t *r) {
     /* by_name first: its items borrow exact's keys. */
     cbm_ht_foreach(r->by_name, free_qn_array, NULL);
     cbm_ht_free(r->by_name);
-    if (r->swift_signatures) {
-        cbm_ht_foreach(r->swift_signatures, free_swift_signature, NULL);
-        cbm_ht_free(r->swift_signatures);
-    }
-    if (r->swift_overloads) {
-        cbm_ht_foreach(r->swift_overloads, free_swift_overloads, NULL);
-        cbm_ht_free(r->swift_overloads);
-    }
     swift_owners_free(r->swift_owners);
+    cbm_rust_swift_signature_free(r->swift_signatures);
     cbm_ht_foreach(r->exact, free_label, NULL);
     cbm_ht_free(r->exact);
     for (int i = 0; i < r->label_pool_n; i++) {
@@ -1924,67 +1915,18 @@ void cbm_registry_add_lang_in_module(cbm_registry_t *r, const char *name,
     }
 }
 
-static void swift_index_overload(cbm_registry_t *r, const char *qn, const char *owned) {
-    if (!r->swift_overloads) {
-        r->swift_overloads = cbm_ht_create(CBM_SZ_512);
-    }
-    if (!r->swift_overloads) {
-        return;
-    }
-    size_t base_len = cbm_qn_callable_base_len(qn);
-    char *base = cbm_alloc(CBM_MEM_CLASS_OTHER, base_len + SKIP_ONE);
-    if (!base) {
-        return;
-    }
-    memcpy(base, qn, base_len);
-    base[base_len] = '\0';
-    qn_array_t *overloads = cbm_ht_get(r->swift_overloads, base);
-    if (!overloads) {
-        overloads = cbm_calloc(CBM_MEM_CLASS_OTHER, sizeof(*overloads));
-        if (!overloads) {
-            cbm_free(CBM_MEM_CLASS_OTHER, base);
-            return;
-        }
-        cbm_ht_set(r->swift_overloads, base, overloads);
-    } else {
-        cbm_free(CBM_MEM_CLASS_OTHER, base);
-    }
-    for (int i = 0; i < overloads->count; i++) {
-        if (overloads->items[i] == owned) {
-            return;
-        }
-    }
-    cbm_da_push(overloads, (char *)owned);
-}
-
 void cbm_registry_set_swift_signature(cbm_registry_t *r, const char *qualified_name,
                                       uint64_t default_mask, uint8_t param_count,
                                       const char *selector) {
     if (!r || !qualified_name) {
         return;
     }
-    const char *owned = cbm_ht_get_key(r->exact, qualified_name);
-    if (!owned) {
-        return;
+    const char *canonical = cbm_ht_get_key(r->exact, qualified_name);
+    if (canonical) {
+        cbm_rust_swift_signature_set(&r->swift_signatures, canonical,
+                                     cbm_qn_callable_base_len(canonical), default_mask, param_count,
+                                     selector);
     }
-    if (!r->swift_signatures) {
-        r->swift_signatures = cbm_ht_create(CBM_SZ_512);
-        if (!r->swift_signatures) {
-            return;
-        }
-    }
-    const char *text =
-        selector ? selector : qualified_name + cbm_qn_callable_base_len(qualified_name);
-    swift_signature_t *sig = cbm_alloc(CBM_MEM_CLASS_OTHER, sizeof(*sig) + strlen(text) + SKIP_ONE);
-    if (!sig) {
-        return;
-    }
-    sig->defaults = default_mask;
-    sig->count = param_count;
-    memcpy(sig->selector, text, strlen(text) + SKIP_ONE);
-    cbm_free(CBM_MEM_CLASS_OTHER, cbm_ht_get(r->swift_signatures, owned));
-    cbm_ht_set(r->swift_signatures, owned, sig);
-    swift_index_overload(r, qualified_name, owned);
 }
 
 /* A generated member (a Java record's implicit accessor) is a definition the
@@ -3670,17 +3612,15 @@ static int swift_owner_bucket(const cbm_registry_t *r, const CBMCall *call, cons
     if (n < 0 || (size_t)n >= sizeof(base)) {
         return SWIFT_INCOMPATIBLE;
     }
-    const qn_array_t *bucket = r->swift_overloads ? cbm_ht_get(r->swift_overloads, base) : NULL;
-    if (!bucket) {
-        return found;
-    }
-    for (int i = 0; i < bucket->count; i++) {
-        swift_signature_t *meta = cbm_ht_get(r->swift_signatures, bucket->items[i]);
-        if (meta && swift_signature_matches(meta, call)) {
+    size_t count = 0;
+    const char *const *bucket = cbm_rust_swift_overloads(r->swift_signatures, base, &count);
+    for (size_t i = 0; i < count; i++) {
+        swift_signature_t meta = cbm_rust_swift_signature_get(r->swift_signatures, bucket[i]);
+        if (meta.selector && swift_signature_matches(&meta, call)) {
             if (found == out_cap) {
                 return SWIFT_INCOMPATIBLE;
             }
-            out[found++] = bucket->items[i];
+            out[found++] = bucket[i];
         }
     }
     return found;
@@ -3791,8 +3731,12 @@ static void swift_owner_index_add(swift_owners_t *index, swift_owner_t *type) {
 }
 
 static void swift_return_type_collect(const cbm_gbuf_node_t *node, swift_owners_t *index) {
-    const char *key = cbm_ht_get_key(index->registry->swift_signatures, node->qualified_name);
-    if (!key || !node->properties_json) {
+    if (!node->properties_json) {
+        return;
+    }
+    const cbm_registry_t *r = index->registry;
+    const char *key = cbm_ht_get_key(r->exact, node->qualified_name);
+    if (!key || !cbm_rust_swift_signature_get(r->swift_signatures, key).selector) {
         return;
     }
     yyjson_doc *doc = yyjson_read(node->properties_json, strlen(node->properties_json), 0);
@@ -4306,10 +4250,10 @@ int cbm_registry_swift_candidates(const cbm_registry_t *r, const CBMCall *call,
     bool has_swift = false;
     for (int i = 0; i < bucket->count; i++) {
         const char *qn = bucket->items[i];
-        swift_signature_t *meta = cbm_ht_get(r->swift_signatures, qn);
-        has_swift = has_swift || meta != NULL;
-        if (meta && receiver_chain_admits(call->callee_name, qn, CBM_LANG_SWIFT) &&
-            swift_signature_matches(meta, call)) {
+        swift_signature_t meta = cbm_rust_swift_signature_get(r->swift_signatures, qn);
+        has_swift = has_swift || meta.selector != NULL;
+        if (meta.selector && receiver_chain_admits(call->callee_name, qn, CBM_LANG_SWIFT) &&
+            swift_signature_matches(&meta, call)) {
             match_test[matched] = bucket_test[i];
             matches[matched++] = qn;
         }
@@ -4588,8 +4532,9 @@ static const CBMCall *swift_inner_call(const CBMFileResult *file, const CBMCall 
 }
 
 static const char *swift_chain_return_spelling(const cbm_registry_t *r, const char *qn) {
-    const swift_signature_t *sig = cbm_ht_get(r->swift_signatures, qn);
-    const char *signature = sig ? sig->selector : qn;
+    const char *key = cbm_ht_get_key(r->exact, qn);
+    swift_signature_t sig = cbm_rust_swift_signature_get(r->swift_signatures, key);
+    const char *signature = sig.selector ? sig.selector : qn;
     size_t offset = cbm_callable_return_offset(signature);
     if (!signature[offset]) {
         signature = qn;

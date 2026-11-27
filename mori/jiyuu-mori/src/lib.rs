@@ -61,6 +61,8 @@ mod similarity;
 mod snippet_window;
 #[cfg(any(feature = "native-engine-abi", test))]
 mod swift_package_map;
+#[cfg(any(feature = "native-engine-abi", test))]
+mod swift_signature_index;
 #[cfg(feature = "native-engine-abi")]
 mod terraform;
 #[cfg(feature = "native-engine-abi")]
