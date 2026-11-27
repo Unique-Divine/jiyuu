@@ -143,6 +143,8 @@ jobs:
             - justfile
             jiyuu_mori:
             - mori/jiyuu-mori/**
+            - mori/src/**/*.rs
+            - mori/internal/cbm/**/*.rs
             - Cargo.toml
             - Cargo.lock
             - .cargo/**

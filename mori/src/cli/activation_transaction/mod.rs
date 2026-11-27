@@ -5,13 +5,13 @@ use std::fs::File;
 use std::io::{self, Read, Write};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-#[path = "activation_transaction/ffi.rs"]
+#[path = "ffi.rs"]
 mod ffi;
 #[cfg(unix)]
-#[path = "activation_transaction/unix.rs"]
+#[path = "unix.rs"]
 mod platform;
 #[cfg(windows)]
-#[path = "activation_transaction/windows.rs"]
+#[path = "windows.rs"]
 mod platform;
 
 use platform::{Directory, Identity};

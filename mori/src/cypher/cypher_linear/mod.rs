@@ -12,19 +12,19 @@ use std::time::{Duration, Instant};
 use rusqlite::types::ValueRef;
 use rusqlite::{Connection, Row, Statement, params};
 
-#[path = "cypher_linear/predicates.rs"]
+#[path = "predicates.rs"]
 mod predicates;
 
-#[path = "cypher_linear/rows.rs"]
+#[path = "rows.rs"]
 mod rows;
 
-#[path = "cypher_linear/with_clause.rs"]
+#[path = "with_clause.rs"]
 mod with_clause;
 
-#[path = "cypher_linear/ordered_count.rs"]
+#[path = "ordered_count.rs"]
 mod ordered_count;
 
-#[path = "cypher_linear/paths.rs"]
+#[path = "paths.rs"]
 mod paths;
 
 use ordered_count::OrderedCount;

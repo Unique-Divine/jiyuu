@@ -172,7 +172,7 @@ echo ""
 echo "--- B. HTTP server binding check ---"
 
 # Require both source files so a path change cannot silently skip the audit.
-HTTP_TRANSPORT="$ROOT/jiyuu-mori/src/ui/http_transport.rs"
+HTTP_TRANSPORT="$ROOT/src/ui/http_transport.rs"
 HTTP_SERVER="$ROOT/src/ui/http_server.c"
 for f in "$HTTP_TRANSPORT" "$HTTP_SERVER"; do
     if [[ ! -f "$f" ]]; then
