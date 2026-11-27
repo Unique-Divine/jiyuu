@@ -38,6 +38,7 @@ impl Drop for Scratch {
 struct Edge {
     caller: String,
     target: String,
+    target_qn: String,
     properties: Value,
 }
 
@@ -105,21 +106,22 @@ fn index(
     )
     .unwrap();
     db.prepare(
-        "SELECT caller.name, target.file_path, edge.properties
+        "SELECT caller.name, target.file_path, target.qualified_name, edge.properties
          FROM edges edge
          JOIN nodes caller ON caller.id = edge.source_id
          JOIN nodes target ON target.id = edge.target_id
          WHERE edge.type = 'CALLS'
            AND caller.name IN ('LocalUse', 'CrossUse')
            AND target.name = 'Mark'
-         ORDER BY 1, 2",
+         ORDER BY 1, 2, 3",
     )
     .unwrap()
     .query_map([], |row| {
-        let properties = row.get::<_, String>(2)?;
+        let properties = row.get::<_, String>(3)?;
         Ok(Edge {
             caller: row.get(0)?,
             target: row.get(1)?,
+            target_qn: row.get(2)?,
             properties: serde_json::from_str(&properties).unwrap(),
         })
     })
@@ -206,5 +208,73 @@ func CrossUse(value *api.External) int { return value.Mark() }
                 .is_some_and(|strategy| strategy.starts_with("lsp_")),
             "{edge:?}",
         );
+    }
+}
+
+#[test]
+fn explicit_and_inferred_uses_keep_typed_method_edges() {
+    let scratch = Scratch::new();
+    let repo = scratch.0.join("generic");
+    fs::create_dir(&repo).unwrap();
+    fs::write(
+        repo.join("go.mod"),
+        "module example.net/generic\n\ngo 1.22\n",
+    )
+    .unwrap();
+    fs::write(
+        repo.join("generic.go"),
+        r#"package generic
+
+type User struct{}
+func (User) Mark() int { return 1 }
+type Result struct{}
+func (Result) Mark() int { return 2 }
+
+func Filter[T any](s []T, pred func(T) bool) []T { return nil }
+func Transform[T any, R any](input T, f func(T) R) R { return f(input) }
+
+func LocalUse() {
+    var users []User
+    result := Filter(users, func(u User) bool { return true })
+    for _, item := range result {
+        item.Mark()
+    }
+}
+
+func CrossUse() {
+    var users []User
+    result := Transform[User, Result](users[0], func(u User) Result {
+        return Result{}
+    })
+    result.Mark()
+}
+"#,
+    )
+    .unwrap();
+
+    let candidate = Path::new(env!("CARGO_BIN_EXE_mori"));
+    let edges = index(
+        candidate,
+        &scratch.0.join("candidate"),
+        &repo,
+        "1",
+        Some("sequential"),
+    );
+    if let Some(reference) = support::c_reference_bin() {
+        let expected =
+            index(&reference, &scratch.0.join("reference"), &repo, "1", None);
+        assert_eq!(edges, expected);
+    }
+    assert_eq!(edges.len(), 2, "{edges:?}");
+    for (edge, (caller, receiver)) in edges
+        .iter()
+        .zip([("CrossUse", "Result"), ("LocalUse", "User")])
+    {
+        assert_eq!(edge.caller, caller);
+        assert!(
+            edge.target_qn.ends_with(&format!(".{receiver}.Mark")),
+            "{edge:?}"
+        );
+        assert_eq!(edge.properties["strategy"], "lsp_type_dispatch", "{edge:?}");
     }
 }

@@ -95,34 +95,7 @@ static const char *resolve_import(GoLSPContext *ctx, const char *local_name) {
     return i >= 0 ? ctx->import_package_qns[i] : NULL;
 }
 
-// --- Helper: check if name is a Go builtin ---
-
-static bool is_go_builtin_func(const char *name) {
-    static const char *builtins[] = {"make",   "new",     "append",  "len",   "cap",
-                                     "delete", "close",   "copy",    "panic", "recover",
-                                     "print",  "println", "complex", "real",  "imag",
-                                     "min",    "max",     "clear",   NULL};
-    for (const char **b = builtins; *b; b++) {
-        if (strcmp(name, *b) == 0)
-            return true;
-    }
-    return false;
-}
-
-// --- Helper: check if name is a Go builtin type ---
-
-static const CBMType *resolve_builtin_type(GoLSPContext *ctx, const char *name) {
-    static const char *builtin_types[] = {
-        "int",    "int8",   "int16",   "int32",   "int64",     "uint",       "uint8",  "uint16",
-        "uint32", "uint64", "float32", "float64", "complex64", "complex128", "string", "bool",
-        "byte",   "rune",   "error",   "uintptr", "any",       NULL};
-    for (const char **b = builtin_types; *b; b++) {
-        if (strcmp(name, *b) == 0) {
-            return cbm_type_builtin(ctx->arena, name);
-        }
-    }
-    return NULL;
-}
+extern bool mori_go_is_builtin(const char *name);
 
 // --- go_parse_type_node: AST type node -> CBMType ---
 
@@ -233,654 +206,148 @@ const CBMType *go_parse_type_node(GoLSPContext *ctx, TSNode node) {
                               go_type_make);
 }
 
-// --- Implicit generics: type unification ---
+/* The Rust evaluator reads a prefix of the native type and function records. */
+_Static_assert(sizeof(CBMTypeKind) == sizeof(uint32_t), "Go evaluator type kind width");
+_Static_assert(CBM_TYPE_UNKNOWN == 0 && CBM_TYPE_NAMED == 1 && CBM_TYPE_POINTER == 2 &&
+                   CBM_TYPE_SLICE == 3 && CBM_TYPE_MAP == 4 && CBM_TYPE_CHANNEL == 5 &&
+                   CBM_TYPE_FUNC == 6 && CBM_TYPE_TYPE_PARAM == 11,
+               "Go evaluator type tags");
+_Static_assert(offsetof(CBMType, data) == sizeof(void *), "Go evaluator type payload");
+_Static_assert(offsetof(CBMType, data.func.return_types) == 3 * sizeof(void *),
+               "Go evaluator signature return types");
+_Static_assert(offsetof(CBMRegisteredFunc, signature) == 3 * sizeof(void *),
+               "Go evaluator function signature");
+_Static_assert(offsetof(CBMRegisteredFunc, type_param_names) == 4 * sizeof(void *),
+               "Go evaluator function type parameters");
 
-// Unify a parameter type pattern (containing TYPE_PARAM) against a concrete argument type.
-// Fills inferred[i] with the concrete type bound to type_param_names[i].
-static void go_unify_type(const CBMType *param_type, const CBMType *arg_type,
-                          const char **type_param_names, const CBMType **inferred,
-                          int param_count) {
-    if (!param_type || !arg_type || cbm_type_is_unknown(arg_type))
-        return;
+typedef struct {
+    bool (*scope_lookup)(GoLSPContext *, const char *, const CBMType **);
+    const char *(*import)(GoLSPContext *, const char *);
+    const CBMType *(*field)(GoLSPContext *, const char *, const char *);
+    const CBMRegisteredFunc *(*method)(GoLSPContext *, const char *, const char *);
+    const CBMType *(*parse_type)(GoLSPContext *, const TSNode *);
+    CBMScope *(*push_scope)(GoLSPContext *);
+    void (*pop_scope)(GoLSPContext *, CBMScope *);
+    void (*bind)(GoLSPContext *, const char *, const CBMType *);
+    void (*walk)(GoLSPContext *, const TSNode *);
+} GoEvalOps;
 
-    if (param_type->kind == CBM_TYPE_TYPE_PARAM) {
-        for (int i = 0; i < param_count; i++) {
-            if (strcmp(param_type->data.type_param.name, type_param_names[i]) == 0) {
-                if (!inferred[i])
-                    inferred[i] = arg_type;
-                break;
-            }
-        }
-        return;
-    }
+typedef struct {
+    TSNode root;
+    const unsigned char *source;
+    size_t source_len;
+    const char *package;
+    CBMArena *arena;
+    const CBMTypeRegistry *registry;
+    GoLSPContext *context;
+    const GoEvalOps *operations;
+    size_t depth_limit;
+} GoEvalInput;
 
-    // Structural matching — recurse into composite types
-    if (param_type->kind == CBM_TYPE_SLICE && arg_type->kind == CBM_TYPE_SLICE) {
-        go_unify_type(param_type->data.slice.elem, arg_type->data.slice.elem, type_param_names,
-                      inferred, param_count);
-    }
-    if (param_type->kind == CBM_TYPE_POINTER && arg_type->kind == CBM_TYPE_POINTER) {
-        go_unify_type(param_type->data.pointer.elem, arg_type->data.pointer.elem, type_param_names,
-                      inferred, param_count);
-    }
-    if (param_type->kind == CBM_TYPE_MAP && arg_type->kind == CBM_TYPE_MAP) {
-        go_unify_type(param_type->data.map.key, arg_type->data.map.key, type_param_names, inferred,
-                      param_count);
-        go_unify_type(param_type->data.map.value, arg_type->data.map.value, type_param_names,
-                      inferred, param_count);
-    }
-    if (param_type->kind == CBM_TYPE_CHANNEL && arg_type->kind == CBM_TYPE_CHANNEL) {
-        go_unify_type(param_type->data.channel.elem, arg_type->data.channel.elem, type_param_names,
-                      inferred, param_count);
-    }
-    if (param_type->kind == CBM_TYPE_FUNC && arg_type->kind == CBM_TYPE_FUNC) {
-        // Match param types
-        if (param_type->data.func.param_types && arg_type->data.func.param_types) {
-            for (int i = 0;
-                 param_type->data.func.param_types[i] && arg_type->data.func.param_types[i]; i++) {
-                go_unify_type(param_type->data.func.param_types[i],
-                              arg_type->data.func.param_types[i], type_param_names, inferred,
-                              param_count);
-            }
-        }
-        // Match return types
-        if (param_type->data.func.return_types && arg_type->data.func.return_types) {
-            for (int i = 0;
-                 param_type->data.func.return_types[i] && arg_type->data.func.return_types[i];
-                 i++) {
-                go_unify_type(param_type->data.func.return_types[i],
-                              arg_type->data.func.return_types[i], type_param_names, inferred,
-                              param_count);
-            }
-        }
-    }
+extern const CBMType *mori_go_eval_expr(const GoEvalInput *input);
+
+static bool go_eval_scope_lookup(GoLSPContext *ctx, const char *name, const CBMType **out) {
+    const CBMVarBinding *binding = cbm_scope_lookup_binding(ctx->current_scope, name);
+    if (!binding)
+        return false;
+    *out = binding->type;
+    return true;
 }
 
-// --- go_eval_expr_type: recursive expression type evaluator ---
+static const CBMType *go_eval_field(GoLSPContext *ctx, const char *type, const char *field) {
+    return go_lookup_field(ctx, type, field, 0);
+}
+
+static const CBMType *go_eval_parse_type(GoLSPContext *ctx, const TSNode *node) {
+    cbm_ffi_ts_node_written(node);
+    return go_parse_type_node(ctx, *node);
+}
+
+static CBMScope *go_eval_push_scope(GoLSPContext *ctx) {
+    CBMScope *parent = ctx->current_scope;
+    ctx->current_scope = cbm_scope_push(ctx->arena, parent);
+    return parent;
+}
+
+static void go_eval_pop_scope(GoLSPContext *ctx, CBMScope *parent) {
+    ctx->current_scope = parent;
+}
+
+static void go_eval_bind(GoLSPContext *ctx, const char *name, const CBMType *type) {
+    cbm_scope_bind(ctx->current_scope, name, type);
+}
+
+static void go_eval_walk(GoLSPContext *ctx, const TSNode *node) {
+    cbm_ffi_ts_node_written(node);
+    resolve_calls_in_node(ctx, *node);
+}
 
 const CBMType *go_eval_expr_type(GoLSPContext *ctx, TSNode node) {
-    if (ts_node_is_null(node))
+    if (ts_node_is_null(node) || !ctx->source || ctx->source_len < 0 || !ctx->package_qn)
         return cbm_type_unknown();
-
-    const char *kind = ts_node_type(node);
-
-    // --- Identifier: scope lookup ---
-    if (strcmp(kind, "identifier") == 0) {
-        char *name = lsp_node_text(ctx, node);
-        if (!name)
-            return cbm_type_unknown();
-
-        // Check scope first
-        const CBMType *t = cbm_scope_lookup(ctx->current_scope, name);
-        if (cbm_scope_contains(ctx->current_scope, name))
-            return t ? t : cbm_type_unknown();
-
-        // Check if it's a package-level function
-        const CBMRegisteredFunc *f =
-            cbm_registry_lookup_symbol(ctx->registry, ctx->package_qn, name);
-        if (f && f->signature)
-            return f->signature;
-
-        // Check if it's a builtin type (for type conversions like string(x), int(x))
-        const CBMType *bt = resolve_builtin_type(ctx, name);
-        if (bt)
-            return cbm_type_named(ctx->arena, name);
-
-        // Check if it's a registered type (for type conversions like MyType(x))
-        const char *type_qn = cbm_arena_sprintf(ctx->arena, "%s.%s", ctx->package_qn, name);
-        const CBMRegisteredType *rt = cbm_registry_lookup_type(ctx->registry, type_qn);
-        if (rt)
-            return cbm_type_named(ctx->arena, type_qn);
-
-        return cbm_type_unknown();
-    }
-
-    // --- Selector expression: a.B ---
-    if (strcmp(kind, "selector_expression") == 0) {
-        TSNode operand = ts_node_child_by_field_name(node, "operand", 7);
-        TSNode field = ts_node_child_by_field_name(node, "field", 5);
-        if (ts_node_is_null(operand) || ts_node_is_null(field))
-            return cbm_type_unknown();
-
-        char *field_name = lsp_node_text(ctx, field);
-        if (!field_name)
-            return cbm_type_unknown();
-
-        // Check if operand is an import alias (pkg.Symbol)
-        if (strcmp(ts_node_type(operand), "identifier") == 0) {
-            char *pkg_name = lsp_node_text(ctx, operand);
-            if (pkg_name) {
-                const char *pkg_qn = resolve_import(ctx, pkg_name);
-                if (pkg_qn) {
-                    // Look up pkg.Symbol as a function or type
-                    const CBMRegisteredFunc *f =
-                        cbm_registry_lookup_symbol(ctx->registry, pkg_qn, field_name);
-                    if (f && f->signature)
-                        return f->signature;
-                    // Check if it's a type
-                    char *type_qn = cbm_arena_sprintf(ctx->arena, "%s.%s", pkg_qn, field_name);
-                    const CBMRegisteredType *rt = cbm_registry_lookup_type(ctx->registry, type_qn);
-                    if (rt)
-                        return cbm_type_named(ctx->arena, type_qn);
-                    return cbm_type_unknown();
-                }
-            }
-        }
-
-        // Evaluate operand type
-        const CBMType *recv_type = go_eval_expr_type(ctx, operand);
-        if (cbm_type_is_unknown(recv_type))
-            return cbm_type_unknown();
-
-        // Auto-deref pointers for method calls
-        const CBMType *base_type = recv_type;
-        if (base_type->kind == CBM_TYPE_POINTER) {
-            base_type = cbm_type_deref(base_type);
-        }
-
-        if (base_type->kind == CBM_TYPE_NAMED) {
-            const char *type_qn = base_type->data.named.qualified_name;
-
-            // Look up method/field (methods recurse through embeddings)
-            const CBMRegisteredFunc *method = go_lookup_field_or_method(ctx, type_qn, field_name);
-            if (method && method->signature)
-                return method->signature;
-
-            // Check struct fields (with embedded field promotion)
-            const CBMType *field_type = go_lookup_field(ctx, type_qn, field_name, 0);
-            if (field_type && !cbm_type_is_unknown(field_type))
-                return field_type;
-        }
-
-        return cbm_type_unknown();
-    }
-
-    // --- Call expression: f(...) ---
-    if (strcmp(kind, "call_expression") == 0) {
-        TSNode func_node = ts_node_child_by_field_name(node, "function", 8);
-        TSNode args_node = ts_node_child_by_field_name(node, "arguments", 9);
-        if (ts_node_is_null(func_node))
-            return cbm_type_unknown();
-
-        // Check for builtin calls
-        if (strcmp(ts_node_type(func_node), "identifier") == 0) {
-            char *name = lsp_node_text(ctx, func_node);
-            if (name && is_go_builtin_func(name)) {
-                return go_eval_builtin_call(ctx, name, args_node);
-            }
-        }
-
-        // Evaluate function type
-        const CBMType *func_type = go_eval_expr_type(ctx, func_node);
-
-        // If it's a FUNC type, return its return type
-        if (func_type && func_type->kind == CBM_TYPE_FUNC && func_type->data.func.return_types &&
-            func_type->data.func.return_types[0]) {
-
-            // Check for explicit type arguments: call_expression has type_arguments field
-            // Go tree-sitter: Func[T1, T2](args) → call_expression { function, type_arguments,
-            // arguments }
-            TSNode targs_node = ts_node_child_by_field_name(node, "type_arguments", 14);
-            if (!ts_node_is_null(targs_node)) {
-                // Look up the registered function to get type_param_names
-                const CBMRegisteredFunc *rfunc = NULL;
-                char *func_name = lsp_node_text(ctx, func_node);
-                if (func_name) {
-                    const char *func_qn =
-                        cbm_arena_sprintf(ctx->arena, "%s.%s", ctx->package_qn, func_name);
-                    rfunc = cbm_registry_lookup_func(ctx->registry, func_qn);
-                    // If not found as local, try via import (selector_expression: pkg.Func)
-                    if (!rfunc && strcmp(ts_node_type(func_node), "selector_expression") == 0) {
-                        TSNode operand = ts_node_child_by_field_name(func_node, "operand", 7);
-                        TSNode field = ts_node_child_by_field_name(func_node, "field", 5);
-                        if (!ts_node_is_null(operand) && !ts_node_is_null(field)) {
-                            char *pkg = lsp_node_text(ctx, operand);
-                            char *fn = lsp_node_text(ctx, field);
-                            if (pkg && fn) {
-                                const char *pkg_qn = resolve_import(ctx, pkg);
-                                if (pkg_qn) {
-                                    rfunc = cbm_registry_lookup_symbol(ctx->registry, pkg_qn, fn);
-                                }
-                            }
-                        }
-                    }
-                }
-
-                if (rfunc && rfunc->type_param_names) {
-                    // Parse type arguments from AST
-                    const CBMType *type_args[16];
-                    int targ_count = 0;
-                    uint32_t ta_nc = ts_node_child_count(targs_node);
-                    for (uint32_t ti = 0; ti < ta_nc && targ_count < 15; ti++) {
-                        TSNode targ = ts_node_child(targs_node, ti);
-                        if (ts_node_is_null(targ) || !ts_node_is_named(targ))
-                            continue;
-                        type_args[targ_count++] = go_parse_type_node(ctx, targ);
-                    }
-
-                    // Count type params
-                    int param_count = 0;
-                    while (rfunc->type_param_names[param_count])
-                        param_count++;
-
-                    if (targ_count > 0 && targ_count == param_count) {
-                        const CBMType **targ_arr = (const CBMType **)cbm_arena_alloc(
-                            ctx->arena, (targ_count + 1) * sizeof(const CBMType *));
-                        for (int ti = 0; ti < targ_count; ti++)
-                            targ_arr[ti] = type_args[ti];
-                        targ_arr[targ_count] = NULL;
-
-                        // Substitute type params in return type(s)
-                        int ret_count = 0;
-                        while (func_type->data.func.return_types[ret_count])
-                            ret_count++;
-
-                        if (ret_count == 1) {
-                            return cbm_type_substitute(ctx->arena,
-                                                       func_type->data.func.return_types[0],
-                                                       rfunc->type_param_names, targ_arr);
-                        }
-                        // Multi-return: substitute all
-                        const CBMType **new_rets = (const CBMType **)cbm_arena_alloc(
-                            ctx->arena, (ret_count + 1) * sizeof(const CBMType *));
-                        for (int ri = 0; ri < ret_count; ri++) {
-                            new_rets[ri] = cbm_type_substitute(
-                                ctx->arena, func_type->data.func.return_types[ri],
-                                rfunc->type_param_names, targ_arr);
-                        }
-                        new_rets[ret_count] = NULL;
-                        return cbm_type_tuple(ctx->arena, new_rets, ret_count);
-                    }
-                }
-            }
-
-            // Implicit generics: infer type args from argument types
-            if (ts_node_is_null(targs_node)) {
-                // Look up registered function to check for type_param_names
-                const CBMRegisteredFunc *rfunc = NULL;
-                char *func_name = lsp_node_text(ctx, func_node);
-                if (func_name) {
-                    const char *func_qn =
-                        cbm_arena_sprintf(ctx->arena, "%s.%s", ctx->package_qn, func_name);
-                    rfunc = cbm_registry_lookup_func(ctx->registry, func_qn);
-                    if (!rfunc && strcmp(ts_node_type(func_node), "selector_expression") == 0) {
-                        TSNode operand = ts_node_child_by_field_name(func_node, "operand", 7);
-                        TSNode field = ts_node_child_by_field_name(func_node, "field", 5);
-                        if (!ts_node_is_null(operand) && !ts_node_is_null(field)) {
-                            char *pkg = lsp_node_text(ctx, operand);
-                            char *fn = lsp_node_text(ctx, field);
-                            if (pkg && fn) {
-                                const char *pkg_qn = resolve_import(ctx, pkg);
-                                if (pkg_qn)
-                                    rfunc = cbm_registry_lookup_symbol(ctx->registry, pkg_qn, fn);
-                            }
-                        }
-                    }
-                }
-
-                if (rfunc && rfunc->type_param_names && func_type->data.func.param_types) {
-                    int tpc = 0;
-                    while (rfunc->type_param_names[tpc])
-                        tpc++;
-
-                    // Check if any return type uses a type param
-                    bool has_type_param = false;
-                    int ret_count = 0;
-                    while (func_type->data.func.return_types[ret_count])
-                        ret_count++;
-                    for (int ri = 0; ri < ret_count && !has_type_param; ri++) {
-                        // Quick check: walk return type tree for TYPE_PARAM nodes
-                        const CBMType *rt = func_type->data.func.return_types[ri];
-                        if (rt->kind == CBM_TYPE_TYPE_PARAM)
-                            has_type_param = true;
-                        else if (rt->kind == CBM_TYPE_SLICE && rt->data.slice.elem &&
-                                 rt->data.slice.elem->kind == CBM_TYPE_TYPE_PARAM)
-                            has_type_param = true;
-                        else if (rt->kind == CBM_TYPE_POINTER && rt->data.pointer.elem &&
-                                 rt->data.pointer.elem->kind == CBM_TYPE_TYPE_PARAM)
-                            has_type_param = true;
-                        else if (rt->kind == CBM_TYPE_MAP) {
-                            if (rt->data.map.key && rt->data.map.key->kind == CBM_TYPE_TYPE_PARAM)
-                                has_type_param = true;
-                            if (rt->data.map.value &&
-                                rt->data.map.value->kind == CBM_TYPE_TYPE_PARAM)
-                                has_type_param = true;
-                        }
-                    }
-
-                    if (has_type_param && tpc > 0 && tpc <= 16) {
-                        // Evaluate argument types and unify
-                        const CBMType *inferred[16] = {0};
-
-                        if (!ts_node_is_null(args_node)) {
-                            uint32_t argc = ts_node_named_child_count(args_node);
-                            int pi = 0;
-                            for (uint32_t ai = 0; ai < argc && func_type->data.func.param_types[pi];
-                                 ai++) {
-                                TSNode arg = ts_node_named_child(args_node, ai);
-                                if (ts_node_is_null(arg))
-                                    continue;
-                                const CBMType *arg_type = go_eval_expr_type(ctx, arg);
-                                go_unify_type(func_type->data.func.param_types[pi], arg_type,
-                                              rfunc->type_param_names, inferred, tpc);
-                                pi++;
-                            }
-                        }
-
-                        // Check if all type params were inferred
-                        bool all_inferred = true;
-                        for (int i = 0; i < tpc; i++) {
-                            if (!inferred[i]) {
-                                all_inferred = false;
-                                break;
-                            }
-                        }
-
-                        if (all_inferred) {
-                            const CBMType **targ_arr = (const CBMType **)cbm_arena_alloc(
-                                ctx->arena, (tpc + 1) * sizeof(const CBMType *));
-                            for (int i = 0; i < tpc; i++)
-                                targ_arr[i] = inferred[i];
-                            targ_arr[tpc] = NULL;
-
-                            if (ret_count == 1) {
-                                return cbm_type_substitute(ctx->arena,
-                                                           func_type->data.func.return_types[0],
-                                                           rfunc->type_param_names, targ_arr);
-                            }
-                            const CBMType **new_rets = (const CBMType **)cbm_arena_alloc(
-                                ctx->arena, (ret_count + 1) * sizeof(const CBMType *));
-                            for (int ri = 0; ri < ret_count; ri++) {
-                                new_rets[ri] = cbm_type_substitute(
-                                    ctx->arena, func_type->data.func.return_types[ri],
-                                    rfunc->type_param_names, targ_arr);
-                            }
-                            new_rets[ret_count] = NULL;
-                            return cbm_type_tuple(ctx->arena, new_rets, ret_count);
-                        }
-                    }
-                }
-            }
-
-            // No type arguments or no substitution needed — return as-is
-            if (!func_type->data.func.return_types[1]) {
-                return func_type->data.func.return_types[0];
-            }
-            int count = 0;
-            while (func_type->data.func.return_types[count])
-                count++;
-            if (count > 1) {
-                return cbm_type_tuple(ctx->arena, func_type->data.func.return_types, count);
-            }
-        }
-
-        // Type conversion: Type(expr) — if func_node resolves to a named type
-        if (func_type && func_type->kind == CBM_TYPE_NAMED) {
-            return func_type;
-        }
-
-        // Type conversion with composite type syntax: []byte(s), map[K]V(x), etc.
-        // The function node is a type node (slice_type, map_type, etc.)
-        {
-            const char *fk = ts_node_type(func_node);
-            if (strcmp(fk, "slice_type") == 0 || strcmp(fk, "array_type") == 0 ||
-                strcmp(fk, "map_type") == 0 || strcmp(fk, "pointer_type") == 0 ||
-                strcmp(fk, "channel_type") == 0) {
-                return go_parse_type_node(ctx, func_node);
-            }
-        }
-
-        return cbm_type_unknown();
-    }
-
-    // --- Composite literal: Type{...} ---
-    if (strcmp(kind, "composite_literal") == 0) {
-        TSNode type_node = ts_node_child_by_field_name(node, "type", 4);
-        if (!ts_node_is_null(type_node)) {
-            return go_parse_type_node(ctx, type_node);
-        }
-        return cbm_type_unknown();
-    }
-
-    // --- Unary expression: &x, *x, <-ch, !x ---
-    if (strcmp(kind, "unary_expression") == 0) {
-        TSNode operand = ts_node_child_by_field_name(node, "operand", 7);
-        if (ts_node_is_null(operand))
-            return cbm_type_unknown();
-
-        // Get operator
-        for (uint32_t i = 0; i < ts_node_child_count(node); i++) {
-            TSNode child = ts_node_child(node, i);
-            if (!ts_node_is_named(child)) {
-                char *op = lsp_node_text(ctx, child);
-                if (!op)
-                    continue;
-                if (strcmp(op, "&") == 0) {
-                    return cbm_type_pointer(ctx->arena, go_eval_expr_type(ctx, operand));
-                }
-                if (strcmp(op, "*") == 0) {
-                    return cbm_type_deref(go_eval_expr_type(ctx, operand));
-                }
-                if (strcmp(op, "<-") == 0) {
-                    const CBMType *ch_type = go_eval_expr_type(ctx, operand);
-                    if (ch_type && ch_type->kind == CBM_TYPE_CHANNEL) {
-                        return ch_type->data.channel.elem;
-                    }
-                    return cbm_type_unknown();
-                }
-                if (strcmp(op, "!") == 0) {
-                    return cbm_type_builtin(ctx->arena, "bool");
-                }
-                break;
-            }
-        }
-        return cbm_type_unknown();
-    }
-
-    // --- Index expression: a[i] ---
-    if (strcmp(kind, "index_expression") == 0) {
-        TSNode operand = ts_node_child_by_field_name(node, "operand", 7);
-        if (ts_node_is_null(operand))
-            return cbm_type_unknown();
-        const CBMType *op_type = go_eval_expr_type(ctx, operand);
-        if (!op_type)
-            return cbm_type_unknown();
-        if (op_type->kind == CBM_TYPE_MAP)
-            return op_type->data.map.value;
-        if (op_type->kind == CBM_TYPE_SLICE)
-            return op_type->data.slice.elem;
-        return cbm_type_unknown();
-    }
-
-    // --- Type assertion: x.(Type) ---
-    if (strcmp(kind, "type_assertion_expression") == 0) {
-        TSNode type_node = ts_node_child_by_field_name(node, "type", 4);
-        if (!ts_node_is_null(type_node)) {
-            return go_parse_type_node(ctx, type_node);
-        }
-        return cbm_type_unknown();
-    }
-
-    // --- Parenthesized expression: (x) ---
-    if (strcmp(kind, "parenthesized_expression") == 0 && ts_node_named_child_count(node) > 0) {
-        return go_eval_expr_type(ctx, ts_node_named_child(node, 0));
-    }
-
-    // --- Binary expression ---
-    if (strcmp(kind, "binary_expression") == 0) {
-        // For comparisons, return bool
-        // For arithmetic, return left operand type
-        TSNode left = ts_node_child_by_field_name(node, "left", 4);
-        for (uint32_t i = 0; i < ts_node_child_count(node); i++) {
-            TSNode child = ts_node_child(node, i);
-            if (!ts_node_is_named(child)) {
-                char *op = lsp_node_text(ctx, child);
-                if (op && (strcmp(op, "==") == 0 || strcmp(op, "!=") == 0 || strcmp(op, "<") == 0 ||
-                           strcmp(op, ">") == 0 || strcmp(op, "<=") == 0 || strcmp(op, ">=") == 0 ||
-                           strcmp(op, "&&") == 0 || strcmp(op, "||") == 0)) {
-                    return cbm_type_builtin(ctx->arena, "bool");
-                }
-                break;
-            }
-        }
-        if (!ts_node_is_null(left))
-            return go_eval_expr_type(ctx, left);
-        return cbm_type_unknown();
-    }
-
-    // --- Slice expression: a[low:high] ---
-    if (strcmp(kind, "slice_expression") == 0) {
-        TSNode operand = ts_node_child_by_field_name(node, "operand", 7);
-        if (!ts_node_is_null(operand))
-            return go_eval_expr_type(ctx, operand);
-        return cbm_type_unknown();
-    }
-
-    // --- Literals ---
-    if (strcmp(kind, "interpreted_string_literal") == 0 ||
-        strcmp(kind, "raw_string_literal") == 0) {
-        return cbm_type_builtin(ctx->arena, "string");
-    }
-    if (strcmp(kind, "int_literal") == 0) {
-        return cbm_type_builtin(ctx->arena, "int");
-    }
-    if (strcmp(kind, "float_literal") == 0) {
-        return cbm_type_builtin(ctx->arena, "float64");
-    }
-    if (strcmp(kind, "true") == 0 || strcmp(kind, "false") == 0) {
-        return cbm_type_builtin(ctx->arena, "bool");
-    }
-    if (strcmp(kind, "nil") == 0) {
-        return cbm_type_unknown(); // nil has no concrete type
-    }
-
-    // --- Func literal (closure) ---
-    if (strcmp(kind, "func_literal") == 0) {
-        // Process the closure body to resolve calls with captured scope
-        TSNode body = ts_node_child_by_field_name(node, "body", 4);
-        if (!ts_node_is_null(body)) {
-            // Push child scope (inherits all outer bindings via parent chain)
-            CBMScope *saved = ctx->current_scope;
-            ctx->current_scope = cbm_scope_push(ctx->arena, ctx->current_scope);
-
-            // Bind closure parameters
-            TSNode params = ts_node_child_by_field_name(node, "parameters", 10);
-            if (!ts_node_is_null(params)) {
-                uint32_t nc = ts_node_child_count(params);
-                for (uint32_t i = 0; i < nc; i++) {
-                    TSNode param = ts_node_child(params, i);
-                    if (ts_node_is_null(param) || !ts_node_is_named(param))
-                        continue;
-                    if (strcmp(ts_node_type(param), "parameter_declaration") != 0)
-                        continue;
-                    TSNode type_node = ts_node_child_by_field_name(param, "type", 4);
-                    const CBMType *pt = go_parse_type_node(ctx, type_node);
-                    uint32_t pnc = ts_node_child_count(param);
-                    for (uint32_t j = 0; j < pnc; j++) {
-                        TSNode ch = ts_node_child(param, j);
-                        if (!ts_node_is_null(ch) && ts_node_is_named(ch) &&
-                            strcmp(ts_node_type(ch), "identifier") == 0) {
-                            char *pname = lsp_node_text(ctx, ch);
-                            if (pname && strcmp(pname, "_") != 0)
-                                cbm_scope_bind(ctx->current_scope, pname, pt);
-                        }
-                    }
-                }
-            }
-
-            // Walk closure body to resolve calls
-            resolve_calls_in_node(ctx, body);
-
-            ctx->current_scope = saved;
-        }
-
-        // Build full FUNC type with param/return types from AST
-        const CBMType *pt_arr[16];
-        int pt_count = 0;
-        TSNode params2 = ts_node_child_by_field_name(node, "parameters", 10);
-        if (!ts_node_is_null(params2)) {
-            uint32_t nc2 = ts_node_child_count(params2);
-            for (uint32_t i = 0; i < nc2 && pt_count < 15; i++) {
-                TSNode p = ts_node_child(params2, i);
-                if (ts_node_is_null(p) || !ts_node_is_named(p))
-                    continue;
-                if (strcmp(ts_node_type(p), "parameter_declaration") != 0)
-                    continue;
-                TSNode pt = ts_node_child_by_field_name(p, "type", 4);
-                if (!ts_node_is_null(pt))
-                    pt_arr[pt_count++] = go_parse_type_node(ctx, pt);
-            }
-        }
-        pt_arr[pt_count] = NULL;
-
-        const CBMType *rt_arr[16];
-        int rt_count = 0;
-        TSNode result = ts_node_child_by_field_name(node, "result", 6);
-        if (!ts_node_is_null(result)) {
-            if (strcmp(ts_node_type(result), "parameter_list") == 0) {
-                uint32_t rnc = ts_node_child_count(result);
-                for (uint32_t i = 0; i < rnc && rt_count < 15; i++) {
-                    TSNode rc = ts_node_child(result, i);
-                    if (ts_node_is_null(rc) || !ts_node_is_named(rc))
-                        continue;
-                    TSNode rt = ts_node_child_by_field_name(rc, "type", 4);
-                    if (ts_node_is_null(rt))
-                        rt = rc;
-                    rt_arr[rt_count++] = go_parse_type_node(ctx, rt);
-                }
-            } else {
-                rt_arr[rt_count++] = go_parse_type_node(ctx, result);
-            }
-        }
-        rt_arr[rt_count] = NULL;
-
-        return cbm_type_func(ctx->arena, NULL, pt_count > 0 ? (const CBMType **)pt_arr : NULL,
-                             rt_count > 0 ? (const CBMType **)rt_arr : NULL);
-    }
-
-    return cbm_type_unknown();
+    static const GoEvalOps ops = {
+        .scope_lookup = go_eval_scope_lookup,
+        .import = resolve_import,
+        .field = go_eval_field,
+        .method = go_lookup_field_or_method,
+        .parse_type = go_eval_parse_type,
+        .push_scope = go_eval_push_scope,
+        .pop_scope = go_eval_pop_scope,
+        .bind = go_eval_bind,
+        .walk = go_eval_walk,
+    };
+    GoEvalInput input = {
+        .root = node,
+        .source = (const unsigned char *)ctx->source,
+        .source_len = (size_t)ctx->source_len,
+        .package = ctx->package_qn,
+        .arena = ctx->arena,
+        .registry = ctx->registry,
+        .context = ctx,
+        .operations = &ops,
+        .depth_limit = (size_t)cbm_lsp_max_walk_depth(),
+    };
+    return mori_go_eval_expr(&input);
 }
 
-// --- go_eval_builtin_call ---
+/* Copy names and lists from Rust before native code consumes them. Counts
+ * let MemorySanitizer mark only bytes written by the Rust evaluator. */
+const char *cbm_go_eval_copy_name(CBMArena *arena, const unsigned char *data, size_t len) {
+    CBM_MSAN_WRITTEN(data, len);
+    return cbm_arena_strndup(arena, (const char *)data, len);
+}
 
-const CBMType *go_eval_builtin_call(GoLSPContext *ctx, const char *name, TSNode args) {
-    // make(Type, ...) -> Type
-    if (strcmp(name, "make") == 0 && !ts_node_is_null(args)) {
-        uint32_t nc = ts_node_named_child_count(args);
-        if (nc > 0) {
-            TSNode first_arg = ts_node_named_child(args, 0);
-            return go_parse_type_node(ctx, first_arg);
-        }
-    }
-
-    // new(Type) -> *Type
-    if (strcmp(name, "new") == 0 && !ts_node_is_null(args)) {
-        uint32_t nc = ts_node_named_child_count(args);
-        if (nc > 0) {
-            TSNode first_arg = ts_node_named_child(args, 0);
-            return cbm_type_pointer(ctx->arena, go_parse_type_node(ctx, first_arg));
-        }
-    }
-
-    // append(slice, ...) -> same slice type
-    if (strcmp(name, "append") == 0 && !ts_node_is_null(args)) {
-        uint32_t nc = ts_node_named_child_count(args);
-        if (nc > 0) {
-            return go_eval_expr_type(ctx, ts_node_named_child(args, 0));
-        }
-    }
-
-    // len, cap -> int
-    if (strcmp(name, "len") == 0 || strcmp(name, "cap") == 0) {
-        return cbm_type_builtin(ctx->arena, "int");
-    }
-
-    // delete -> void (no return)
-    if (strcmp(name, "delete") == 0) {
+const CBMType *cbm_go_eval_func(CBMArena *arena, const CBMType *const *params, size_t param_count,
+                                const CBMType *const *returns, size_t return_count) {
+    enum { MAX_SIGNATURE_TYPES = 15 };
+    if (param_count > MAX_SIGNATURE_TYPES || return_count > MAX_SIGNATURE_TYPES)
         return cbm_type_unknown();
-    }
+    const CBMType *p[MAX_SIGNATURE_TYPES + 1];
+    const CBMType *r[MAX_SIGNATURE_TYPES + 1];
+    CBM_MSAN_WRITTEN(params, param_count * sizeof(*params));
+    CBM_MSAN_WRITTEN(returns, return_count * sizeof(*returns));
+    memcpy(p, params, param_count * sizeof(*params));
+    memcpy(r, returns, return_count * sizeof(*returns));
+    p[param_count] = NULL;
+    r[return_count] = NULL;
+    return cbm_type_func(arena, NULL, param_count ? p : NULL, return_count ? r : NULL);
+}
 
-    return cbm_type_unknown();
+const CBMType *cbm_go_eval_tuple(CBMArena *arena, const CBMType **types, int count) {
+    CBM_MSAN_WRITTEN(types, (size_t)count * sizeof(*types));
+    return cbm_type_tuple(arena, types, count);
+}
+
+const CBMType *cbm_go_eval_substitute(CBMArena *arena, const CBMType *type, const char **names,
+                                      const CBMType *const *args, size_t count) {
+    enum { MAX_GO_TYPE_ARGS = 16 };
+    if (count > MAX_GO_TYPE_ARGS)
+        return type;
+    const CBMType *values[MAX_GO_TYPE_ARGS + 1];
+    CBM_MSAN_WRITTEN(args, count * sizeof(*args));
+    memcpy(values, args, count * sizeof(*args));
+    values[count] = NULL;
+    return cbm_type_substitute(arena, type, names, values);
 }
 
 // --- go_lookup_field: struct field lookup with embedding recursion ---
@@ -1693,7 +1160,7 @@ static void resolve_calls_in_node_inner(GoLSPContext *ctx, TSNode node) {
             // Direct function call: FuncName()
             if (strcmp(fk, "identifier") == 0) {
                 char *name = lsp_node_text(ctx, func_node);
-                if (name && !is_go_builtin_func(name)) {
+                if (name && !mori_go_is_builtin(name)) {
                     if (cbm_scope_contains(ctx->current_scope, name)) {
                         const char *alias_target =
                             cbm_scope_lookup_callable(ctx->current_scope, name);

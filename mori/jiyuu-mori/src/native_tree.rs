@@ -202,6 +202,17 @@ impl<'tree> BorrowedNode<'tree> {
         unsafe { self.raw.children() }.map(move |child| self.with_raw(child))
     }
 
+    pub(crate) fn as_raw(&self) -> &RawNode {
+        &self.raw
+    }
+
+    pub(crate) fn unnamed_children(self) -> impl Iterator<Item = Self> {
+        self.children().filter(|child| {
+            // SAFETY: The child carries the live tree borrow.
+            !unsafe { cbm_ffi_ts_node_is_named(child.as_raw()) }
+        })
+    }
+
     pub(crate) fn named_children(self) -> impl Iterator<Item = Self> {
         // SAFETY: The iterator owns a copy of this borrow.
         unsafe { self.raw.named_children() }

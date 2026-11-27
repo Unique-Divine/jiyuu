@@ -330,7 +330,7 @@ fn signature_children<N: TypeTree>(
     (params, returns)
 }
 
-fn is_builtin(name: &[u8], mode: TypeMode) -> bool {
+pub(crate) fn is_builtin(name: &[u8], mode: TypeMode) -> bool {
     if matches!(name, b"complex64" | b"complex128") {
         return mode == TypeMode::File;
     }
