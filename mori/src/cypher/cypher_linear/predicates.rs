@@ -1,5 +1,7 @@
 use std::borrow::Cow;
-use std::ffi::{CString, c_char, c_double, c_long};
+use std::ffi::{CString, c_char, c_double};
+
+use jiyuu_mori::cypher_scalar::{Scalar, Value, long_from_bytes};
 
 use super::{
     Binding, Edge, ExpressionContext, Node, PROPERTY_LIMIT, ParseError, Parser,
@@ -31,8 +33,7 @@ pub(super) struct Condition<'a> {
 #[derive(Debug)]
 enum Subject<'a> {
     Field(Field<'a>),
-    Coalesce(Coalesce<'a>),
-    Substring(Substring<'a>),
+    Scalar(ScalarCall<'a>),
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -43,112 +44,90 @@ struct Field<'a> {
 }
 
 #[derive(Debug)]
-pub(super) struct Coalesce<'a>(Vec<Operand<'a>>);
+pub(super) struct ScalarCall<'a> {
+    scalar: Scalar,
+    args: Vec<Operand<'a>>,
+}
 
-impl<'a> Coalesce<'a> {
+impl<'a> ScalarCall<'a> {
     pub(super) fn first_reference(&self) -> Option<(&'a str, Option<&'a str>)> {
         self.first_field().map(|field| (field.name, field.property))
     }
 
+    pub(super) fn scalar(&self) -> Scalar {
+        self.scalar
+    }
+
+    pub(super) fn property_reads(&self) -> usize {
+        self.args
+            .iter()
+            .filter(|arg| {
+                matches!(
+                    arg,
+                    Operand::Field(Field {
+                        property: Some(_),
+                        ..
+                    })
+                )
+            })
+            .count()
+    }
+
     fn first_field(&self) -> Option<Field<'a>> {
-        match self.0.first()? {
+        match self.args.first()? {
             Operand::Field(field) => Some(*field),
             Operand::Literal(_) => None,
         }
     }
 
-    pub(super) fn value<'b>(
-        &'b self,
-        mut read: impl FnMut(Binding, Option<&str>) -> Option<Cow<'b, [u8]>>,
-    ) -> Option<Cow<'b, [u8]>> {
-        let mut first = Cow::Borrowed(&b""[..]);
-        for arg in &self.0 {
-            let value = match arg {
-                Operand::Literal(bytes) => Cow::Borrowed(bytes.as_ref()),
-                Operand::Field(field) if field.binding == Binding::Unbound => {
-                    continue;
-                }
-                Operand::Field(field) => read(field.binding, field.property)?,
-            };
-            // Wait for every alias, even when an earlier argument has a value.
-            if first.is_empty() {
-                first = value;
-            }
-        }
-        Some(first)
-    }
-}
-
-#[derive(Debug)]
-pub(super) struct Substring<'a>(Vec<Operand<'a>>);
-
-impl<'a> Substring<'a> {
-    pub(super) fn first_reference(&self) -> Option<(&'a str, Option<&'a str>)> {
-        self.first_field().map(|field| (field.name, field.property))
-    }
-
-    fn first_field(&self) -> Option<Field<'a>> {
-        match self.0.first()? {
-            Operand::Field(field) => Some(*field),
-            Operand::Literal(_) => None,
-        }
+    fn pending(&self, bindings: &Bindings<'_>) -> bool {
+        // Even arguments skipped by the scalar evaluator participate in seed
+        // pruning. Wait for the whole call's bindings before reading a property.
+        !bindings.complete_path
+            && self.args.iter().any(|arg| match arg {
+                Operand::Field(field) => match field.binding {
+                    Binding::Node(index) => bindings.node(index).is_none(),
+                    Binding::Edge(index) => bindings.edges[index].is_none(),
+                    Binding::Unbound => false,
+                },
+                Operand::Literal(_) => false,
+            })
     }
 
     pub(super) fn value<'b>(
         &'b self,
-        mut read: impl FnMut(Binding, Option<&str>) -> Option<Cow<'b, [u8]>>,
-    ) -> Option<Vec<u8>> {
-        let mut args = [
-            Cow::Borrowed(&b""[..]),
-            Cow::Borrowed(&b""[..]),
-            Cow::Borrowed(&b""[..]),
-        ];
-        for (index, arg) in self.0.iter().enumerate() {
-            let value = match arg {
-                Operand::Literal(bytes) => Cow::Borrowed(bytes.as_ref()),
-                Operand::Field(field) if field.binding == Binding::Unbound => {
-                    Cow::Borrowed(&b""[..])
+        mut read: impl FnMut(Binding, Option<&str>) -> Cow<'b, [u8]>,
+    ) -> Cow<'b, [u8]> {
+        let mut output = [0; PROPERTY_LIMIT];
+        let result = self.scalar.evaluate(
+            self.args.len(),
+            |index| {
+                let value = match &self.args[index] {
+                    Operand::Literal(bytes) => Cow::Borrowed(bytes.as_ref()),
+                    Operand::Field(field)
+                        if field.binding == Binding::Unbound =>
+                    {
+                        Cow::Borrowed(&b""[..])
+                    }
+                    Operand::Field(field) => read(field.binding, field.property),
+                };
+                match value {
+                    Cow::Borrowed(bytes) => Cow::Borrowed(c_string_bytes(bytes)),
+                    Cow::Owned(mut bytes) => {
+                        bytes.truncate(c_string_bytes(&bytes).len());
+                        Cow::Owned(bytes)
+                    }
                 }
-                Operand::Field(field) => read(field.binding, field.property)?,
-            };
-            // Native uses at most three arguments. Predicates still wait for
-            // every referenced alias before evaluating at the seed.
-            if let Some(slot) = args.get_mut(index) {
-                *slot = value;
-            }
+            },
+            |value| value.as_ref(),
+            |value| long_from_bytes(value),
+            &mut output,
+        );
+        match result {
+            Value::Argument(value) => value,
+            Value::Computed(len) => Cow::Owned(output[..len].to_vec()),
         }
-        if self.0.len() < 2 {
-            return Some(Vec::new());
-        }
-        let text = c_string_bytes(&args[0]);
-        let start = usize::try_from(native_long(&args[1])).ok();
-        let Some(tail) = start
-            .filter(|&start| start < text.len())
-            .map(|start| &text[start..])
-        else {
-            return Some(Vec::new());
-        };
-        let take = if self.0.len() >= 3 {
-            native_long(&args[2]).try_into().unwrap_or(0)
-        } else {
-            tail.len()
-        };
-        Some(tail[..tail.len().min(take).min(PROPERTY_LIMIT)].to_vec())
     }
-}
-
-fn native_long(bytes: &[u8]) -> c_long {
-    unsafe extern "C" {
-        fn strtol(
-            input: *const c_char,
-            end: *mut *mut c_char,
-            base: std::ffi::c_int,
-        ) -> c_long;
-    }
-    let bytes =
-        CString::new(c_string_bytes(bytes)).expect("NUL-trimmed integer");
-    // SAFETY: The input is NUL-terminated and we do not request an end pointer.
-    unsafe { strtol(bytes.as_ptr(), std::ptr::null_mut(), 10) }
 }
 
 #[derive(Debug)]
@@ -250,15 +229,8 @@ impl<'a> Parser<'a> {
     fn condition(&mut self) -> Result<Condition<'a>, ParseError> {
         let name = self.name()?;
         let lhs = if self.consume(b'(') {
-            if name.eq_ignore_ascii_case("coalesce") {
-                Subject::Coalesce(self.coalesce(false)?)
-            } else if name.eq_ignore_ascii_case("substring") {
-                Subject::Substring(self.substring(false)?)
-            } else if ["replace", "left", "right"]
-                .iter()
-                .any(|function| name.eq_ignore_ascii_case(function))
-            {
-                return Err(Unsupported.into());
+            if let Some(scalar) = Scalar::parse(name.as_bytes()) {
+                Subject::Scalar(self.scalar_call(scalar, false)?)
             } else {
                 return Err(ParseError::UnsupportedWhereFunction(
                     name.to_owned(),
@@ -318,24 +290,15 @@ impl<'a> Parser<'a> {
         })
     }
 
-    pub(super) fn coalesce(
+    pub(super) fn scalar_call(
         &mut self,
+        scalar: Scalar,
         projection: bool,
-    ) -> Result<Coalesce<'a>, Unsupported> {
-        self.scalar_arguments(|parser, name, first| {
+    ) -> Result<ScalarCall<'a>, Unsupported> {
+        let args = self.scalar_arguments(|parser, name, first| {
             parser.scalar_field(name, projection, first)
-        })
-        .map(Coalesce)
-    }
-
-    pub(super) fn substring(
-        &mut self,
-        projection: bool,
-    ) -> Result<Substring<'a>, Unsupported> {
-        self.scalar_arguments(|parser, name, first| {
-            parser.scalar_field(name, projection, first)
-        })
-        .map(Substring)
+        })?;
+        Ok(ScalarCall { scalar, args })
     }
 
     fn scalar_field(
@@ -515,8 +478,7 @@ impl Condition<'_> {
         }
         let field = match &self.lhs {
             Subject::Field(field) => Some(*field),
-            Subject::Coalesce(call) => call.first_field(),
-            Subject::Substring(call) => call.first_field(),
+            Subject::Scalar(call) => call.first_field(),
         };
         field
             .filter(|field| field.binding == Binding::Node(index))
@@ -579,17 +541,19 @@ impl Condition<'_> {
             }
             .value(bindings, context)
         };
-        let read_argument = |binding, property: Option<&str>| {
-            bound_argument(binding, property)
-                .or(bindings.complete_path.then_some(Cow::Borrowed(b"")))
-        };
         let actual = match &self.lhs {
             Subject::Field(field) => match field.value(bindings, context) {
                 Some(value) => value,
                 None => return bindings.complete_path.then_some(true),
             },
-            Subject::Coalesce(call) => call.value(read_argument)?,
-            Subject::Substring(call) => Cow::Owned(call.value(read_argument)?),
+            Subject::Scalar(call) => {
+                if call.pending(bindings) {
+                    return None;
+                }
+                call.value(|binding, prop| {
+                    bound_argument(binding, prop).unwrap_or_default()
+                })
+            }
         };
         Some(match &self.test {
             Test::Label(_) => unreachable!("label does not read a property"),
