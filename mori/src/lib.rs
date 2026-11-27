@@ -89,8 +89,13 @@ mod similarity;
 #[path = "mcp/snippet_window/mod.rs"]
 mod snippet_window;
 #[cfg(any(feature = "native-engine-abi", test))]
+#[path = "pipeline/swift_owner_index.rs"]
+mod swift_owner_index;
+#[cfg(any(feature = "native-engine-abi", test))]
 #[path = "pipeline/swift_package_map.rs"]
 mod swift_package_map;
+#[path = "pipeline/swift_signature_index.rs"]
+mod swift_signature_index;
 #[cfg(feature = "native-engine-abi")]
 #[path = "pipeline/terraform.rs"]
 mod terraform;

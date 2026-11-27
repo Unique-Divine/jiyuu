@@ -14,7 +14,8 @@ compiler, Rust, and the pinned reference commit available locally. The script
 links the reference against the pinned C package-map source and the candidate
 against the Rust package-map module. It compares the project name, manifest
 counts, ordered entries and provenance, direct file-list lookup, selected
-map values, and the exact `IMPORTS` edge endpoints and properties.
+map values, and the exact `IMPORTS` edge endpoints and properties. It also
+checks Go module prefixes, Composer targets and misses, and Rust crate scope.
 
 The fixture covers all eleven manifest types, duplicate Composer entries,
 default and custom Swift target paths, a skipped directory, and a symlink.
