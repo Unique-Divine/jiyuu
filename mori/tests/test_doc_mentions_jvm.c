@@ -1,6 +1,6 @@
 /*
  * test_doc_mentions_jvm.c — doc-comment references of Java and Kotlin
- * (internal/cbm/doclink_jvm.c, jiyuu-mori/src/jvm_doc_links/).
+ * (internal/cbm/doclink_jvm.c, src/pipeline/jvm_doc_links/).
  *
  * Extraction is tested on source text (tokens, scope blobs, hostile input);
  * resolution through the pipeline on fixture repositories, read back from

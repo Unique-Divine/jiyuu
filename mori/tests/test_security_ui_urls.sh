@@ -13,10 +13,10 @@ FIXTURE=''
 new_fixture() {
     CASES=$((CASES + 1))
     FIXTURE="$TEST_TMPDIR/case-$CASES"
-    mkdir -p "$FIXTURE/scripts" "$FIXTURE/graph-ui/src" "$FIXTURE/src/ui" "$FIXTURE/jiyuu-mori/src/ui"
+    mkdir -p "$FIXTURE/scripts" "$FIXTURE/graph-ui/src" "$FIXTURE/src/ui"
     cp "$ROOT/scripts/security-ui.sh" "$FIXTURE/scripts/security-ui.sh"
     printf 'socket.bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, port).into())?;\n' \
-        > "$FIXTURE/jiyuu-mori/src/ui/http_transport.rs"
+        > "$FIXTURE/src/ui/http_transport.rs"
     printf '// Local request handlers.\n' > "$FIXTURE/src/ui/http_server.c"
 }
 
@@ -106,7 +106,7 @@ expect_blocked 'a forbidden runtime URL after the twentieth file is inspected' "
 
 new_fixture
 printf 'socket.bind(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, port).into())?;\n' \
-    >> "$FIXTURE/jiyuu-mori/src/ui/http_transport.rs"
+    >> "$FIXTURE/src/ui/http_transport.rs"
 if bash "$FIXTURE/scripts/security-ui.sh" > "$FIXTURE/result.log" 2>&1; then
     printf 'FAIL: an additional wildcard bind must fail\n'
     FAILED=$((FAILED + 1))

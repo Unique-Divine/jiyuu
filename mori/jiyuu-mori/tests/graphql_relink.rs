@@ -15,9 +15,9 @@ use rusqlite::{Connection, OpenFlags, params};
 use serde_json::{Value, json};
 
 #[cfg(debug_assertions)]
-#[path = "../src/cypher_ffi.rs"]
+#[path = "../../src/cypher/cypher_ffi.rs"]
 mod cypher_ffi;
-#[path = "../src/cypher_linear.rs"]
+#[path = "../../src/cypher/cypher_linear/mod.rs"]
 mod cypher_linear;
 mod support;
 

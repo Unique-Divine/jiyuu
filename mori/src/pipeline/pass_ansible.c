@@ -7,7 +7,7 @@
 
 #include <stdio.h>
 
-/* Matches Stats in jiyuu-mori/src/ansible.rs. */
+/* Matches Stats in src/pipeline/ansible/mod.rs. */
 typedef struct {
     int imports;
     int tasks;
