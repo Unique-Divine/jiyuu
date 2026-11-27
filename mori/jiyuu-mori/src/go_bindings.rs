@@ -2,8 +2,13 @@
 
 use std::ffi::CStr;
 
+use crate::go_identity::{init_qn, receiver_name};
+
 use super::native::{File, TypeView};
-use super::{Node, evaluate, name, parse, walk::exact_callable};
+use super::{
+    Node, evaluate, name, parse, qualified, qualified_bytes,
+    walk::exact_callable,
+};
 
 pub(super) fn binding_name<'file>(
     file: &File<'file>,
@@ -191,6 +196,34 @@ fn bind_parameters(
     }
 }
 
+fn caller<'file>(
+    file: &File<'file>,
+    node: Node<'_>,
+    name: &CStr,
+) -> Option<&'file CStr> {
+    let base = qualified(file, file.package, name)?;
+    if node.kind() == c"method_declaration" {
+        if let Some(receiver) = node
+            .field(c"receiver")
+            .and_then(|receiver| receiver_name(file.source, receiver))
+            .filter(|name| !name.is_empty())
+        {
+            let receiver =
+                qualified_bytes(file, file.package.to_bytes(), receiver)?;
+            return qualified(file, receiver, name);
+        }
+    } else if name == c"init"
+        && let Some(path) = file.path
+    {
+        let Some(qn) = init_qn(file.source, node, base, path) else {
+            file.fail();
+            return None;
+        };
+        return file.name(&qn);
+    }
+    Some(base)
+}
+
 fn function(file: &File<'_>, node: Node<'_>) {
     let Some(function_name) = node
         .field(c"name")
@@ -199,7 +232,10 @@ fn function(file: &File<'_>, node: Node<'_>) {
     else {
         return;
     };
-    file.enter_function(node.as_raw(), function_name);
+    let Some(caller) = caller(file, node, function_name) else {
+        return;
+    };
+    file.set_caller(caller);
     let Some(_scope) = file.push_scope() else {
         return;
     };

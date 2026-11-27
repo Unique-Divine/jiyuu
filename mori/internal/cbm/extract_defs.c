@@ -5921,44 +5921,6 @@ static void set_def_complexity(CBMDefinition *def, TSNode body, const CBMLangSpe
     def->max_access_depth = cx.max_access_depth;
 }
 
-/* Extract the bare type name from a Go method receiver node.
- * The receiver is a parameter_list, e.g. "(s *OrderService)" or "(s Order)".
- * Walks to the parameter_declaration's `type` field, unwrapping pointer_type
- * and generic_type, and returns the type_identifier text (e.g. "OrderService").
- * Returns NULL if no type_identifier is found. */
-char *cbm_go_receiver_type_name(CBMArena *a, TSNode recv, const char *source) {
-    uint32_t nc = ts_node_child_count(recv);
-    for (uint32_t i = 0; i < nc; i++) {
-        TSNode child = ts_node_child(recv, i);
-        if (strcmp(ts_node_type(child), "parameter_declaration") != 0) {
-            continue;
-        }
-        TSNode tn = ts_node_child_by_field_name(child, TS_FIELD("type"));
-        if (ts_node_is_null(tn)) {
-            continue;
-        }
-        /* Unwrap pointer_type / generic_type down to the type_identifier. */
-        for (int guard = 0; guard < 4 && !ts_node_is_null(tn); guard++) {
-            const char *tk = ts_node_type(tn);
-            if (strcmp(tk, "type_identifier") == 0) {
-                return cbm_node_text(a, tn, source);
-            }
-            if (strcmp(tk, "pointer_type") == 0 || strcmp(tk, "generic_type") == 0) {
-                /* pointer_type: child is the pointee type; generic_type has a
-                 * `type` field for the base type_identifier. */
-                TSNode inner = ts_node_child_by_field_name(tn, TS_FIELD("type"));
-                if (ts_node_is_null(inner)) {
-                    inner = ts_node_named_child(tn, 0);
-                }
-                tn = inner;
-                continue;
-            }
-            break;
-        }
-    }
-    return NULL;
-}
-
 /* C++/CUDA: true when name is a GoogleTest test-definition macro whose
  * invocations parse as function definitions with bare-identifier parameters.
  * Multiple such macros in one file all share the extracted name (e.g. "TEST"),
@@ -7160,7 +7122,7 @@ static void extract_func_def(CBMExtractCtx *ctx, TSNode node, const CBMLangSpec 
          * (and downstream Go IMPLEMENTS/OVERRIDE) link the method to its owning
          * struct/type node.  The parent QN must match the type's node QN, which
          * is computed the same way (cbm_fqn_compute on the type name). */
-        char *recv_type = cbm_go_receiver_type_name(a, recv, ctx->source);
+        char *recv_type = cbm_go_receiver_type_name(a, recv, ctx->source, ctx->source_len);
         if (recv_type && recv_type[0]) {
             /* Must match the Go type node QN (directory-based module) so the
              * DEFINES_METHOD edge links the method to its owning type. */
@@ -7199,7 +7161,7 @@ static void extract_func_def(CBMExtractCtx *ctx, TSNode node, const CBMLangSpec 
     if (ctx->language == CBM_LANG_GO && strcmp(def.label, "Function") == 0 &&
         strcmp(name, "init") == 0) {
         def.qualified_name =
-            cbm_go_init_qn(a, def.qualified_name, ctx->rel_path, node, ctx->source);
+            cbm_go_init_qn(a, def.qualified_name, ctx->rel_path, node, ctx->source, ctx->source_len);
     }
 
     // C++/CUDA: out-of-line method definition (`Foo::bar` in a .cc/.cpp). The

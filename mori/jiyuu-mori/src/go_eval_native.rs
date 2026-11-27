@@ -243,8 +243,7 @@ struct Operations {
         Type,
         *const c_char,
     ) -> bool,
-    enter_function:
-        unsafe extern "C" fn(*mut GoContext, *const RawNode, *const c_char),
+    set_caller: unsafe extern "C" fn(*mut GoContext, *const c_char),
     scope_callable:
         unsafe extern "C" fn(*mut GoContext, *const c_char) -> *const c_char,
     clear_callable: unsafe extern "C" fn(*mut GoContext, *const c_char),
@@ -258,6 +257,7 @@ struct Input {
     source: *const u8,
     source_len: usize,
     package: *const c_char,
+    path: *const c_char,
     arena: *mut Arena,
     registry: *const Registry,
     context: *mut GoContext,
@@ -336,6 +336,7 @@ unsafe extern "C" {
 pub(super) struct File<'file> {
     pub source: &'file [u8],
     pub package: &'file CStr,
+    pub path: Option<&'file CStr>,
     pub depth_limit: usize,
     arena: *mut Arena,
     registry: *const Registry,
@@ -534,7 +535,7 @@ impl<'file> File<'file> {
         }
     }
 
-    fn fail(&self) {
+    pub(super) fn fail(&self) {
         if self.status.get() == ResolveStatus::Complete {
             self.status.set(ResolveStatus::Failed);
         }
@@ -610,8 +611,8 @@ impl<'file> File<'file> {
         }
     }
 
-    pub(super) fn enter_function(&self, node: &RawNode, name: &CStr) {
-        unsafe { (self.ops.enter_function)(self.context, node, name.as_ptr()) };
+    pub(super) fn set_caller(&self, caller: &CStr) {
+        unsafe { (self.ops.set_caller)(self.context, caller.as_ptr()) };
     }
 
     pub(super) fn tuple_element(&self, ty: Type, index: usize) -> Option<Type> {
@@ -709,6 +710,7 @@ unsafe fn with_input<T>(
             std::slice::from_raw_parts(input.source, input.source_len)
         },
         package: unsafe { CStr::from_ptr(input.package) },
+        path: unsafe { optional_name(input.path) },
         depth_limit: input.depth_limit,
         arena: input.arena,
         registry: input.registry,

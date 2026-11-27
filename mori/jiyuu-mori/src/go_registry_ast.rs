@@ -24,6 +24,7 @@ struct RegistryOps {
     find_type: unsafe extern "C" fn(*mut c_void, *const c_char) -> c_int,
     alias: unsafe extern "C" fn(
         *mut c_void,
+        c_int,
         *const c_char,
         *const c_char,
         *const c_char,
@@ -104,8 +105,9 @@ impl<'a> Registry<'a> {
         else {
             return;
         };
-        // SAFETY: All the strings belong to the native registry arena.
-        unsafe { (self.ops.alias)(self.context, name, qn, target) };
+        let row = self.type_row(qn).unwrap_or(-1);
+        // SAFETY: The row and all strings belong to the native registry arena.
+        unsafe { (self.ops.alias)(self.context, row, name, qn, target) };
     }
 
     fn names(&self, row: c_int, kind: NameRows, names: &[*const c_char]) {

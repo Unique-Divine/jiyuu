@@ -180,6 +180,9 @@ mod resolver;
 mod go_eval;
 
 #[cfg(feature = "native-engine-abi")]
+mod go_identity;
+
+#[cfg(feature = "native-engine-abi")]
 mod go_imports;
 
 #[cfg(feature = "native-engine-abi")]

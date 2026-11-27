@@ -27,6 +27,8 @@ unsafe extern "C" {
     fn cbm_ffi_ts_node_start_byte(node: *const RawNode) -> u32;
     fn cbm_ffi_ts_node_end_byte(node: *const RawNode) -> u32;
     fn cbm_ffi_ts_node_is_named(node: *const RawNode) -> bool;
+    fn cbm_ffi_ts_node_parent(node: *const RawNode) -> RawNode;
+    fn cbm_ffi_ts_node_eq(left: *const RawNode, right: *const RawNode) -> bool;
     fn cbm_ffi_ts_node_child_by_field_name(
         node: *const RawNode,
         name: *const c_char,
@@ -209,6 +211,17 @@ impl<'tree> BorrowedNode<'tree> {
     pub(crate) fn children(self) -> impl Iterator<Item = Self> {
         // SAFETY: The iterator owns a copy of this borrow.
         unsafe { self.raw.children() }.map(move |child| self.with_raw(child))
+    }
+
+    pub(crate) fn parent(self) -> Option<Self> {
+        // SAFETY: The parent belongs to the same live tree.
+        let parent = unsafe { cbm_ffi_ts_node_parent(self.as_raw()) };
+        (!parent.id.is_null()).then(|| self.with_raw(parent))
+    }
+
+    pub(crate) fn same_as(self, other: Self) -> bool {
+        // SAFETY: Both arguments carry live tree borrows.
+        unsafe { cbm_ffi_ts_node_eq(self.as_raw(), other.as_raw()) }
     }
 
     pub(crate) fn child_fields(

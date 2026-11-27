@@ -54,10 +54,18 @@ fn qualified_bytes<'file>(
     name: &[u8],
 ) -> Option<&'file CStr> {
     let mut text = Vec::new();
-    text.try_reserve_exact(
-        package.len().checked_add(name.len())?.checked_add(1)?,
-    )
-    .ok()?;
+    let Some(len) = package
+        .len()
+        .checked_add(name.len())
+        .and_then(|sum| sum.checked_add(1))
+    else {
+        file.fail();
+        return None;
+    };
+    if text.try_reserve_exact(len).is_err() {
+        file.fail();
+        return None;
+    }
     text.extend_from_slice(package);
     text.push(b'.');
     text.extend_from_slice(name);

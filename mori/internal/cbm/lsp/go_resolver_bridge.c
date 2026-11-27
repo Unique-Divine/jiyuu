@@ -239,7 +239,7 @@ typedef struct {
     void (*pop_scope)(GoLSPContext *, CBMScope *);
     bool (*bind)(GoLSPContext *, const char *, const CBMType *);
     bool (*bind_value)(GoLSPContext *, const char *, const CBMType *, const char *);
-    void (*enter_function)(GoLSPContext *, const TSNode *, const char *);
+    void (*set_caller)(GoLSPContext *, const char *);
     const char *(*scope_callable)(GoLSPContext *, const char *);
     void (*clear_callable)(GoLSPContext *, const char *);
     bool (*emit)(GoLSPContext *, const GoEvalOutput *);
@@ -251,6 +251,7 @@ typedef struct {
     const unsigned char *source;
     size_t source_len;
     const char *package;
+    const char *path;
     CBMArena *arena;
     const CBMTypeRegistry *registry;
     GoLSPContext *context;
@@ -359,22 +360,29 @@ void cbm_go_eval_visit_types(const CBMTypeRegistry *reg, void *context, GoEvalVi
     }
 }
 
-/* Reuse the same init and method identity helpers as definition extraction. */
-static void go_eval_enter_function(GoLSPContext *ctx, const TSNode *node, const char *name) {
-    cbm_ffi_ts_node_written(node);
-    ctx->enclosing_func_qn = cbm_arena_sprintf(ctx->arena, "%s.%s", ctx->package_qn, name);
-    if (strcmp(ts_node_type(*node), "method_declaration") == 0) {
-        TSNode recv = ts_node_child_by_field_name(*node, "receiver", 8);
-        if (!ts_node_is_null(recv)) {
-            char *type = cbm_go_receiver_type_name(ctx->arena, recv, ctx->source);
-            if (type && type[0])
-                ctx->enclosing_func_qn = cbm_arena_sprintf(ctx->arena, "%s.%s.%s", ctx->package_qn,
-                                                           type, name);
-        }
-    } else if (strcmp(name, "init") == 0) {
-        ctx->enclosing_func_qn = cbm_go_init_qn(ctx->arena, ctx->enclosing_func_qn, ctx->rel_path,
-                                              *node, ctx->source);
-    }
+extern char *mori_go_receiver_type_name(CBMArena *, const TSNode *, const unsigned char *,
+                                        size_t);
+extern const char *mori_go_init_qn(CBMArena *, const char *, const char *, const TSNode *,
+                                   const unsigned char *, size_t);
+
+char *cbm_go_receiver_type_name(CBMArena *arena, TSNode receiver, const char *source,
+                                 int source_len) {
+    if (!source || source_len < 0 || ts_node_is_null(receiver))
+        return NULL;
+    return mori_go_receiver_type_name(arena, &receiver, (const unsigned char *)source,
+                                      (size_t)source_len);
+}
+
+const char *cbm_go_init_qn(CBMArena *arena, const char *base, const char *path, TSNode declaration,
+                           const char *source, int source_len) {
+    if (!base || !path || !source || source_len < 0 || ts_node_is_null(declaration))
+        return base;
+    return mori_go_init_qn(arena, base, path, &declaration, (const unsigned char *)source,
+                           (size_t)source_len);
+}
+
+static void go_eval_set_caller(GoLSPContext *ctx, const char *caller) {
+    ctx->enclosing_func_qn = caller;
 }
 
 static CBMGoResolveStatus go_lsp_process_file(GoLSPContext *ctx, TSNode node) {
@@ -392,7 +400,7 @@ static CBMGoResolveStatus go_lsp_process_file(GoLSPContext *ctx, TSNode node) {
         .pop_scope = go_eval_pop_scope,
         .bind = go_eval_bind,
         .bind_value = go_eval_bind_value,
-        .enter_function = go_eval_enter_function,
+        .set_caller = go_eval_set_caller,
         .scope_callable = go_eval_scope_callable,
         .clear_callable = go_eval_clear_callable,
         .emit = go_eval_emit,
@@ -403,6 +411,7 @@ static CBMGoResolveStatus go_lsp_process_file(GoLSPContext *ctx, TSNode node) {
         .source = (const unsigned char *)ctx->source,
         .source_len = (size_t)ctx->source_len,
         .package = ctx->package_qn,
+        .path = ctx->rel_path,
         .arena = ctx->arena,
         .registry = ctx->registry,
         .context = ctx,
@@ -573,7 +582,7 @@ typedef enum {
 typedef struct {
     const char *(*name)(GoAstRegistry *, const unsigned char *, size_t);
     int (*find_type)(GoAstRegistry *, const char *);
-    void (*alias)(GoAstRegistry *, const char *, const char *, const char *);
+    void (*alias)(GoAstRegistry *, int, const char *, const char *, const char *);
     void (*names)(GoAstRegistry *, int, GoAstNameRows, const char *const *, size_t);
     void (*fields)(GoAstRegistry *, int, const char *const *, const CBMType *const *, size_t);
     const CBMType *(*parse_type)(GoAstRegistry *, const TSNode *);
@@ -606,9 +615,8 @@ static int go_ast_find_type(GoAstRegistry *ctx, const char *name) {
     return -1;
 }
 
-static void go_ast_alias(GoAstRegistry *ctx, const char *name, const char *qn,
+static void go_ast_alias(GoAstRegistry *ctx, int row, const char *name, const char *qn,
                          const char *target) {
-    int row = go_ast_find_type(ctx, qn);
     if (row >= 0) {
         ctx->registry->types[row].alias_of = target;
         return;
