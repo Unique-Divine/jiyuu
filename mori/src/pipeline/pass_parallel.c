@@ -15,13 +15,7 @@
 enum {
     PP_RING = 4,
     PP_RING_MASK = 3,
-    PP_JSON_MARGIN = 10,
-    PP_ESC_MARGIN = 3,
     PP_ESC_SPACE = 2,
-    /* Fixed bytes around a serialized JSON field: ,"key":"value" / ,"key":[...]
-     * -> comma + 2 key quotes + colon + 2 value quotes (resp. brackets). */
-    PP_JSON_FIELD_OVERHEAD = 6,
-    PP_SWIFT_PROPS_MARGIN = 80,
     PP_ARGS_MARGIN = 20,
     /* ,"line":<int> -> comma + key (7) + colon + up to 10 digits + NUL. */
     PP_LINE_MARGIN = 24,
@@ -63,6 +57,7 @@ enum { PP_CSHARP_M_PREFIX_LEN = 2 };
  * operator/caller choice). */
 #define PP_RETAIN_TOTAL_HARD_MAX_BYTES (1024ULL * 1024 * 1024)  /* 1 GiB default ceiling */
 #define PP_RETAIN_PER_FILE_HARD_MAX_BYTES (32ULL * 1024 * 1024) /* 32 MiB per file */
+#include "pipeline/definition_props.h"
 #include "pipeline/pipeline.h"
 #include "pipeline/pipeline_internal.h"
 #include "pipeline/doc_links.h" /* cbm_doclinks_resolve_file: MENTIONS beside CALLS */
@@ -94,8 +89,6 @@ enum { PP_CSHARP_M_PREFIX_LEN = 2 };
 #include "cbm.h"
 #include "arena.h"
 #include "macro_table.h"
-#include "simhash/minhash.h"
-#include "semantic/ast_profile.h"
 
 #include <errno.h>
 #include <stdatomic.h>
@@ -343,250 +336,6 @@ static const char *itoa_log(int val) {
     return bufs[i];
 }
 
-/* Append a JSON-escaped string value to buf at position *pos. */
-/* Escape one character for JSON. Returns bytes written (1 or 2). */
-static int json_escape_char(char *buf, size_t avail, char ch) {
-    char esc = 0;
-    switch (ch) {
-    case '"':
-        esc = '"';
-        break;
-    case '\\':
-        esc = '\\';
-        break;
-    case '\n':
-        esc = 'n';
-        break;
-    case '\r':
-        esc = 'r';
-        break;
-    case '\t':
-        esc = 't';
-        break;
-    default:
-        if (avail >= SKIP_ONE) {
-            /* Any other raw control byte (e.g. form feed) is invalid inside a
-             * JSON string — degrade to a space. */
-            buf[0] = ((unsigned char)ch < 0x20) ? ' ' : ch;
-        }
-        return SKIP_ONE;
-    }
-    if (avail >= PP_ESC_SPACE) {
-        buf[0] = '\\';
-        buf[SKIP_ONE] = esc;
-    }
-    return PP_ESC_SPACE;
-}
-
-/* Escaped length of a string under json_escape_char's rules: escaped
- * characters expand to 2 bytes, everything else stays 1. */
-static size_t pp_json_escaped_len(const char *s) {
-    size_t n = 0;
-    for (; *s; s++) {
-        switch (*s) {
-        case '"':
-        case '\\':
-        case '\n':
-        case '\r':
-        case '\t':
-            n += PP_ESC_SPACE;
-            break;
-        default:
-            n += SKIP_ONE;
-        }
-    }
-    return n;
-}
-
-/* Appends are ATOMIC: a field is emitted only if the WHOLE serialized form
- * fits (with PP_ESC_SPACE bytes reserved for the closing '}' + NUL). Cutting a
- * field mid-value produced unterminated strings/arrays — malformed properties
- * JSON that aborts every json_extract()-based consumer downstream (seen on the
- * Linux kernel: 50-param functions truncated at the 2 KB cap). Dropping an
- * oversized optional field whole keeps the JSON valid. Twin of
- * pass_definitions.c — keep both in sync. */
-static void append_json_string(char *buf, size_t bufsize, size_t *pos, const char *key,
-                               const char *val) {
-    if (!val || val[0] == '\0') {
-        return;
-    }
-    size_t required = strlen(key) + pp_json_escaped_len(val) + PP_JSON_FIELD_OVERHEAD;
-    if (*pos + required + PP_ESC_SPACE > bufsize) {
-        return; /* whole field would not fit — skip it atomically */
-    }
-    size_t p = *pos;
-    int w = snprintf(buf + p, bufsize - p, ",\"%s\":\"", key);
-    if (w <= 0 || (size_t)w >= bufsize - p) {
-        return;
-    }
-    p += (size_t)w;
-    for (const char *s = val; *s && p < bufsize - PP_ESC_MARGIN; s++) {
-        int n = json_escape_char(buf + p, bufsize - p - PP_ESC_SPACE, *s);
-        p += (size_t)n;
-    }
-    if (p < bufsize - SKIP_ONE) {
-        buf[p++] = '"';
-    }
-    buf[p] = '\0';
-    *pos = p;
-}
-
-/* Append a JSON array of strings: ,"key":["a","b","c"]. Atomic like
- * append_json_string: emitted only if the whole array fits. */
-static void append_json_str_array(char *buf, size_t bufsize, size_t *pos, const char *key,
-                                  const char **arr) {
-    if (!arr || !arr[0] || *pos >= bufsize - PP_JSON_MARGIN) {
-        return;
-    }
-    /* ,"key":[ + per item "<escaped>" + separating commas + ] */
-    size_t required = strlen(key) + PP_JSON_FIELD_OVERHEAD;
-    for (int i = 0; arr[i]; i++) {
-        required += pp_json_escaped_len(arr[i]) + PP_ESC_SPACE + (i > 0 ? SKIP_ONE : 0);
-    }
-    if (*pos + required + PP_ESC_SPACE > bufsize) {
-        return; /* whole array would not fit — skip it atomically */
-    }
-    size_t p = *pos;
-    int n = snprintf(buf + p, bufsize - p, ",\"%s\":[", key);
-    if (n <= 0 || p + (size_t)n >= bufsize - PP_ESC_SPACE) {
-        return;
-    }
-    p += (size_t)n;
-    for (int i = 0; arr[i]; i++) {
-        if (i > 0 && p < bufsize - SKIP_ONE) {
-            buf[p++] = ',';
-        }
-        if (p < bufsize - SKIP_ONE) {
-            buf[p++] = '"';
-        }
-        /* Full escaping (not just quote/backslash): items like C param types
-         * sliced from multi-line declarations carry raw \n/\t bytes, which are
-         * invalid inside JSON strings. */
-        for (const char *s = arr[i]; *s && p < bufsize - PP_ESC_SPACE; s++) {
-            p += (size_t)json_escape_char(buf + p, bufsize - p - PP_ESC_SPACE, *s);
-        }
-        if (p < bufsize - SKIP_ONE) {
-            buf[p++] = '"';
-        }
-    }
-    if (p < bufsize - SKIP_ONE) {
-        buf[p++] = ']';
-    }
-    buf[p] = '\0';
-    *pos = p;
-}
-
-/* Append an already-serialized JSON value verbatim: ,"key":<json>. Atomic like
- * append_json_string. For `variants`, which extraction builds as a JSON array
- * of objects (cbm.h). Twin of pass_definitions.c -- keep both in sync. */
-static void append_json_raw(char *buf, size_t bufsize, size_t *pos, const char *key,
-                            const char *json) {
-    if (!json || json[0] == '\0') {
-        return;
-    }
-    size_t required = strlen(key) + strlen(json) + PP_JSON_FIELD_OVERHEAD;
-    if (*pos + required + PP_ESC_SPACE > bufsize) {
-        return; /* whole field would not fit — skip it atomically */
-    }
-    int w = snprintf(buf + *pos, bufsize - *pos, ",\"%s\":%s", key, json);
-    if (w > 0 && (size_t)w < bufsize - *pos) {
-        *pos += (size_t)w;
-    }
-}
-
-static void build_def_props(char *buf, size_t bufsize, const CBMDefinition *def) {
-    /* Complexity/loop/recursion metrics are meaningful only for Function/Method.
-     * Gate the block so the millions of Macro/Field/Variable/Class/Enum nodes
-     * keep a lean properties blob (lossless — those fields are always zero for
-     * non-functions). Cuts RAM, gbuf-merge copy and dump volume. Mirrors
-     * pass_definitions.c::build_def_props — keep both in sync. */
-    const bool is_fn =
-        def->label && (strcmp(def->label, "Function") == 0 || strcmp(def->label, "Method") == 0);
-    const char *test_role = def->test_role == CBM_TEST_ROLE_CASE    ? ",\"test_role\":\"case\""
-                            : def->test_role == CBM_TEST_ROLE_SUITE ? ",\"test_role\":\"suite\""
-                                                                    : "";
-    int n;
-    if (is_fn) {
-        n = snprintf(buf, bufsize,
-                     "{\"complexity\":%d,\"cognitive\":%d,\"loop_count\":%d,\"loop_depth\":%d,"
-                     "\"self_recursive\":%s,\"param_count\":%d,\"max_access_depth\":%d,"
-                     "\"linear_scan_in_loop\":%d,\"alloc_in_loop\":%d,\"recursion_in_loop\":%s,"
-                     "\"unguarded_recursion\":%s,"
-                     "\"lines\":%d,\"is_exported\":%s,\"is_test\":%s,\"is_entry_point\":%s%s",
-                     def->complexity, def->cognitive, def->loop_count, def->loop_depth,
-                     def->is_recursive ? "true" : "false", def->param_count, def->max_access_depth,
-                     def->linear_scan_in_loop, def->alloc_in_loop,
-                     def->recursion_in_loop ? "true" : "false",
-                     def->unguarded_recursion ? "true" : "false", def->lines,
-                     def->is_exported ? "true" : "false", def->is_test ? "true" : "false",
-                     def->is_entry_point ? "true" : "false", test_role);
-    } else {
-        n = snprintf(buf, bufsize,
-                     "{\"complexity\":%d,\"lines\":%d,\"is_exported\":%s,\"is_test\":%s,"
-                     "\"is_entry_point\":%s%s",
-                     def->complexity, def->lines, def->is_exported ? "true" : "false",
-                     def->is_test ? "true" : "false", def->is_entry_point ? "true" : "false",
-                     test_role);
-    }
-    if (n <= 0 || (size_t)n >= bufsize) {
-        buf[0] = '\0';
-        return;
-    }
-    size_t pos = (size_t)n;
-    if (def->qn_sig_off && bufsize - pos > PP_SWIFT_PROPS_MARGIN) {
-        pos += (size_t)snprintf(buf + pos, bufsize - pos,
-                                ",\"param_default_mask\":\"%016llx\",\"selector_param_count\":%u",
-                                (unsigned long long)def->param_default_mask,
-                                (unsigned)def->selector_param_count);
-    }
-    append_json_string(buf, bufsize, &pos, "call_selector", def->call_selector);
-    append_json_string(buf, bufsize, &pos, "docstring", def->docstring);
-    /* The buffer is sized for every field below (pp_props_buf), so none can be
-     * squeezed out. */
-    append_json_raw(buf, bufsize, &pos, "variants", def->variants);
-    append_json_string(buf, bufsize, &pos, "variant_key", def->variant_key);
-    append_json_string(buf, bufsize, &pos, "signature", def->signature);
-    append_json_string(buf, bufsize, &pos, "return_type", def->return_type);
-    append_json_string(buf, bufsize, &pos, "parent_class", def->parent_class);
-    append_json_str_array(buf, bufsize, &pos, "decorators", def->decorators);
-    append_json_str_array(buf, bufsize, &pos, "base_classes", def->base_classes);
-    append_json_str_array(buf, bufsize, &pos, "param_names", def->param_names);
-    append_json_str_array(buf, bufsize, &pos, "param_types", def->param_types);
-    append_json_string(buf, bufsize, &pos, "route_path", def->route_path);
-    append_json_string(buf, bufsize, &pos, "route_method", def->route_method);
-    append_json_string(buf, bufsize, &pos, "client_route_path", def->client_route_path);
-    append_json_string(buf, bufsize, &pos, "http_client", def->http_client);
-    append_json_string(buf, bufsize, &pos, "http_base_url", def->http_base_url);
-    /* A document definition's facts (an ADR's id, status, date, ...): key, value pairs. */
-    for (const char **kv = def->extra_props; kv && kv[0] && kv[SKIP_ONE]; kv += PAIR_LEN) {
-        append_json_string(buf, bufsize, &pos, kv[0], kv[SKIP_ONE]);
-    }
-
-    /* MinHash fingerprint — append if present and buffer has room.
-     * Hex-encoded K=64 uint32 = 512 chars + key/quotes ≈ 520 chars. */
-    if (def->fingerprint && def->fingerprint_k > 0 &&
-        pos + CBM_MINHASH_HEX_LEN + CBM_MINHASH_JSON_OVERHEAD < bufsize) {
-        char fp_hex[CBM_MINHASH_HEX_BUF];
-        cbm_minhash_to_hex((const cbm_minhash_t *)def->fingerprint, fp_hex, sizeof(fp_hex));
-        append_json_string(buf, bufsize, &pos, "fp", fp_hex);
-    }
-
-    /* AST structural profile — append if present and buffer has room. */
-    if (def->structural_profile && pos + CBM_AST_PROFILE_BUF < bufsize) {
-        append_json_string(buf, bufsize, &pos, "sp", def->structural_profile);
-    }
-
-    /* Body tokens — raw identifiers from function body AST for semantic search. */
-    if (def->body_tokens && pos + CBM_SZ_512 < bufsize) {
-        append_json_string(buf, bufsize, &pos, "bt", def->body_tokens);
-    }
-
-    if (pos < bufsize - SKIP_ONE) {
-        buf[pos] = '}';
-        buf[pos + SKIP_ONE] = '\0';
-    }
-}
-
 /* True for languages whose module QN derives from the CONTAINING DIRECTORY
  * (Java/Go package). MUST match cbm_lang_module_is_dir() (internal/cbm/helpers.c)
  * and pxc_module_is_dir() (pass_lsp_cross.c) so same-module callee resolution
@@ -744,90 +493,11 @@ extern size_t cbm_rust_extract_spill_line(size_t budget);
  * to the response/logfile — this only throttles the stderr noise). */
 enum { PP_OVERSIZED_WARN_MAX = 32 };
 
-/* Upper bound of build_def_props' fixed prefix: the Function/Method metrics
- * literal (about 330 B) with nine ints and seven true/false/test_role strings at
- * their widest stays under 600 B. */
-enum { PP_PROPS_PREFIX_MAX = CBM_SZ_1K };
-
-/* Serialized size of one optional field as append_json_string emits it
- * (0 when the field is absent). */
-static size_t pp_str_field_len(const char *key, const char *val) {
-    return val && val[0] ? strlen(key) + pp_json_escaped_len(val) + PP_JSON_FIELD_OVERHEAD : 0;
-}
-
-/* Serialized size of a string array as append_json_str_array emits it. */
-static size_t pp_arr_field_len(const char *key, const char **arr) {
-    if (!arr || !arr[0]) {
-        return 0;
-    }
-    size_t n = strlen(key) + PP_JSON_FIELD_OVERHEAD;
-    for (int i = 0; arr[i]; i++) {
-        n += pp_json_escaped_len(arr[i]) + PP_ESC_SPACE + (i > 0 ? SKIP_ONE : 0);
-    }
-    return n;
-}
-
-/* A def's properties buffer, sized so EVERY field build_def_props appends fits:
- * the fixed metrics prefix (PP_PROPS_PREFIX_MAX) plus each optional field's
- * whole serialized form. A field that does not fit is dropped whole, so a buffer
- * sized for only some of them let a long signature, decorator list or parameter
- * list squeeze out the MinHash fingerprint ("fp"), structural profile ("sp") and
- * body tokens ("bt") behind them: no SIMILAR_TO edge and fewer
- * SEMANTICALLY_RELATED edges for exactly the widest definitions (jellyfin's
- * ImageController actions, 2026-10-18). fp/sp/bt are appended behind their own
- * room checks, so both the check's reserve and the field are counted. Returns
- * `stack` when everything fits it, or when the larger buffer cannot be
- * allocated. Twin of pass_definitions.c -- keep both in sync. */
-static char *pp_props_buf(const CBMDefinition *def, char *stack, size_t *size) {
-    size_t need = PP_PROPS_PREFIX_MAX + pp_str_field_len("docstring", def->docstring);
-    need += pp_str_field_len("call_selector", def->call_selector);
-    if (def->variants && def->variants[0]) {
-        need += strlen("variants") + strlen(def->variants) + PP_JSON_FIELD_OVERHEAD;
-    }
-    need += pp_str_field_len("variant_key", def->variant_key) +
-            pp_str_field_len("signature", def->signature) +
-            pp_str_field_len("return_type", def->return_type) +
-            pp_str_field_len("parent_class", def->parent_class) +
-            pp_arr_field_len("decorators", def->decorators) +
-            pp_arr_field_len("base_classes", def->base_classes) +
-            pp_arr_field_len("param_names", def->param_names) +
-            pp_arr_field_len("param_types", def->param_types) +
-            pp_str_field_len("route_path", def->route_path) +
-            pp_str_field_len("route_method", def->route_method) +
-            pp_str_field_len("client_route_path", def->client_route_path) +
-            pp_str_field_len("http_client", def->http_client) +
-            pp_str_field_len("http_base_url", def->http_base_url);
-    for (const char **kv = def->extra_props; kv && kv[0] && kv[SKIP_ONE]; kv += PAIR_LEN) {
-        need += pp_str_field_len(kv[0], kv[SKIP_ONE]);
-    }
-    if (def->fingerprint && def->fingerprint_k > 0) {
-        need += CBM_MINHASH_HEX_LEN + CBM_MINHASH_JSON_OVERHEAD + SKIP_ONE;
-    }
-    if (def->structural_profile) {
-        need += CBM_AST_PROFILE_BUF + pp_str_field_len("sp", def->structural_profile) + SKIP_ONE;
-    }
-    if (def->body_tokens) {
-        need += CBM_SZ_512 + pp_str_field_len("bt", def->body_tokens) + SKIP_ONE;
-    }
-    need += PP_ESC_SPACE; /* the closing '}' + NUL */
-    if (need <= *size) {
-        return stack;
-    }
-    char *buf = cbm_alloc(CBM_MEM_CLASS_GBUF_STRING, need);
-    if (!buf) {
-        return stack;
-    }
-    *size = need;
-    return buf;
-}
-
 /* Insert one definition node (and its route if present) into the local gbuf. */
 static void insert_def_into_gbuf(extract_worker_state_t *ws, const cbm_stem_marks_t *marks,
                                  const cbm_file_info_t *fi, CBMDefinition *def) {
     char stack[CBM_SZ_2K];
-    size_t props_size = sizeof(stack);
-    char *props = pp_props_buf(def, stack, &props_size);
-    build_def_props(props, props_size, def);
+    char *props = cbm_definition_props(def, stack, sizeof(stack));
     const char *rel = def->file_path ? def->file_path : fi->rel_path;
     char marked[CBM_SZ_4K];
     const char *qn = def->label && strcmp(def->label, "Module") == 0
@@ -1797,37 +1467,6 @@ static int register_and_link_def(cbm_pipeline_ctx_t *ctx, const CBMDefinition *d
     return edges;
 }
 
-/* Add a file's own doc (Go package comment, Rust inner docs) to its File
- * node as "docstring". Twin of pass_definitions.c -- keep both in sync. */
-static void pp_add_file_doc(const cbm_gbuf_node_t *file_node, const char *doc) {
-    if (!file_node || !doc || !doc[0]) {
-        return;
-    }
-    const char *old = file_node->properties_json ? file_node->properties_json : "{}";
-    size_t olen = strlen(old);
-    if (olen < PAIR_LEN || old[olen - SKIP_ONE] != '}') {
-        return; /* not a JSON object -- leave it untouched */
-    }
-    size_t cap = olen + strlen("docstring") + pp_json_escaped_len(doc) + PP_JSON_FIELD_OVERHEAD +
-                 PP_ESC_SPACE + SKIP_ONE;
-    char *neu = cbm_alloc(CBM_MEM_CLASS_GBUF_STRING, cap);
-    if (!neu) {
-        return;
-    }
-    size_t pos = olen - SKIP_ONE; /* without the closing brace */
-    memcpy(neu, old, pos);
-    neu[pos] = '\0';
-    append_json_string(neu, cap, &pos, "docstring", doc);
-    if (olen == PAIR_LEN && pos > PAIR_LEN) { /* "{}": drop the leading comma */
-        memmove(neu + SKIP_ONE, neu + PAIR_LEN, pos - SKIP_ONE);
-        pos--;
-    }
-    neu[pos++] = '}';
-    neu[pos] = '\0';
-    (void)cbm_gbuf_node_set_properties_json((cbm_gbuf_node_t *)file_node, neu);
-    cbm_free(CBM_MEM_CLASS_GBUF_STRING, neu);
-}
-
 /* Create IMPORTS edges for one file's imports (parallel path). */
 static int create_imports_edges(cbm_pipeline_ctx_t *ctx, const CBMFileResult *result,
                                 const char *rel, CBMHashTable *namespace_map) {
@@ -1978,7 +1617,7 @@ int cbm_build_registry_from_cache(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t
             const cbm_gbuf_node_t *file_node = cbm_gbuf_find_by_qn(ctx->gbuf, file_qn);
             int64_t file_node_id = file_node ? file_node->id : 0;
             free(file_qn);
-            pp_add_file_doc(file_node, result->module_doc);
+            cbm_add_file_doc(file_node, result->module_doc);
             /* Bounds the function-local detection to this file (pass_definitions.c). */
             size_t py_prefix_len = files[i].language == CBM_LANG_PYTHON
                                        ? cbm_pipeline_fqn_symbol_prefix_len(ctx->project_name, rel)

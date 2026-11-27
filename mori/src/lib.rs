@@ -22,6 +22,9 @@ mod complexity;
 #[cfg(feature = "native-engine-abi")]
 #[path = "pipeline/csharp_doc_links/mod.rs"]
 mod csharp_doc_links;
+#[cfg(any(feature = "native-engine-abi", test))]
+#[path = "pipeline/definition_props.rs"]
+mod definition_props;
 #[cfg(feature = "native-engine-abi")]
 #[path = "pipeline/doc_file_links.rs"]
 mod doc_file_links;
