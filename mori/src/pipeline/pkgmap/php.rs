@@ -8,7 +8,7 @@ use super::resolve::{
 };
 use super::{
     HashTable, PATH_LIMIT, c_bytes, cbm_ffi_mark_written,
-    cbm_pkgmap_tracked_calloc, cbm_pkgmap_tracked_free,
+    cbm_pkgmap_tracked_free,
 };
 use crate::native_graph_buffer::cbm_gbuf_node_set_properties_json;
 use crate::native_tree::RawNode;
@@ -293,12 +293,15 @@ impl<T: Copy> BindingScratch<T> {
             return None;
         }
         let values = NonNull::new(
-            unsafe { cbm_pkgmap_tracked_calloc(size) }.cast::<T>(),
+            unsafe { cbm_pkgmap_binding_scratch_alloc(size) }.cast::<T>(),
         )?;
         // The tracked allocator provides storage aligned for the binding rows.
         for index in 0..len {
             unsafe { values.as_ptr().add(index).write(value) };
         }
+        unsafe {
+            cbm_ffi_mark_written(values.as_ptr().cast(), len * size_of::<T>())
+        };
         Some(Self { values, len })
     }
 
@@ -794,6 +797,7 @@ pub(crate) unsafe extern "C" fn cbm_pipeline_php_vendor_usage(
 }
 
 unsafe extern "C" {
+    fn cbm_pkgmap_binding_scratch_alloc(size: usize) -> *mut c_void;
     fn cbm_pkgmap_site_source(
         result: *const FileResult,
         source: *mut *const c_char,
