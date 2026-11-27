@@ -6,6 +6,7 @@
 #include <yyjson/yyjson.h>
 
 void *cbm_pkgmap_tracked_calloc(size_t size);
+void *cbm_pkgmap_binding_scratch_alloc(size_t size);
 char *cbm_pkgmap_tracked_strdup(const char *value);
 void cbm_pkgmap_tracked_free(char *value);
 const char *cbm_pkgmap_file_at(const cbm_file_info_t *files, int index, const char **abs);
