@@ -282,6 +282,9 @@ mod store_digest;
 #[cfg(any(feature = "native-engine-abi", test))]
 #[path = "pipeline/full_build_driver.rs"]
 mod full_build_driver;
+#[cfg(any(feature = "native-engine-abi", test))]
+#[path = "pipeline/incremental_execute.rs"]
+mod incremental_execute;
 #[cfg(feature = "native-engine-abi")]
 #[path = "pipeline/source_publish.rs"]
 mod source_publish;
