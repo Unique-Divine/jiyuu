@@ -4,7 +4,7 @@
 #include "store/architecture_projection.h"
 #include <sqlite3.h>
 
-/* Private ABI with jiyuu-mori/src/architecture_projection.rs. The C reader
+/* Private ABI with src/store/architecture_projection.rs. The C reader
  * owns the rows and strings. Rust fills in grouping and display selection
  * before the same request renders the payload. */
 typedef struct {

@@ -129,11 +129,11 @@ def probe(scratch: Path) -> str:
     rust_probe = scratch / "pkgmap.rs"
     rust_probe.write_text(
         "".join(
-            f'#[path = "../jiyuu-mori/src/{path}"]\nmod {module};\n'
+            f'#[path = "../src/{path}"]\nmod {module};\n'
             for module, path in (
-                ("native_hash_table", "native_hash_table.rs"),
-                ("swift_package_map", "swift_package_map.rs"),
-                ("pkgmap", "pkgmap/mod.rs"),
+                ("native_hash_table", "foundation/native_hash_table.rs"),
+                ("swift_package_map", "pipeline/swift_package_map.rs"),
+                ("pkgmap", "pipeline/pkgmap/mod.rs"),
             )
         ),
         encoding="utf-8",
