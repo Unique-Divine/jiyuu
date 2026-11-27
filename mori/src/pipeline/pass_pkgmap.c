@@ -24,13 +24,7 @@
 #include <string.h>
 #include <sys/stat.h>
 
-
 enum { PKGMAP_PATH_BUF = 1024 };
-
-static const char *path_basename(const char *rel_path) {
-    const char *last = strrchr(rel_path, '/');
-    return last ? last + SKIP_ONE : rel_path;
-}
 
 static char *path_dirname(const char *rel_path) {
     const char *last = strrchr(rel_path, '/');
