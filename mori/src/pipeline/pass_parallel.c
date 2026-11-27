@@ -28,14 +28,6 @@ enum {
     PP_LOG_THRESH = 24,
     PP_LOG_INTERVAL = 10,
     PP_TIMER_THRESH = 1000,
-    /* Extraction memory back-pressure: when the process is over its RSS budget,
-     * a worker reclaims + naps before pulling another file so peers can finish
-     * and return pages. Bounded spins avoid deadlock when the resident graph
-     * itself is near budget: then ONE confirmation cycle decides — drained
-     * means continue, still over means the attempt fails whole (decision A,
-     * #1997 #832) instead of the former open-ended soft overshoot. */
-    PP_BACKPRESSURE_MAX_SPINS = 40,
-    PP_BACKPRESSURE_NAP_NS = 3000000, /* 3 ms */
 };
 #define PP_NSEC_PER_SEC 1000000000ULL
 #define PP_USEC_PER_MS 1000000ULL
@@ -661,18 +653,6 @@ typedef struct {
     int64_t size;
 } file_sort_entry_t;
 
-static int compare_by_size_desc(const void *a, const void *b) {
-    const file_sort_entry_t *fa = a;
-    const file_sort_entry_t *fb = b;
-    if (fb->size > fa->size) {
-        return SKIP_ONE;
-    }
-    if (fb->size < fa->size) {
-        return CBM_NOT_FOUND;
-    }
-    return 0;
-}
-
 /* ── Phase 3A: Parallel Extract ──────────────────────────────────── */
 
 #define CBM_CACHE_LINE CBM_SZ_128
@@ -686,19 +666,16 @@ typedef struct __attribute__((aligned(CBM_CACHE_LINE))) {
 
 typedef struct {
     const cbm_file_info_t *files;
-    file_sort_entry_t *sorted;
     int file_count;
     const char *project_name;
     const char *repo_path;
 
     extract_worker_state_t *workers;
     int max_workers;
-    _Atomic int next_worker_id;
 
     CBMFileResult **result_cache;
     _Atomic int64_t *shared_ids;
     _Atomic int *cancelled;
-    _Atomic int next_file_idx;
     cbm_pipeline_ctx_t *pctx;         /* spill store + mode latch live here */
     _Atomic uint8_t *slot_state;      /* per file: 0 in progress, 1 cached, 2 parked */
     _Atomic int spill_sweeps_running; /* workers inside pp_spill_sweep right now */
@@ -719,12 +696,6 @@ typedef struct {
     pp_err_list_t *err_lists;
     _Atomic int oversized_warned; /* throttle for the index.file_oversized WARN */
 
-    /* Back-pressure futility latch: set when a full collect+nap cycle ended
-     * still over budget — the resident floor (graph + retained sources), not
-     * in-flight transients, holds the memory, so napping cannot reclaim it.
-     * While set, pulls skip the nap (the designed soft overshoot); the cheap
-     * over-budget probe re-arms the gate once RSS drains under budget. */
-    _Atomic int bp_futile;
     /* Decision A (#1997 #832): set once futility was CONFIRMED by a second
      * full cycle that still ended over budget. Every pull loop breaks on it
      * and extract returns CBM_PIPELINE_ABORT_OVER_BUDGET. Deliberately not
@@ -737,6 +708,37 @@ typedef struct {
     /* Superlinearity probe — see profile.h. Ticked on each file claim below. */
     cbm_scale_probe_t scale;
 } extract_ctx_t;
+
+/* The Rust scheduler borrows this table and the native context until the
+ * worker pool has joined. A worker's callbacks stay on the same thread so
+ * the parser, working arena and slab keep their native TLS lifetimes. */
+typedef struct {
+    void (*dispatch)(int, cbm_parallel_fn, void *);
+    void (*start)(extract_ctx_t *, int);
+    void (*finish)(void);
+    void (*claimed)(extract_ctx_t *, int);
+    void (*extract_file)(extract_ctx_t *, int, int, int);
+    bool (*cancelled)(const extract_ctx_t *);
+    bool (*aborted)(const extract_ctx_t *);
+    size_t (*budget)(void);
+    size_t (*charged)(void);
+    bool (*over_budget)(void);
+    bool (*system_under_pressure)(void);
+    void (*charge_probe)(extract_ctx_t *, bool);
+    bool (*spill_active)(const extract_ctx_t *);
+    void (*spill_enter)(extract_ctx_t *, const char *);
+    int (*spill_sweep)(extract_ctx_t *, int);
+    bool (*spill_work_remains)(const extract_ctx_t *);
+    void (*begin_cycle)(void);
+    void (*nap)(uint32_t);
+    void (*confirm_futile)(void);
+    void (*fail_over_budget)(extract_ctx_t *);
+} extract_schedule_ops_t;
+
+extern void cbm_rust_extract_sort_tasks(file_sort_entry_t *tasks, int count);
+extern void cbm_rust_extract_dispatch(const file_sort_entry_t *tasks, int count, int workers,
+                                      extract_ctx_t *ctx, const extract_schedule_ops_t *ops);
+extern size_t cbm_rust_extract_spill_line(size_t budget);
 
 /* Cap on the number of index.file_oversized WARN lines (the full list still goes
  * to the response/logfile — this only throttles the stderr noise). */
@@ -856,22 +858,18 @@ static void log_extract_done(int pos, uint64_t ms, int defs, const char *path) {
     }
 }
 
-/* One back-pressure cycle: reclaim this thread's freed pages, then nap in
- * bounded 3 ms steps while the process stays over budget. Counted for test
- * observability. Returns true when the FULL cycle elapsed still over budget —
- * the resident floor, not in-flight transients, holds the memory. */
-static bool pp_backpressure_cycle_still_over(extract_ctx_t *ec) {
+static void pp_begin_backpressure_cycle(void) {
     cbm_mem_collect();
     atomic_fetch_add_explicit(&g_bp_nap_cycles, SKIP_ONE, memory_order_relaxed);
-    int bp = 0;
-    for (; bp < PP_BACKPRESSURE_MAX_SPINS && cbm_mem_over_budget() &&
-           !atomic_load_explicit(ec->cancelled, memory_order_relaxed) &&
-           !atomic_load_explicit(&ec->over_budget_abort, memory_order_relaxed);
-         bp++) {
-        struct timespec nap = {0, PP_BACKPRESSURE_NAP_NS};
-        cbm_nanosleep(&nap, NULL);
-    }
-    return bp == PP_BACKPRESSURE_MAX_SPINS && cbm_mem_over_budget();
+}
+
+static void pp_backpressure_nap(uint32_t nanoseconds) {
+    struct timespec nap = {0, (long)nanoseconds};
+    cbm_nanosleep(&nap, NULL);
+}
+
+static void pp_confirm_backpressure_futile(void) {
+    cbm_log_warn("mem.backpressure.futile", "action", "confirm");
 }
 
 /* Decision A (#1997 #832): back-pressure was futile and the confirmation
@@ -890,11 +888,6 @@ static void pp_fail_whole_over_budget(extract_ctx_t *ec) {
 }
 
 /* ── Spill / admission control ──────────────────────────────────────── */
-
-/* Spill mode is entered this fraction short of the budget: 1/16 = 6.25%,
- * ~940 MB at 15 GB, above the 4% the kernel's in-flight files were measured
- * to carry past the line. */
-enum { PP_SPILL_EARLY_DIV = 16 };
 
 /* CBM_MEM_SPILL=1 forces spill mode from the first file (tests, small
  * machines); CBM_MEM_SPILL=0 keeps results in memory even over budget. Read
@@ -1122,7 +1115,7 @@ static void pp_spill_if_projected_over(extract_ctx_t *ec) {
     int64_t refs = 0;
     size_t growth = pp_post_extract_growth(ec, &defs, &refs);
     size_t charged = cbm_mem_charged();
-    size_t line = budget - budget / PP_SPILL_EARLY_DIV;
+    size_t line = cbm_rust_extract_spill_line(budget);
     bool spill = growth > line || charged > line - growth;
     const size_t mb = (size_t)1024 * 1024;
     char v[6][CBM_SZ_32];
@@ -1170,397 +1163,331 @@ static void pp_charge_probe(extract_ctx_t *ec, bool over) {
     cbm_mem_class_log(first_over ? "charge.first_over" : "charge.step");
 }
 
-static void extract_worker(int worker_id, void *ctx_ptr) {
-    extract_ctx_t *ec = ctx_ptr;
+static void pp_start_extract_worker(extract_ctx_t *ec, int worker_id) {
     extract_worker_state_t *ws = &ec->workers[worker_id];
-
-    /* Lazy gbuf creation */
     if (!ws->local_gbuf) {
         ws->local_gbuf = cbm_gbuf_new_worker(ec->project_name, ec->repo_path, ec->shared_ids);
     }
+}
 
-    /* Pull files from shared atomic counter */
-    while (SKIP_ONE) {
-        int sort_pos =
-            atomic_fetch_add_explicit(&ec->next_file_idx, SKIP_ONE, memory_order_relaxed);
-        if (sort_pos >= ec->file_count) {
-            break;
-        }
-        cbm_scale_tick(&ec->scale, sort_pos);
-        if (atomic_load_explicit(ec->cancelled, memory_order_relaxed) ||
-            atomic_load_explicit(&ec->over_budget_abort, memory_order_relaxed)) {
-            break;
-        }
+static void pp_finish_extract_worker(void) {
+    cbm_work_arena_release();
+    cbm_slab_destroy_thread();
+    cbm_kind_in_set_free_cache();
+}
 
-        /* Memory back-pressure (large repos): if the process is over its RSS
-         * budget, reclaim this thread's freed pages and nap so peer workers can
-         * finish their current file and return memory before this worker adds
-         * another parse working set. Caps the concurrent extraction transient
-         * near the budget instead of letting all workers parse their biggest
-         * files at once. Self-disabling when the budget is unset (tests) or RSS
-         * is under budget; bounded spins avoid deadlock when the resident graph
-         * is itself near budget.
-         *
-         * Futility latch: when a FULL nap cycle ends still over budget, the
-         * resident floor — not transients — holds the memory; napping again on
-         * the next pull cannot reclaim it and only idles workers (linux kernel:
-         * one full cycle per pull ≈ 390 s at 79% avg CPU). The worker that
-         * latches bp_futile (0→1) runs ONE confirmation cycle while its peers
-         * skip the nap. A confirmation that ends under budget re-arms the gate
-         * (RSS drained after all); one that still ends over budget fails the
-         * attempt whole (decision A, #1997 #832): every worker stops pulling,
-         * extract returns CBM_PIPELINE_ABORT_OVER_BUDGET, nothing is published
-         * and the previously serving index keeps answering. */
-        if (cbm_mem_budget() > 0) {
-            bool over = cbm_mem_over_budget();
-            pp_charge_probe(ec, over);
-            /* Anticipation: the gate sees the crossing per file pull, and the
-             * workers' in-flight files carry the charge past the line before
-             * the first sweep lands (kernel, 15 GB budget: high-water 15.65
-             * GB, 4% over, all of it set in that window). Spill mode is
-             * entered PP_SPILL_EARLY_DIV-th short of the budget, so results
-             * stop accumulating in memory while the headroom still covers the
-             * in-flight work. The nap / futility path still keys on the
-             * budget itself. */
-            if (!over && !pp_spill_active(ec)) {
-                size_t budget = cbm_mem_budget();
-                if (cbm_mem_charged() > budget - budget / PP_SPILL_EARLY_DIV) {
-                    pp_spill_enter(ec, "near_budget");
-                }
-            }
-            /* The MACHINE can be out of memory while our own charge sits well
-             * under the budget: measured 2026-09-18 on a 48 GB host, 22 GB
-             * charged against a 24 GB budget, and the OS killed the worker
-             * anyway because a VM held the rest. Spill on real scarcity too.
-             * RELIEF ONLY — `over` is deliberately NOT set from this, so the
-             * futility/abort path below stays keyed to OUR budget. Another
-             * process's allocation spike must never fail this run.
-             * The cheap charge comparison guards the syscall, so the pressure
-             * query costs nothing until we are already in the danger zone. */
-            if (!pp_spill_active(ec) && cbm_mem_charged() > cbm_mem_budget() / 2 &&
-                cbm_mem_system_under_pressure()) {
-                pp_spill_enter(ec, "system_pressure");
-                (void)pp_spill_sweep(ec, worker_id);
-            }
-            bool settling = false;
-            if (over) {
-                /* Admission control, first response: park what can be parked.
-                 * Only what is still over budget after that -- the floor --
-                 * reaches the nap / futility / abort path below, and only
-                 * once nothing is left to park anywhere. */
-                pp_spill_enter(ec, "over_budget");
-                int parked = pp_spill_sweep(ec, worker_id);
-                over = cbm_mem_over_budget();
-                if (over && pp_spill_active(ec) && (parked > 0 || pp_spill_work_remains(ec))) {
-                    over = false; /* memory is still on its way down */
-                    settling = true;
-                }
-            }
-            bool futile = atomic_load_explicit(&ec->bp_futile, memory_order_relaxed) != 0;
-            if (over && !futile) {
-                /* Act only on the 0→1 transition: all workers race into the
-                 * gate before anyone latches, so a plain store would confirm
-                 * (and WARN) once per worker. */
-                if (pp_backpressure_cycle_still_over(ec) &&
-                    atomic_exchange_explicit(&ec->bp_futile, 1, memory_order_relaxed) == 0) {
-                    cbm_log_warn("mem.backpressure.futile", "action", "confirm");
-                    if (pp_backpressure_cycle_still_over(ec)) {
-                        pp_fail_whole_over_budget(ec);
-                    } else {
-                        atomic_store_explicit(&ec->bp_futile, 0, memory_order_relaxed);
-                    }
-                }
-            } else if (!over && !settling && futile) {
-                /* Re-arm only on a genuine under-budget reading. A reading the
-                 * spill shortcut produced ("still on its way down") is not
-                 * one: re-arming on it made the next over-budget pull pay a
-                 * full nap cycle again -- the gate re-paid per pull that
-                 * pipeline_backpressure_futile_nap_disengages guards against
-                 * (TSan lane on PR #2202: 8 cycles against a bound of 7). */
-                atomic_store_explicit(&ec->bp_futile, 0, memory_order_relaxed);
-            }
-        }
-        if (atomic_load_explicit(&ec->over_budget_abort, memory_order_relaxed)) {
-            break;
-        }
+static void pp_profile_extract_claim(extract_ctx_t *ec, int sort_pos) {
+    cbm_scale_tick(&ec->scale, sort_pos);
+}
 
-        int file_idx = ec->sorted[sort_pos].idx;
-        const cbm_file_info_t *fi = &ec->files[file_idx];
-        pp_err_list_t *errs = ec->err_lists ? &ec->err_lists[worker_id] : NULL;
+static bool pp_extract_cancelled(const extract_ctx_t *ec) {
+    return atomic_load_explicit(ec->cancelled, memory_order_relaxed) != 0;
+}
 
-        /* Crash-quarantine skip (Stage 3c): a file the supervisor pinned as a
-         * crasher must never be extracted again. Record it as a phase="crash"
-         * skip in this worker's list (merged into the pipeline's file-error list
-         * later, surfacing in skipped[]) and move on — the good files still
-         * index and status stays "indexed". No-op unless the supervisor set
-         * CBM_INDEX_QUARANTINE_FILE. Covers the parallel path; the supervisor's
-         * single-threaded recovery run instead takes the sequential path
-         * (pass_definitions.c), and cbm_extract_file's hard guard backstops both. */
-        if (cbm_index_is_quarantined(fi->rel_path)) {
-            const char *phase = cbm_index_quarantine_phase(fi->rel_path);
-            if (!phase) {
-                phase = "crash";
+static bool pp_extract_aborted(const extract_ctx_t *ec) {
+    return atomic_load_explicit(&ec->over_budget_abort, memory_order_relaxed) != 0;
+}
+
+static void pp_extract_file(extract_ctx_t *ec, int worker_id, int file_idx, int sort_pos) {
+    extract_worker_state_t *ws = &ec->workers[worker_id];
+    const cbm_file_info_t *fi = &ec->files[file_idx];
+    pp_err_list_t *errs = ec->err_lists ? &ec->err_lists[worker_id] : NULL;
+
+    /* Crash-quarantine skip (Stage 3c): a file the supervisor pinned as a
+     * crasher must never be extracted again. Record it as a phase="crash"
+     * skip in this worker's list (merged into the pipeline's file-error list
+     * later, surfacing in skipped[]) and move on — the good files still
+     * index and status stays "indexed". No-op unless the supervisor set
+     * CBM_INDEX_QUARANTINE_FILE. Covers the parallel path; the supervisor's
+     * single-threaded recovery run instead takes the sequential path
+     * (pass_definitions.c), and cbm_extract_file's hard guard backstops both. */
+    if (cbm_index_is_quarantined(fi->rel_path)) {
+        const char *phase = cbm_index_quarantine_phase(fi->rel_path);
+        if (!phase) {
+            phase = "crash";
+        }
+        const char *reason = (strcmp(phase, "hang") == 0)    ? "quarantined after hang"
+                             : (strcmp(phase, "error") == 0) ? "quarantined after error"
+                                                             : "quarantined after crash";
+        pp_err_add(errs, fi->rel_path, reason, phase);
+        ws->errors++;
+        (void)cbm_pipeline_test_extraction_ok(ec->pctx, fi->language, NULL);
+        return;
+    }
+
+    /* Read + extract */
+    int source_len = 0;
+    long file_size = 0;
+    cbm_read_status_t rst = CBM_READ_OK;
+    char *source = read_file(fi->path, &source_len, &file_size, &rst);
+    if (!source) {
+        ws->errors++;
+        if (rst == CBM_READ_OVERSIZED) {
+            /* Never a silent drop: record the oversized skip + a throttled
+             * WARN so the file surfaces in the response/logfile. */
+            long cap = cbm_max_file_bytes();
+            char reason[96];
+            snprintf(reason, sizeof(reason), "oversized (%lld MB > %lld MB)",
+                     (long long)(file_size / (CBM_SZ_1K * CBM_SZ_1K)),
+                     (long long)(cap / (CBM_SZ_1K * CBM_SZ_1K)));
+            pp_err_add(errs, fi->rel_path, reason, "oversized");
+            if (atomic_fetch_add_explicit(&ec->oversized_warned, SKIP_ONE,
+                                          memory_order_relaxed) < PP_OVERSIZED_WARN_MAX) {
+                cbm_log_warn("index.file_oversized", "path", fi->rel_path, "size_mb",
+                             itoa_log((int)(file_size / (CBM_SZ_1K * CBM_SZ_1K))), "cap_mb",
+                             itoa_log((int)(cap / (CBM_SZ_1K * CBM_SZ_1K))));
             }
-            const char *reason = (strcmp(phase, "hang") == 0)    ? "quarantined after hang"
-                                 : (strcmp(phase, "error") == 0) ? "quarantined after error"
-                                                                 : "quarantined after crash";
-            pp_err_add(errs, fi->rel_path, reason, phase);
-            ws->errors++;
+        } else if (rst == CBM_READ_OPEN_FAIL || rst == CBM_READ_OOM) {
+            pp_err_add(errs, fi->rel_path, "read failed", "read");
+        }
+        if (rst != CBM_READ_EMPTY) {
             (void)cbm_pipeline_test_extraction_ok(ec->pctx, fi->language, NULL);
-            continue;
         }
+        return;
+    }
 
-        /* Read + extract */
-        int source_len = 0;
-        long file_size = 0;
-        cbm_read_status_t rst = CBM_READ_OK;
-        char *source = read_file(fi->path, &source_len, &file_size, &rst);
-        if (!source) {
-            ws->errors++;
-            if (rst == CBM_READ_OVERSIZED) {
-                /* Never a silent drop: record the oversized skip + a throttled
-                 * WARN so the file surfaces in the response/logfile. */
-                long cap = cbm_max_file_bytes();
-                char reason[96];
-                snprintf(reason, sizeof(reason), "oversized (%lld MB > %lld MB)",
-                         (long long)(file_size / (CBM_SZ_1K * CBM_SZ_1K)),
-                         (long long)(cap / (CBM_SZ_1K * CBM_SZ_1K)));
-                pp_err_add(errs, fi->rel_path, reason, "oversized");
-                if (atomic_fetch_add_explicit(&ec->oversized_warned, SKIP_ONE,
-                                              memory_order_relaxed) < PP_OVERSIZED_WARN_MAX) {
-                    cbm_log_warn("index.file_oversized", "path", fi->rel_path, "size_mb",
-                                 itoa_log((int)(file_size / (CBM_SZ_1K * CBM_SZ_1K))), "cap_mb",
-                                 itoa_log((int)(cap / (CBM_SZ_1K * CBM_SZ_1K))));
-                }
-            } else if (rst == CBM_READ_OPEN_FAIL || rst == CBM_READ_OOM) {
-                pp_err_add(errs, fi->rel_path, "read failed", "read");
-            }
-            if (rst != CBM_READ_EMPTY) {
-                (void)cbm_pipeline_test_extraction_ok(ec->pctx, fi->language, NULL);
-            }
-            continue;
-        }
+    /* Per-file start log: shows which file each worker is processing.
+     * Critical for diagnosing stuck workers on large vendored files.
+     *
+     * Under a crash-durable log (i.e. a supervised worker) EVERY file gets
+     * its line, not just the first rounds. That log is the only evidence a
+     * contained crash or a kill leaves behind, and #1145/#1130 are
+     * unattributable precisely because it never named the file that was in
+     * flight — the run ends with the culprit still on the last lines. One
+     * line per file, never per node. */
+    if (sort_pos < PP_LOG_THRESH || /* first 2 rounds of workers = most interesting */
+        cbm_log_crash_durable()) {
+        cbm_log_info("parallel.extract.file.start", "pos", itoa_log(sort_pos), "size_kb",
+                     itoa_log(source_len / CBM_SZ_1K), "path", fi->rel_path);
+    }
 
-        /* Per-file start log: shows which file each worker is processing.
-         * Critical for diagnosing stuck workers on large vendored files.
-         *
-         * Under a crash-durable log (i.e. a supervised worker) EVERY file gets
-         * its line, not just the first rounds. That log is the only evidence a
-         * contained crash or a kill leaves behind, and #1145/#1130 are
-         * unattributable precisely because it never named the file that was in
-         * flight — the run ends with the culprit still on the last lines. One
-         * line per file, never per node. */
-        if (sort_pos < PP_LOG_THRESH || /* first 2 rounds of workers = most interesting */
-            cbm_log_crash_durable()) {
-            cbm_log_info("parallel.extract.file.start", "pos", itoa_log(sort_pos), "size_kb",
-                         itoa_log(source_len / CBM_SZ_1K), "path", fi->rel_path);
-        }
+    uint64_t file_t0 = extract_now_ns();
 
-        uint64_t file_t0 = extract_now_ns();
+    /* Export XML uses the same cache slot as every physical file, so its
+     * generated classes are composed before entering the common registry
+     * and resolution lifecycle. */
+    CBMFileResult *result =
+        cbm_pipeline_test_force_extract_null(ec->pctx, fi->language) ? NULL
+        : fi->language == CBM_LANG_OBJECTSCRIPT_EXPORT
+            ? cbm_pipeline_extract_objectscript_export(source, source_len, ec->project_name,
+                                                       fi->rel_path, ec->macro_table,
+                                                       ec->return_type_table)
+            : cbm_extract_file_ex_with_tests(source, source_len, fi->language, ec->project_name,
+                                             fi->rel_path, CBM_EXTRACT_BUDGET, NULL, NULL,
+                                             ec->macro_table, ec->return_type_table,
+                                             ec->pctx->test_declarations);
 
-        /* Export XML uses the same cache slot as every physical file, so its
-         * generated classes are composed before entering the common registry
-         * and resolution lifecycle. */
-        CBMFileResult *result =
-            cbm_pipeline_test_force_extract_null(ec->pctx, fi->language) ? NULL
-            : fi->language == CBM_LANG_OBJECTSCRIPT_EXPORT
-                ? cbm_pipeline_extract_objectscript_export(source, source_len, ec->project_name,
-                                                           fi->rel_path, ec->macro_table,
-                                                           ec->return_type_table)
-                : cbm_extract_file_ex_with_tests(source, source_len, fi->language, ec->project_name,
-                                                 fi->rel_path, CBM_EXTRACT_BUDGET, NULL, NULL,
-                                                 ec->macro_table, ec->return_type_table,
-                                                 ec->pctx->test_declarations);
+    uint64_t file_elapsed_ms = (extract_now_ns() - file_t0) / PP_USEC_PER_MS;
 
-        uint64_t file_elapsed_ms = (extract_now_ns() - file_t0) / PP_USEC_PER_MS;
-
-        if (!cbm_pipeline_test_extraction_ok(ec->pctx, fi->language, result)) {
-            cbm_free_result(result);
-            free_source(source);
-            cbm_destroy_thread_parser();
-            cbm_slab_reclaim();
-            cbm_mem_collect();
-            continue;
-        }
-        if (!result) {
-            log_extract_fail(sort_pos, file_elapsed_ms, fi->rel_path);
-            free_source(source);
-            ws->errors++;
-            pp_err_add(errs, fi->rel_path, "extract failed", "extract");
-            continue;
-        }
-        if (result->has_test_definition_owners && result->lsp_skipped) {
-            cbm_pipeline_test_owner_error(result);
-        }
-        if (!cbm_pipeline_test_result_ok(ec->pctx, result)) {
-            cbm_free_result(result);
-            free_source(source);
-            cbm_destroy_thread_parser();
-            cbm_slab_reclaim();
-            cbm_mem_collect();
-            continue;
-        }
-        log_extract_done(sort_pos, file_elapsed_ms, result->defs.count, fi->rel_path);
-
-        /* Consume the previously-ignored has_error flag: a parse timeout / parse
-         * failure / unsupported-grammar result carries no defs but must still be
-         * reported (phase "extract", reason = the extractor's message). The empty
-         * result flows through unchanged below (the defs loop is a no-op). */
-        if (result->has_error) {
-            pp_err_add(errs, fi->rel_path, result->error_msg ? result->error_msg : "extract failed",
-                       "extract");
-            ws->errors++;
-        } else if (result->parse_incomplete) {
-            /* Best-effort parse-coverage signal (#963): the file WAS indexed,
-             * but its tree contains ERROR/MISSING regions whose constructs are
-             * silently absent from the graph. Neither phase is a skip — both
-             * are recorded separately from skipped[] by the MCP layer.
-             * "parse_unusable" means one range covers so much of the file that
-             * naming the lines helps nobody; see parse_unusable in cbm.h. */
-            pp_err_add(errs, fi->rel_path, result->error_ranges ? result->error_ranges : "unknown",
-                       result->parse_unusable ? "parse_unusable" : "parse_partial");
-        }
-        if (result->test_declarations_degraded) {
-            /* Degraded per file, not the index; see pass_definitions.c. */
-            pp_err_add(errs, fi->rel_path,
-                       cbm_test_extract_status_message(result->test_declarations_degraded_status),
-                       "test_declarations");
-        }
-        /* A truncated walk is a coverage gap like a partial parse, and until now
-         * it was the only one we kept to ourselves: result->walk_truncated was
-         * set and never read by anything, so a file the walk abandoned halfway
-         * was reported as fully indexed. Say how far it got — "walked 812k of
-         * 3.4M nodes" is the difference between a graph with a known hole and a
-         * graph that quietly lies about its coverage. Independent of the
-         * branches above: a truncated walk is not a parse error. */
-        if (result->walk_truncated) {
-            char how_far[CBM_SZ_64];
-            snprintf(how_far, sizeof(how_far), "%u/%u nodes walked", result->walk_nodes_visited,
-                     result->tree_nodes);
-            pp_err_add(errs, fi->rel_path, how_far, "walk_truncated");
-        } else if (result->lsp_skipped && !result->has_error) {
-            /* has_error already recorded its precise cause above. Indexed, but without the per-file
-             * and cross-file LSP refinement: the same kind of hole from the other direction.
-             * Nothing in production sets this any more except a truncated walk (handled above) and
-             * the test seam — it is reported anyway, so that if something sets it again the gap
-             * arrives named, not silent. */
-            char size_text[CBM_SZ_64];
-            snprintf(size_text, sizeof(size_text), "%u nodes", result->tree_nodes);
-            pp_err_add(errs, fi->rel_path, size_text, "lsp_skipped");
-        }
-
-        /* Create definition nodes in local gbuf */
-        for (int d = 0; d < result->defs.count; d++) {
-            CBMDefinition *def = &result->defs.items[d];
-            if (def->qualified_name && def->name) {
-                insert_def_into_gbuf(ws, ec->pctx ? ec->pctx->stem_marks : NULL, fi, def);
-            }
-        }
-
-        /* Free TSTree immediately — arena strings survive for registry+resolve.
-         * This makes slab reset safe: tree-sitter's internal nodes (in slab)
-         * are released before the slab is bulk-reclaimed. */
-        cbm_free_tree(result);
-
-        /* Detect and parse manifest files for package map */
-        {
-            const char *bn = strrchr(fi->rel_path, '/');
-            cbm_pkgmap_try_parse(bn ? bn + SKIP_ONE : fi->rel_path, fi->rel_path, source,
-                                 source_len, &ec->pkg_entries[worker_id]);
-        }
-
-        /* Retain source bytes in result->arena so the fused cross-file LSP
-         * step in resolve_worker can re-parse without re-reading from disk.
-         * Bounded per-file (retain_per_file_max_bytes) and by a project-wide
-         * budget (retain_total_budget_bytes) to bound peak RSS — see the
-         * retention-cap comment at the top of this file. A file DROPPED here
-         * is NOT lost to cross-file resolution: resolve_worker re-reads it on
-         * demand (bounded, freed immediately). WARN once per run so the
-         * operator knows retention was capped (index.retain_capped). */
-        if (ec->retain_sources && source_len > 0) {
-            bool dropped = false;
-            if ((size_t)source_len > ec->retain_per_file_max_bytes) {
-                dropped = true; /* over the per-file cap */
-            } else {
-                int64_t prior = atomic_fetch_add_explicit(&ec->retained_bytes, (int64_t)source_len,
-                                                          memory_order_relaxed);
-                if ((size_t)(prior + (int64_t)source_len) <= ec->retain_total_budget_bytes) {
-                    char *copy = (char *)cbm_arena_alloc(&result->arena, (size_t)source_len + 1);
-                    if (copy) {
-                        memcpy(copy, source, (size_t)source_len);
-                        copy[source_len] = '\0';
-                        result->source = copy;
-                        result->source_len = source_len;
-                    } else {
-                        /* Arena OOM — not a cap drop; re-read still covers
-                         * cross-file resolution, so don't emit the WARN. */
-                        atomic_fetch_sub_explicit(&ec->retained_bytes, (int64_t)source_len,
-                                                  memory_order_relaxed);
-                    }
-                } else {
-                    atomic_fetch_sub_explicit(&ec->retained_bytes, (int64_t)source_len,
-                                              memory_order_relaxed);
-                    dropped = true; /* project-wide budget exhausted */
-                }
-            }
-            if (dropped &&
-                atomic_exchange_explicit(&ec->retain_cap_warned, 1, memory_order_relaxed) == 0) {
-                cbm_log_warn("index.retain_capped", "path", fi->rel_path ? fi->rel_path : "?",
-                             "bytes", itoa_log((int)source_len));
-            }
-        }
-
-        /* Free source buffer — extraction captured everything needed,
-         * and the retention copy (if any) lives in result->arena. */
+    if (!cbm_pipeline_test_extraction_ok(ec->pctx, fi->language, result)) {
+        cbm_free_result(result);
         free_source(source);
-
-        /* Everything this file will ever contribute has been written; drop
-         * the working arena (node-text copies, abandoned array generations)
-         * and keep only the reachable result. See cbm_result_compact. */
-        cbm_result_compact(result);
-
-        /* Cache result (arena + extracted data, no tree) for Phase 3B and
-         * Phase 4 -- or park it straight to disk in spill mode. */
-        if (pp_spill_active(ec) &&
-            cbm_result_spill_park(ec->pctx->spill, worker_id, file_idx, result)) {
-            if (ec->slot_state) {
-                atomic_store_explicit(&ec->slot_state[file_idx], (uint8_t)2, memory_order_release);
-            }
-        } else {
-            ec->result_cache[file_idx] = result;
-            if (ec->slot_state) {
-                atomic_store_explicit(&ec->slot_state[file_idx], (uint8_t)1, memory_order_release);
-            }
-        }
-
-        /* Progress logging: log every 10 files (atomic read, no contention) */
-        if ((sort_pos + SKIP_ONE) % PP_LOG_INTERVAL == 0 || sort_pos + SKIP_ONE == ec->file_count) {
-            cbm_log_info("parallel.extract.progress", "done", itoa_log(sort_pos + SKIP_ONE),
-                         "total", itoa_log(ec->file_count));
-        }
-
-        /* Reclaim all slab + tier2 memory between files.
-         *
-         * After cbm_free_tree(result), all tree nodes are on free lists.
-         * We then destroy the parser (frees its internal allocations too),
-         * leaving ZERO live slab/tier2 pointers. At that point, we can
-         * safely munmap/free every page, bounding peak memory per-file
-         * instead of accumulating across all 644 files.
-         *
-         * get_thread_parser() in cbm_extract_file will create a fresh
-         * parser for the next file — cost is microseconds vs seconds
-         * for parsing. This prevents unbounded memory accumulation and works
-         * identically on macOS, Linux, and Windows. */
         cbm_destroy_thread_parser();
         cbm_slab_reclaim();
         cbm_mem_collect();
+        return;
+    }
+    if (!result) {
+        log_extract_fail(sort_pos, file_elapsed_ms, fi->rel_path);
+        free_source(source);
+        ws->errors++;
+        pp_err_add(errs, fi->rel_path, "extract failed", "extract");
+        return;
+    }
+    if (result->has_test_definition_owners && result->lsp_skipped) {
+        cbm_pipeline_test_owner_error(result);
+    }
+    if (!cbm_pipeline_test_result_ok(ec->pctx, result)) {
+        cbm_free_result(result);
+        free_source(source);
+        cbm_destroy_thread_parser();
+        cbm_slab_reclaim();
+        cbm_mem_collect();
+        return;
+    }
+    log_extract_done(sort_pos, file_elapsed_ms, result->defs.count, fi->rel_path);
+
+    /* Consume the previously-ignored has_error flag: a parse timeout / parse
+     * failure / unsupported-grammar result carries no defs but must still be
+     * reported (phase "extract", reason = the extractor's message). The empty
+     * result flows through unchanged below (the defs loop is a no-op). */
+    if (result->has_error) {
+        pp_err_add(errs, fi->rel_path, result->error_msg ? result->error_msg : "extract failed",
+                   "extract");
+        ws->errors++;
+    } else if (result->parse_incomplete) {
+        /* Best-effort parse-coverage signal (#963): the file WAS indexed,
+         * but its tree contains ERROR/MISSING regions whose constructs are
+         * silently absent from the graph. Neither phase is a skip — both
+         * are recorded separately from skipped[] by the MCP layer.
+         * "parse_unusable" means one range covers so much of the file that
+         * naming the lines helps nobody; see parse_unusable in cbm.h. */
+        pp_err_add(errs, fi->rel_path, result->error_ranges ? result->error_ranges : "unknown",
+                   result->parse_unusable ? "parse_unusable" : "parse_partial");
+    }
+    if (result->test_declarations_degraded) {
+        /* Degraded per file, not the index; see pass_definitions.c. */
+        pp_err_add(errs, fi->rel_path,
+                   cbm_test_extract_status_message(result->test_declarations_degraded_status),
+                   "test_declarations");
+    }
+    /* A truncated walk is a coverage gap like a partial parse, and until now
+     * it was the only one we kept to ourselves: result->walk_truncated was
+     * set and never read by anything, so a file the walk abandoned halfway
+     * was reported as fully indexed. Say how far it got — "walked 812k of
+     * 3.4M nodes" is the difference between a graph with a known hole and a
+     * graph that quietly lies about its coverage. Independent of the
+     * branches above: a truncated walk is not a parse error. */
+    if (result->walk_truncated) {
+        char how_far[CBM_SZ_64];
+        snprintf(how_far, sizeof(how_far), "%u/%u nodes walked", result->walk_nodes_visited,
+                 result->tree_nodes);
+        pp_err_add(errs, fi->rel_path, how_far, "walk_truncated");
+    } else if (result->lsp_skipped && !result->has_error) {
+        /* has_error already recorded its precise cause above. Indexed, but without the per-file
+         * and cross-file LSP refinement: the same kind of hole from the other direction.
+         * Nothing in production sets this any more except a truncated walk (handled above) and
+         * the test seam — it is reported anyway, so that if something sets it again the gap
+         * arrives named, not silent. */
+        char size_text[CBM_SZ_64];
+        snprintf(size_text, sizeof(size_text), "%u nodes", result->tree_nodes);
+        pp_err_add(errs, fi->rel_path, size_text, "lsp_skipped");
     }
 
-    /* Final cleanup (parser already destroyed in loop, just slab state) */
-    cbm_work_arena_release(); /* the working arena kept between files */
-    cbm_slab_destroy_thread();
-    cbm_kind_in_set_free_cache(); /* free this worker thread's node-type bitset cache */
+    /* Create definition nodes in local gbuf */
+    for (int d = 0; d < result->defs.count; d++) {
+        CBMDefinition *def = &result->defs.items[d];
+        if (def->qualified_name && def->name) {
+            insert_def_into_gbuf(ws, ec->pctx ? ec->pctx->stem_marks : NULL, fi, def);
+        }
+    }
+
+    /* Free TSTree immediately — arena strings survive for registry+resolve.
+     * This makes slab reset safe: tree-sitter's internal nodes (in slab)
+     * are released before the slab is bulk-reclaimed. */
+    cbm_free_tree(result);
+
+    /* Detect and parse manifest files for package map */
+    {
+        const char *bn = strrchr(fi->rel_path, '/');
+        cbm_pkgmap_try_parse(bn ? bn + SKIP_ONE : fi->rel_path, fi->rel_path, source,
+                             source_len, &ec->pkg_entries[worker_id]);
+    }
+
+    /* Retain source bytes in result->arena so the fused cross-file LSP
+     * step in resolve_worker can re-parse without re-reading from disk.
+     * Bounded per-file (retain_per_file_max_bytes) and by a project-wide
+     * budget (retain_total_budget_bytes) to bound peak RSS — see the
+     * retention-cap comment at the top of this file. A file DROPPED here
+     * is NOT lost to cross-file resolution: resolve_worker re-reads it on
+     * demand (bounded, freed immediately). WARN once per run so the
+     * operator knows retention was capped (index.retain_capped). */
+    if (ec->retain_sources && source_len > 0) {
+        bool dropped = false;
+        if ((size_t)source_len > ec->retain_per_file_max_bytes) {
+            dropped = true; /* over the per-file cap */
+        } else {
+            int64_t prior = atomic_fetch_add_explicit(&ec->retained_bytes, (int64_t)source_len,
+                                                      memory_order_relaxed);
+            if ((size_t)(prior + (int64_t)source_len) <= ec->retain_total_budget_bytes) {
+                char *copy = (char *)cbm_arena_alloc(&result->arena, (size_t)source_len + 1);
+                if (copy) {
+                    memcpy(copy, source, (size_t)source_len);
+                    copy[source_len] = '\0';
+                    result->source = copy;
+                    result->source_len = source_len;
+                } else {
+                    /* Arena OOM — not a cap drop; re-read still covers
+                     * cross-file resolution, so don't emit the WARN. */
+                    atomic_fetch_sub_explicit(&ec->retained_bytes, (int64_t)source_len,
+                                              memory_order_relaxed);
+                }
+            } else {
+                atomic_fetch_sub_explicit(&ec->retained_bytes, (int64_t)source_len,
+                                          memory_order_relaxed);
+                dropped = true; /* project-wide budget exhausted */
+            }
+        }
+        if (dropped &&
+            atomic_exchange_explicit(&ec->retain_cap_warned, 1, memory_order_relaxed) == 0) {
+            cbm_log_warn("index.retain_capped", "path", fi->rel_path ? fi->rel_path : "?",
+                         "bytes", itoa_log((int)source_len));
+        }
+    }
+
+    /* Free source buffer — extraction captured everything needed,
+     * and the retention copy (if any) lives in result->arena. */
+    free_source(source);
+
+    /* Everything this file will ever contribute has been written; drop
+     * the working arena (node-text copies, abandoned array generations)
+     * and keep only the reachable result. See cbm_result_compact. */
+    cbm_result_compact(result);
+
+    /* Cache result (arena + extracted data, no tree) for Phase 3B and
+     * Phase 4 -- or park it straight to disk in spill mode. */
+    if (pp_spill_active(ec) &&
+        cbm_result_spill_park(ec->pctx->spill, worker_id, file_idx, result)) {
+        if (ec->slot_state) {
+            atomic_store_explicit(&ec->slot_state[file_idx], (uint8_t)2, memory_order_release);
+        }
+    } else {
+        ec->result_cache[file_idx] = result;
+        if (ec->slot_state) {
+            atomic_store_explicit(&ec->slot_state[file_idx], (uint8_t)1, memory_order_release);
+        }
+    }
+
+    /* Progress logging: log every 10 files (atomic read, no contention) */
+    if ((sort_pos + SKIP_ONE) % PP_LOG_INTERVAL == 0 || sort_pos + SKIP_ONE == ec->file_count) {
+        cbm_log_info("parallel.extract.progress", "done", itoa_log(sort_pos + SKIP_ONE),
+                     "total", itoa_log(ec->file_count));
+    }
+
+    /* Reclaim all slab + tier2 memory between files.
+     *
+     * After cbm_free_tree(result), all tree nodes are on free lists.
+     * We then destroy the parser (frees its internal allocations too),
+     * leaving ZERO live slab/tier2 pointers. At that point, we can
+     * safely munmap/free every page, bounding peak memory per-file
+     * instead of accumulating across all 644 files.
+     *
+     * get_thread_parser() in cbm_extract_file will create a fresh
+     * parser for the next file — cost is microseconds vs seconds
+     * for parsing. This prevents unbounded memory accumulation and works
+     * identically on macOS, Linux, and Windows. */
+    cbm_destroy_thread_parser();
+    cbm_slab_reclaim();
+    cbm_mem_collect();
 }
+
+static void pp_dispatch_extract_workers(int worker_count, cbm_parallel_fn fn, void *schedule) {
+    const cbm_parallel_for_opts_t opts = {.max_workers = worker_count, .force_pthreads = false};
+    cbm_parallel_for(worker_count, fn, schedule, opts);
+}
+
+static const extract_schedule_ops_t extract_schedule_ops = {
+    .dispatch = pp_dispatch_extract_workers,
+    .start = pp_start_extract_worker,
+    .finish = pp_finish_extract_worker,
+    .claimed = pp_profile_extract_claim,
+    .extract_file = pp_extract_file,
+    .cancelled = pp_extract_cancelled,
+    .aborted = pp_extract_aborted,
+    .budget = cbm_mem_budget,
+    .charged = cbm_mem_charged,
+    .over_budget = cbm_mem_over_budget,
+    .system_under_pressure = cbm_mem_system_under_pressure,
+    .charge_probe = pp_charge_probe,
+    .spill_active = pp_spill_active,
+    .spill_enter = pp_spill_enter,
+    .spill_sweep = pp_spill_sweep,
+    .spill_work_remains = pp_spill_work_remains,
+    .begin_cycle = pp_begin_backpressure_cycle,
+    .nap = pp_backpressure_nap,
+    .confirm_futile = pp_confirm_backpressure_futile,
+    .fail_over_budget = pp_fail_whole_over_budget,
+};
 
 static void merge_pkg_entries(cbm_pipeline_ctx_t *ctx, cbm_pkg_entries_t *pkg_entries,
                               int worker_count) {
@@ -1645,7 +1572,7 @@ int cbm_parallel_extract_ex(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t *file
         sorted[i].idx = i;
         sorted[i].size = files[i].size;
     }
-    qsort(sorted, file_count, sizeof(file_sort_entry_t), compare_by_size_desc);
+    cbm_rust_extract_sort_tasks(sorted, file_count);
     CBM_PROF_END_N("parallel_extract", "2_sort_files", t_sort, file_count);
 
     /* Allocate per-worker state (cache-line aligned via posix_memalign) */
@@ -1675,7 +1602,6 @@ int cbm_parallel_extract_ex(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t *file
 
     extract_ctx_t ec = {
         .files = files,
-        .sorted = sorted,
         .file_count = file_count,
         .project_name = ctx->project_name,
         .repo_path = ctx->repo_path,
@@ -1694,12 +1620,9 @@ int cbm_parallel_extract_ex(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t *file
         .macro_table = pp_macro_table,
         .return_type_table = ctx->return_type_table,
     };
-    atomic_init(&ec.next_worker_id, 0);
-    atomic_init(&ec.next_file_idx, 0);
     atomic_init(&ec.retained_bytes, 0);
     atomic_init(&ec.retain_cap_warned, 0);
     atomic_init(&ec.oversized_warned, 0);
-    atomic_init(&ec.bp_futile, 0);
     atomic_init(&ec.over_budget_abort, 0);
     atomic_init(&ec.spill_sweeps_running, 0);
     atomic_init(&ec.spill_unavailable, 0);
@@ -1712,9 +1635,9 @@ int cbm_parallel_extract_ex(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t *file
 
     /* Sub-phase: Dispatch workers (parse + extract per file, PARALLEL) */
     CBM_PROF_START(t_dispatch);
-    cbm_parallel_for_opts_t parallel_opts = {.max_workers = worker_count, .force_pthreads = false};
     cbm_scale_begin(&ec.scale, "parallel_extract", (long)file_count);
-    cbm_parallel_for(worker_count, extract_worker, &ec, parallel_opts);
+    /* Join every worker before the final spill sweep and worker-index merges. */
+    cbm_rust_extract_dispatch(sorted, file_count, worker_count, &ec, &extract_schedule_ops);
     pp_spill_if_projected_over(&ec);
     if (pp_spill_active(&ec) &&
         !atomic_load_explicit(&ec.over_budget_abort, memory_order_relaxed)) {
@@ -4741,7 +4664,7 @@ static void resolve_worker(int worker_id, void *ctx_ptr) {
     }
 
     /* Tear down this worker's thread-local parser + slab state, mirroring
-     * extract_worker. Without this, resolve-worker pages keep an owner pointer
+     * parallel extraction workers. Without this, resolve-worker pages keep an owner pointer
      * into dead TLS and are never retired, so a later cross-thread free can
      * never bring their refcount to zero (leak). Retiring them here releases
      * each page as its final chunk returns. */

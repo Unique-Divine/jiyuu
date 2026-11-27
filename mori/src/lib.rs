@@ -32,6 +32,9 @@ mod docker_image;
 #[path = "pipeline/explicit_override/mod.rs"]
 mod explicit_override;
 #[cfg(any(feature = "native-engine-abi", test))]
+#[path = "pipeline/extraction_schedule.rs"]
+mod extraction_schedule;
+#[cfg(any(feature = "native-engine-abi", test))]
 #[path = "foundation/ffi_output.rs"]
 mod ffi_output;
 #[cfg(feature = "native-engine-abi")]
