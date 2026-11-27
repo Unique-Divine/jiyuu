@@ -279,7 +279,7 @@ mod config_toml_edit;
 #[path = "cli/config_yaml_edit/mod.rs"]
 mod config_yaml_edit;
 #[cfg(feature = "native-engine-abi")]
-#[path = "mcp/file_outline.rs"]
+#[path = "mcp/file_outline/mod.rs"]
 mod file_outline;
 #[cfg(feature = "native-engine-abi")]
 #[path = "store/fts_writer.rs"]
