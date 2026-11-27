@@ -1,7 +1,13 @@
-//! Parse package manifests and merge per-worker entries for import resolution.
+//! Discover package maps and resolve imports for native index runs.
 
+mod graph;
 mod json;
 mod manifest;
+mod namespace;
+mod php;
+mod python;
+mod resolve;
+mod rust_use;
 mod walk;
 
 use crate::native_hash_table::{
@@ -471,6 +477,19 @@ fn dirname(path: &[u8]) -> &[u8] {
     path.iter()
         .rposition(|&byte| byte == b'/')
         .map_or(b"", |index| &path[..index])
+}
+
+fn limit(mut bytes: Vec<u8>) -> Vec<u8> {
+    bytes.truncate(PATH_LIMIT);
+    bytes
+}
+
+fn join(directory: &[u8], suffix: &[u8]) -> Vec<u8> {
+    if directory.is_empty() {
+        limit(suffix.to_vec())
+    } else {
+        limit([directory, b"/", suffix].concat())
+    }
 }
 
 fn mark_cstr(value: &CStr) {

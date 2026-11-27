@@ -2,7 +2,10 @@
 
 use std::ffi::{c_char, c_void};
 
-pub(super) enum HashTable {}
+#[repr(C)]
+pub(super) struct HashTable {
+    _opaque: [u8; 0],
+}
 
 unsafe extern "C" {
     pub(super) fn cbm_ht_count(table: *const HashTable) -> u32;

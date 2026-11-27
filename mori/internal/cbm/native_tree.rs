@@ -141,8 +141,13 @@ impl RawNode {
     }
 
     pub(crate) unsafe fn is(self, kind: &CStr) -> bool {
-        // SAFETY: Native node kinds are NUL-terminated for a valid live node.
-        unsafe { CStr::from_ptr(cbm_ffi_ts_node_type(&self)) == kind }
+        // SAFETY: The caller guarantees the live tree.
+        unsafe { self.kind() == kind }
+    }
+
+    pub(crate) unsafe fn kind(self) -> &'static CStr {
+        // SAFETY: A live node supplies a static, NUL-terminated grammar string.
+        unsafe { CStr::from_ptr(cbm_ffi_ts_node_type(&self)) }
     }
 
     pub(crate) unsafe fn range(self) -> std::ops::Range<usize> {
