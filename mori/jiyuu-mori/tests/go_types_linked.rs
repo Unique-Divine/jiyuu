@@ -66,6 +66,7 @@ fn index(
             .env("HOME", std::env::var_os("HOME").unwrap_or_default())
             .env("CBM_CACHE_DIR", &cache)
             .env("CBM_RUNTIME_DIR", &runtime)
+            .env("CBM_PROFILE", "1")
             .env("CBM_LOG_LEVEL", "debug")
             .env("CBM_WORKERS", workers);
         command
