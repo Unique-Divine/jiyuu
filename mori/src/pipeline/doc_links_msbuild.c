@@ -1796,7 +1796,7 @@ static int msb_import_find(void *context, const char *path) {
  * (outside). */
 static int msb_import_target(msb_eval_t *ev, int file, const char *project) {
     const char *value = project ? msb_expand(ev, file, project) : NULL;
-    size_t work;
+    size_t work = 0;
     int target = mori_msbuild_import_target(value, ev->m->files[file].dir, ev, msb_import_alloc,
                                             msb_import_find, &work);
     msb_work(work);

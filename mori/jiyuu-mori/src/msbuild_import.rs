@@ -141,8 +141,12 @@ unsafe extern "C" fn mori_msbuild_import_target(
     if !normalize(path, work) {
         return OUTSIDE;
     }
-    // SAFETY: The normalized path ends in NUL and remains readable for lookup.
-    let target = unsafe { find(context, buffer.cast()) };
+    // SAFETY: Rust already initialized the full scratch range. Mark it for
+    // instrumented C before the callback reads the NUL-terminated path.
+    let target = unsafe {
+        crate::ffi_output::written(path.as_ptr(), path.len());
+        find(context, buffer.cast())
+    };
     if target < 0 { OUTSIDE } else { target }
 }
 
