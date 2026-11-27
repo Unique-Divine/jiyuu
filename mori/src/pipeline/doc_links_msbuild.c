@@ -1772,39 +1772,22 @@ static msb_tri_t msb_cond(msb_eval_t *ev, int file, const char *condition) {
 
 /* ── Imports ─────────────────────────────────────────────────────── */
 
-/* Resolve "." and ".." in a '/'-separated path, in place. false when it
- * leaves the repository. */
-static bool msb_normalize(char *path) {
-    /* The text is read by index up to its original length: what is written
-     * (every kept segment and a '/' after it) never passes the read position,
-     * but it does overwrite the terminator. */
-    size_t len = strlen(path);
-    size_t w = 0;
-    size_t i = 0;
-    while (i < len) {
-        size_t s = i;
-        while (i < len && path[i] != '/') {
-            i++;
-        }
-        size_t n = i - s;
-        i += i < len; /* past the '/' */
-        if (n == PAIR_LEN && path[s] == '.' && path[s + SKIP_ONE] == '.') {
-            if (w == 0) {
-                return false;
-            }
-            w--; /* the '/' that ends the previous segment */
-            while (w > 0 && path[w - SKIP_ONE] != '/') {
-                w--;
-            }
-        } else if (n > 0 && !(n == SKIP_ONE && path[s] == '.')) {
-            memmove(path + w, path + s, n);
-            msb_work(n + SKIP_ONE); /* copied segment and slash */
-            w += n;
-            path[w++] = '/';
-        }
-    }
-    path[w > 0 ? w - SKIP_ONE : 0] = '\0';
-    return true;
+enum {
+    MSB_IMPORT_OUTSIDE = -2,
+    MSB_IMPORT_UNEVALUABLE = -3,
+};
+
+int mori_msbuild_import_target(const char *value, const char *directory, void *context,
+                               char *(*alloc)(void *, size_t), int (*find)(void *, const char *),
+                               size_t *work);
+
+static char *msb_import_alloc(void *context, size_t size) {
+    return scratch_alloc(context, size);
+}
+
+static int msb_import_find(void *context, const char *path) {
+    msb_eval_t *ev = context;
+    return msb_file_index(ev->m, path);
 }
 
 /* The file an <Import Project="..."> written in `file` names: its index, or
@@ -1813,44 +1796,13 @@ static bool msb_normalize(char *path) {
  * (outside). */
 static int msb_import_target(msb_eval_t *ev, int file, const char *project) {
     const char *value = project ? msb_expand(ev, file, project) : NULL;
-    if (!value) {
-        ev->unevaluable++;
-        return CBM_NOT_FOUND;
-    }
-    size_t n = strlen(value);
-    trim_span(&value, &n);
-    const msb_file_t *f = &ev->m->files[file];
-    bool marked = n > 0 && value[0] == MSB_PATH_MARK;
-    size_t skip = marked ? SKIP_ONE : 0;
-    if (n == skip || memchr(value + skip, MSB_PATH_MARK, n - skip) || memchr(value, '*', n) ||
-        memchr(value, '?', n)) {
-        ev->unevaluable++;
-        return CBM_NOT_FOUND;
-    }
-    bool absolute =
-        !marked && (value[0] == '/' || value[0] == '\\' || (n > SKIP_ONE && value[1] == ':'));
-    if (absolute) {
-        ev->outside++;
-        return CBM_NOT_FOUND;
-    }
-    size_t dl = marked ? 0 : strlen(f->dir);
-    char *path = (char *)scratch_alloc(ev, dl + n + PAIR_LEN);
-    if (!path) {
-        return CBM_NOT_FOUND;
-    }
-    memcpy(path, f->dir, dl);
-    path[dl] = '/';
-    memcpy(path + dl + SKIP_ONE, value + skip, n - skip);
-    path[dl + SKIP_ONE + n - skip] = '\0';
-    msb_work(dl + n - skip + PAIR_LEN);
-    for (char *p = path; *p; p++) {
-        if (*p == '\\') {
-            *p = '/';
-        }
-    }
-    int target = msb_normalize(path) ? msb_file_index(ev->m, path) : CBM_NOT_FOUND;
-    ev->outside += target < 0;
-    return target;
+    size_t work = 0;
+    int target = mori_msbuild_import_target(value, ev->m->files[file].dir, ev, msb_import_alloc,
+                                            msb_import_find, &work);
+    msb_work(work);
+    ev->unevaluable += target == MSB_IMPORT_UNEVALUABLE;
+    ev->outside += target == MSB_IMPORT_OUTSIDE;
+    return target < 0 ? CBM_NOT_FOUND : target;
 }
 
 static bool set_has(const CBMHashTable *set, const char *key) {

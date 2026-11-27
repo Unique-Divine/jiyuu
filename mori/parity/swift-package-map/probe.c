@@ -24,7 +24,7 @@ int main(int argc, char **argv) {
     char *excluded[] = {"Excluded"};
     cbm_pkg_entries_init(&entries);
     int manifests = cbm_pkgmap_scan_repo(repo, &entries, excluded, 1);
-    assert(manifests == 5 && entries.count == 9);
+    assert(manifests == 14 && entries.count == 23);
     print_entries("repo", manifests, &entries);
 
     cbm_pkg_entries_init(&entries);
@@ -49,6 +49,12 @@ int main(int argc, char **argv) {
     CBMHashTable *pkgmap = cbm_pkgmap_build_from_repo(repo, NULL, 0, project, excluded, 1);
     assert(ctx.gbuf && pkgmap);
     assert(cbm_ht_has(pkgmap, "js-fixture"));
+    const char *psr4_root = cbm_ht_get(pkgmap, "Z\\");
+    assert(psr4_root && strcmp(psr4_root, "Php/src") == 0);
+    const char *go_module = cbm_ht_get(pkgmap, "example.com/demo");
+    assert(go_module && strcmp(go_module, project) == 0);
+    printf("selected\tZ\\\t%s\n", psr4_root);
+    printf("selected\texample.com/demo\t%s\n", go_module);
     assert(!cbm_ht_has(pkgmap, "Alias") && !cbm_ht_has(pkgmap, "Phantom"));
     cbm_pipeline_set_pkgmap(pkgmap);
 

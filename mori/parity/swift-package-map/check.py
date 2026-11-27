@@ -1,4 +1,4 @@
-"""Compare the SwiftPM port with the pinned C package-map pass on Linux."""
+"""Compare package-map construction with the pinned C pass on Linux."""
 
 import difflib
 import subprocess
@@ -9,7 +9,7 @@ PROBE = Path(__file__).resolve().with_name("probe.c")
 MORI = PROBE.parents[2]
 BASE = "e5ff9708830a5fbfe879dfe925996b9b193c3e74"
 PKGMAP = "src/pipeline/pass_pkgmap.c"
-RUST = "jiyuu-mori/src/swift_package_map.rs"
+BRIDGE = "src/pipeline/pkgmap_bridge.c"
 
 MANIFESTS = {
     "App/Package.swift": """
@@ -38,7 +38,25 @@ MANIFESTS = {
     "Empty/Package.swift": "",
     "Excluded/Package.swift": '.target(name: "Excluded")',
     ".git/Package.swift": '.target(name: "Skipped")',
-    "Web/package.json": '{"name":"js-fixture","main":"index.js"}',
+    "Web/package.json": (
+        '{"name":"js-fixture","main":"index.js",'
+        '"exports":{".":{"default":"./fallback.js","import":"./src/main.ts"}}}'
+    ),
+    "go.mod": "module example.com/demo\n\ngo 1.21\n",
+    "Workspace/Cargo.toml": "[workspace]\n[package]\nname = 'rust-pkg'\n",
+    "App/pyproject.toml": '[project]\nname = "flask-example-celery"\n',
+    "Php/composer.json": (
+        r'{"autoload":{"psr-4":{"Z\\":"./src/","A\\":".",'
+        r'"Z\\":"duplicate/"}},"autoload-dev":{"psr-4":{"Z\\":"dev/"}}}'
+    ),
+    "Flutter/pubspec.yaml": "name: dart_pkg\n",
+    "Java/pom.xml": (
+        "<parent><groupId>ignored</groupId><artifactId>x</artifactId></parent>"
+        "<groupId>com.acme</groupId><artifactId>example</artifactId>"
+    ),
+    "Kotlin/build.gradle.kts": 'group = "com.acme.kotlin"\n',
+    "Elixir/mix.exs": "  app: :elixir_pkg,\n",
+    "Ruby/example.gemspec": "spec.name = 'ruby-pkg'\n",
 }
 
 C_SOURCES = [
@@ -107,14 +125,26 @@ def probe(scratch: Path) -> str:
     reference_c.write_text(
         run("git", "show", f"{BASE}:mori/{PKGMAP}"), encoding="utf-8"
     )
-    rust_archive = scratch / "swift_package_map.a"
+    rust_archive = scratch / "pkgmap.a"
+    rust_probe = scratch / "pkgmap.rs"
+    rust_probe.write_text(
+        "".join(
+            f'#[path = "../jiyuu-mori/src/{path}"]\nmod {module};\n'
+            for module, path in (
+                ("native_hash_table", "native_hash_table.rs"),
+                ("swift_package_map", "swift_package_map.rs"),
+                ("pkgmap", "pkgmap/mod.rs"),
+            )
+        ),
+        encoding="utf-8",
+    )
     run(
         "rustc",
         "--edition",
         "2024",
         "--crate-type",
         "staticlib",
-        RUST,
+        rust_probe,
         "-o",
         rust_archive,
     )
@@ -132,7 +162,7 @@ def probe(scratch: Path) -> str:
         "-o",
         reference,
     )
-    run(*CC, PROBE, *C_SOURCES, PKGMAP, rust_archive, "-o", candidate)
+    run(*CC, PROBE, *C_SOURCES, PKGMAP, BRIDGE, rust_archive, "-o", candidate)
 
     before = run(reference, repo)
     after = run(candidate, repo)

@@ -2598,11 +2598,222 @@ TEST(ei_python_example_project_import_binds_its_own_package) {
     PASS();
 }
 
+/* Parser rows are consumed directly by the worker merge and Swift owner
+ * registry. Assert the row order and provenance before either consumer. */
+TEST(ei_pkgmap_manifest_rows_preserve_precedence) {
+    static const struct {
+        const char *basename;
+        const char *source;
+        const char *name;
+        const char *entry;
+    } single[] = {
+        {"package.json",
+         "{\"name\":\"node\",\"name\":\"ignored\",\"main\":\"wrong.js\","
+         "\"exports\":{\".\":{\"require\":\"wrong.cjs\",\"default\":\"wrong.mjs\","
+         "\"import\":\"./lib/right.ts\"}}}",
+         "node", "nested/lib/right"},
+        {"go.mod", "\tmodule example.com/root\r\n", "example.com/root", "nested"},
+        {"Cargo.toml", "[workspace]\n[package]\nname = 'rust-pkg'\n", "rust-pkg",
+         "nested/src/lib"},
+        {"pubspec.yaml", "name: dart_pkg\n", "dart_pkg", "nested/lib"},
+        {"build.gradle.kts", "group = \"com.acme\"\n", "com.acme", "nested/src/main/java"},
+        {"mix.exs", "  app: :elixir_pkg,\n", "elixir_pkg", "nested/lib/elixir_pkg"},
+        {"example.gemspec", "spec.name = 'ruby-pkg'\n", "ruby-pkg", "nested/lib/ruby-pkg"},
+    };
+    cbm_pkg_entries_t entries;
+    cbm_pkg_entries_init(&entries);
+    for (size_t i = 0; i < sizeof(single) / sizeof(single[0]); i++) {
+        char rel[128];
+        snprintf(rel, sizeof(rel), "nested/%s", single[i].basename);
+        ASSERT_TRUE(cbm_pkgmap_try_parse(single[i].basename, rel, single[i].source,
+                                        (int)strlen(single[i].source), &entries));
+        ASSERT_EQ(entries.count, 1);
+        ASSERT_STR_EQ(single[i].name, entries.items[0].pkg_name);
+        ASSERT_STR_EQ(single[i].entry, entries.items[0].entry_rel);
+        ASSERT_STR_EQ(rel, entries.items[0].source_rel);
+        ASSERT_EQ(entries.items[0].source_seq, 0);
+        ASSERT_NULL(entries.items[0].manifest_rel);
+        cbm_pkg_entries_free(&entries);
+    }
+
+    const char *composer = "{\"autoload\":{\"psr-4\":{\"Z\\\\\":\"./src/\",\"A\\\\\":\".\","
+                           "\"Z\\\\\":\"duplicate/\"}},\"autoload-dev\":{\"psr-4\":{\"Z\\\\\":\"dev/\"}}}";
+    ASSERT_TRUE(cbm_pkgmap_try_parse("composer.json", "nested/composer.json", composer,
+                                    (int)strlen(composer), &entries));
+    ASSERT_EQ(entries.count, 4);
+    ASSERT_STR_EQ("Z\\", entries.items[0].pkg_name);
+    ASSERT_STR_EQ("nested/src", entries.items[0].entry_rel);
+    ASSERT_STR_EQ("A\\", entries.items[1].pkg_name);
+    ASSERT_STR_EQ("nested", entries.items[1].entry_rel);
+    ASSERT_STR_EQ("nested/duplicate", entries.items[2].entry_rel);
+    ASSERT_STR_EQ("nested/dev", entries.items[3].entry_rel);
+    for (int i = 0; i < entries.count; i++) {
+        ASSERT_STR_EQ("nested/composer.json", entries.items[i].source_rel);
+        ASSERT_EQ(entries.items[i].source_seq, i);
+    }
+    CBMHashTable *map = cbm_pkgmap_build(&entries, 1, "fixture");
+    ASSERT_NOT_NULL(map);
+    ASSERT_STR_EQ("nested/src", (const char *)cbm_ht_get(map, "Z\\"));
+    cbm_pkgmap_free(map);
+    cbm_pkg_entries_free(&entries);
+
+    const char *pom = "<parent><groupId>ignored</groupId><artifactId>x</artifactId></parent>"
+                      "<groupId>com.acme</groupId><artifactId>example</artifactId>";
+    ASSERT_TRUE(cbm_pkgmap_try_parse("pom.xml", "nested/pom.xml", pom, (int)strlen(pom), &entries));
+    ASSERT_EQ(entries.count, 2);
+    ASSERT_STR_EQ("com.acme.example", entries.items[0].pkg_name);
+    ASSERT_STR_EQ("com.acme", entries.items[1].pkg_name);
+    ASSERT_STR_EQ("nested/src/main/java", entries.items[1].entry_rel);
+    ASSERT_FALSE(cbm_pkgmap_try_parse("package.json", "package.json", "", 0, &entries));
+    ASSERT_FALSE(cbm_pkgmap_try_parse("not-a-manifest", "not-a-manifest", "foo", 3, &entries));
+    ASSERT_EQ(entries.count, 2);
+    cbm_pkg_entries_free(&entries);
+    PASS();
+}
+
+TEST(ei_pkgmap_walk_keeps_swift_boundaries_and_exclusions) {
+    const char *tmp = th_mktempdir("cbm_pkgmap_native");
+    ASSERT_NOT_NULL(tmp);
+    char root[512];
+    snprintf(root, sizeof(root), "%s/répo", tmp);
+    ASSERT_EQ(th_write_file(TH_PATH(root, "Core/Package.swift"),
+                            "let package = Package(targets: [.target(name: \"Core\")])\n"),
+              0);
+    ASSERT_EQ(th_write_file(TH_PATH(root, "Excluded/Package.swift"),
+                            "let package = Package(targets: [.target(name: \"Excluded\")])\n"),
+              0);
+    ASSERT_EQ(th_write_file(TH_PATH(root, "Core/package.json"),
+                            "{\"name\":\"core-js\",\"module\":\"lib.js\"}"),
+              0);
+#ifndef _WIN32
+    ASSERT_EQ(symlink("Excluded", TH_PATH(root, "linked-package")), 0);
+    ASSERT_EQ(symlink("Core/Package.swift", TH_PATH(root, "Package.swift")), 0);
+#endif
+    char excluded[] = "Excluded";
+    char *exclusions[] = {excluded};
+    cbm_pkg_entries_t entries;
+    cbm_pkg_entries_init(&entries);
+    ASSERT_EQ(cbm_pkgmap_scan_swift_targets(root, &entries, exclusions, 1), 1);
+    ASSERT_EQ(entries.count, 2);
+    ASSERT_STR_EQ("Core", entries.items[0].pkg_name);
+    ASSERT_STR_EQ("Core/Sources/Core", entries.items[0].entry_rel);
+    ASSERT_STR_EQ("Core/Package.swift", entries.items[0].manifest_rel);
+    ASSERT_STR_EQ("Core/Package.swift", entries.items[0].source_rel);
+    ASSERT_NULL(entries.items[1].pkg_name);
+    ASSERT_STR_EQ("Core", entries.items[1].entry_rel);
+    ASSERT_STR_EQ("Core/Package.swift", entries.items[1].manifest_rel);
+    ASSERT_NULL(entries.items[1].source_rel);
+    cbm_pkg_entries_free(&entries);
+
+    ASSERT_EQ(cbm_pkgmap_scan_repo(root, &entries, exclusions, 1), 2);
+    ASSERT_EQ(entries.count, 2);
+    cbm_pkg_entries_free(&entries);
+#ifndef _WIN32
+    ASSERT_EQ(unlink(TH_PATH(root, "linked-package")), 0);
+    ASSERT_EQ(unlink(TH_PATH(root, "Package.swift")), 0);
+#endif
+    ASSERT_EQ(th_rmtree(tmp), 0);
+    PASS();
+}
+
+#ifdef _WIN32
+TEST(ei_pkgmap_walk_accepts_extended_length_win32_root) {
+    th_windows_long_path_t fixture = {0};
+    ASSERT_EQ(th_windows_long_path_init(&fixture, 640U), 0);
+    ASSERT_EQ(th_write_file(TH_PATH(fixture.path, "Web/package.json"),
+                            "{\"name\":\"fixture-web\",\"main\":\"entry.js\"}"),
+              0);
+    ASSERT_EQ(th_write_file(TH_PATH(fixture.path, "Core/Package.swift"),
+                            "let package = Package(targets: [.target(name: \"Core\")])"),
+              0);
+
+    cbm_pkg_entries_t entries;
+    cbm_pkg_entries_init(&entries);
+    ASSERT_EQ(cbm_pkgmap_scan_repo(fixture.path, &entries, NULL, 0), 2);
+    ASSERT_EQ(entries.count, 2);
+    bool found_web = false;
+    for (int i = 0; i < entries.count; i++) {
+        if (strcmp(entries.items[i].pkg_name, "fixture-web") == 0) {
+            ASSERT_STR_EQ("Web/entry", entries.items[i].entry_rel);
+            ASSERT_STR_EQ("Web/package.json", entries.items[i].source_rel);
+            found_web = true;
+        }
+    }
+    ASSERT_TRUE(found_web);
+    cbm_pkg_entries_free(&entries);
+
+    ASSERT_EQ(cbm_pkgmap_scan_swift_targets(fixture.path, &entries, NULL, 0), 1);
+    ASSERT_EQ(entries.count, 2);
+    ASSERT_STR_EQ("Core/Sources/Core", entries.items[0].entry_rel);
+    ASSERT_STR_EQ("Core/Package.swift", entries.items[0].manifest_rel);
+    ASSERT_NULL(entries.items[1].pkg_name);
+    ASSERT_STR_EQ("Core", entries.items[1].entry_rel);
+    ASSERT_STR_EQ("Core/Package.swift", entries.items[1].manifest_rel);
+    cbm_pkg_entries_free(&entries);
+
+    ASSERT_EQ(th_rmtree(fixture.path), 0);
+    ASSERT_EQ(th_windows_long_path_cleanup(&fixture), 0);
+    PASS();
+}
+#endif
+
+static cbm_pipeline_t *ei_pkgmap_cancel_pipeline;
+
+static void ei_pkgmap_cancel_after_merge(const char *line) {
+    if (strstr(line, "pkgmap.build")) {
+        cbm_pipeline_cancel(ei_pkgmap_cancel_pipeline);
+    }
+}
+
+TEST(ei_pkgmap_cancel_during_build_leaves_no_published_graph) {
+    const char *tmp = th_mktempdir("cbm_pkgmap_cancel");
+    ASSERT_NOT_NULL(tmp);
+    char root[512], db[512];
+    snprintf(root, sizeof(root), "%s/repo", tmp);
+    snprintf(db, sizeof(db), "%s/graph.db", tmp);
+    ASSERT_EQ(th_write_file(TH_PATH(root, "workspace/package.json"),
+                            "{\"name\":\"fixture-pkg\",\"main\":\"index.js\"}"),
+              0);
+    ASSERT_EQ(th_write_file(TH_PATH(root, "workspace/index.js"),
+                            "export function work() { return 1; }\n"),
+              0);
+    ASSERT_EQ(th_write_file(TH_PATH(root, "client.js"),
+                            "import { work } from 'fixture-pkg'; work();\n"),
+              0);
+
+    cbm_pipeline_t *pipeline = cbm_pipeline_new(root, db, CBM_MODE_FULL);
+    ASSERT_NOT_NULL(pipeline);
+    cbm_pipeline_set_persistence(pipeline, false);
+    const CBMLogLevel level = cbm_log_get_level();
+    ei_pkgmap_cancel_pipeline = pipeline;
+    cbm_log_set_level(CBM_LOG_INFO);
+    cbm_log_set_sink(ei_pkgmap_cancel_after_merge);
+    const int rc = cbm_pipeline_run(pipeline);
+    cbm_log_set_sink(NULL);
+    cbm_log_set_level(level);
+    ei_pkgmap_cancel_pipeline = NULL;
+    const bool cancelled = atomic_load(cbm_pipeline_cancelled_ptr(pipeline)) != 0;
+    cbm_pipeline_free(pipeline);
+
+    ASSERT_TRUE(cancelled);
+    ASSERT_NEQ(rc, 0);
+    ASSERT_FALSE(cbm_file_exists(db));
+    ASSERT_NULL(cbm_pipeline_get_pkgmap());
+    ASSERT_EQ(th_rmtree(tmp), 0);
+    PASS();
+}
+
 /* ═══════════════════════════════════════════════════════════════════════════
  * SUITE registration
  * ═══════════════════════════════════════════════════════════════════════════ */
 
 SUITE(edge_imports) {
+    RUN_TEST(ei_pkgmap_manifest_rows_preserve_precedence);
+    RUN_TEST(ei_pkgmap_walk_keeps_swift_boundaries_and_exclusions);
+#ifdef _WIN32
+    RUN_TEST(ei_pkgmap_walk_accepts_extended_length_win32_root);
+#endif
+    RUN_TEST(ei_pkgmap_cancel_during_build_leaves_no_published_graph);
     RUN_TEST(ei_relative_astro_css_imports_issue2558);
     RUN_TEST(ei_nix_parent_relative_import_issue2797);
     RUN_TEST(ei_thrift_parent_relative_import_issue2797);

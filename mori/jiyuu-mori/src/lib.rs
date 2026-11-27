@@ -31,6 +31,8 @@ mod jvm_doc_links;
 mod kubernetes;
 #[cfg(feature = "native-engine-abi")]
 mod msbuild_condition;
+#[cfg(any(feature = "native-engine-abi", test))]
+mod msbuild_import;
 #[cfg(feature = "native-engine-abi")]
 mod native_graph_buffer;
 #[cfg(feature = "native-engine-abi")]
@@ -41,6 +43,8 @@ mod native_parser;
 mod operator_helm;
 #[cfg(feature = "native-engine-abi")]
 mod pdf_doc_links;
+#[cfg(feature = "native-engine-abi")]
+mod pkgmap;
 #[cfg(feature = "native-engine-abi")]
 mod rust_doc_cargo;
 #[cfg(feature = "native-engine-abi")]
