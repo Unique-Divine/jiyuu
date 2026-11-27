@@ -1,6 +1,6 @@
 //! Unit tests for Go type facts. Runs with `rustc --edition 2024 --test`.
 
-#[path = "../src/go_types.rs"]
+#[path = "../../internal/cbm/lsp/go_types.rs"]
 mod go_types;
 
 use std::cell::RefCell;

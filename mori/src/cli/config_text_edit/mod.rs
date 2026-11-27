@@ -3,15 +3,15 @@
 use std::io;
 use std::path::Path;
 
-#[path = "config_text_edit/ffi.rs"]
+#[path = "ffi.rs"]
 mod ffi;
-#[path = "config_text_edit/file.rs"]
+#[path = "file.rs"]
 pub(crate) mod file;
 #[cfg(any(test, feature = "native-engine-test-seams"))]
-#[path = "config_text_edit/test_hooks.rs"]
+#[path = "test_hooks.rs"]
 mod test_hooks;
 #[cfg(test)]
-#[path = "config_text_edit/tests.rs"]
+#[path = "tests.rs"]
 mod tests;
 
 use file::{Snapshot, Target};

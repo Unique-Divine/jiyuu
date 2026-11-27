@@ -5326,7 +5326,7 @@ typedef struct {
     int crd_count;
 } k8s_resolution_t;
 
-/* Layouts shared with jiyuu-mori/src/kubernetes.rs. Graph operations
+/* Layouts shared with src/pipeline/kubernetes.rs. Graph operations
  * copy payloads synchronously. The callbacks never keep Rust pointers. */
 typedef struct {
     bool (*cancelled)(k8s_run_t *);

@@ -1056,7 +1056,8 @@ NATIVE_ENGINE_ARCHIVE_PATH := $(if $(NATIVE_ENGINE_TEST_RUST_TARGET),$(NATIVE_EN
 NATIVE_ENGINE_ARCHIVE := $(NATIVE_ENGINE_TARGET_DIR)/$(NATIVE_ENGINE_ARCHIVE_PATH)
 NATIVE_ENGINE_TEST_ARCHIVE := $(NATIVE_ENGINE_TEST_TARGET_DIR)/$(NATIVE_ENGINE_ARCHIVE_PATH)
 NATIVE_ENGINE_TEST_SOURCES := jiyuu-mori/Cargo.toml jiyuu-mori/build.rs ../Cargo.lock ../Cargo.toml \
-                              $(shell find jiyuu-mori/src -name '*.rs' -type f)
+                              $(shell find src internal/cbm -path internal/cbm/vendored -prune \
+                                      -o -name '*.rs' -type f -print)
 
 # ── Object file compilation (grammars need relaxed warnings) ─────
 
