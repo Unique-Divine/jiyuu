@@ -91,7 +91,7 @@ require(
 
 # 4. And the refusal itself must say which of the two shapes it hit, or the
 #    reader cannot choose between those commands.
-transaction = root / "jiyuu-mori" / "src" / "activation_transaction" / "windows.rs"
+transaction = root / "src" / "cli" / "activation_transaction" / "windows.rs"
 require(
     re.search(r"AceFlags[^\n]*&\s*INHERITED_ACE", transaction.read_text(encoding="utf-8"))
     is not None,
