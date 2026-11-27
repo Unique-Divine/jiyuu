@@ -535,6 +535,131 @@ static int go_type_rows_first(const GoTypeRows *rows, const CBMTypeRegistry *reg
     return -1;
 }
 
+typedef struct {
+    GoLSPContext *file;
+    CBMTypeRegistry *registry;
+    GoTypeRows *own_types;
+} GoAstRegistry;
+
+typedef enum {
+    GO_AST_EMBEDS,
+    GO_AST_METHODS,
+} GoAstNameRows;
+
+typedef struct {
+    const char *(*name)(GoAstRegistry *, const unsigned char *, size_t);
+    int (*find_type)(GoAstRegistry *, const char *);
+    void (*alias)(GoAstRegistry *, const char *, const char *, const char *);
+    void (*names)(GoAstRegistry *, int, GoAstNameRows, const char *const *, size_t);
+    void (*fields)(GoAstRegistry *, int, const char *const *, const CBMType *const *, size_t);
+    const CBMType *(*parse_type)(GoAstRegistry *, const TSNode *);
+} GoAstRegistryOps;
+
+typedef struct {
+    TSNode root;
+    const unsigned char *source;
+    size_t source_len;
+    const char *package;
+    GoAstRegistry *context;
+    const GoAstRegistryOps *ops;
+    bool refine_interfaces;
+} GoAstRegistryInput;
+
+extern void mori_go_refine_registry_ast(const GoAstRegistryInput *);
+
+static const char *go_ast_name(GoAstRegistry *ctx, const unsigned char *bytes, size_t len) {
+    return cbm_go_eval_copy_name(ctx->file->arena, bytes, len);
+}
+
+static int go_ast_find_type(GoAstRegistry *ctx, const char *name) {
+    if (ctx->own_types)
+        return go_type_rows_first(ctx->own_types, ctx->registry, name);
+    for (int i = 0; i < ctx->registry->type_count; i++) {
+        const char *qn = ctx->registry->types[i].qualified_name;
+        if (qn && strcmp(qn, name) == 0)
+            return i;
+    }
+    return -1;
+}
+
+static void go_ast_alias(GoAstRegistry *ctx, const char *name, const char *qn,
+                         const char *target) {
+    int row = go_ast_find_type(ctx, qn);
+    if (row >= 0) {
+        ctx->registry->types[row].alias_of = target;
+        return;
+    }
+    CBMRegisteredType type = {.qualified_name = qn, .short_name = name, .alias_of = target};
+    if (ctx->own_types)
+        go_type_rows_add(ctx->registry, ctx->own_types, type);
+    else
+        cbm_registry_add_type(ctx->registry, type);
+}
+
+static const char **go_ast_copy_names(CBMArena *arena, const char *const *names, size_t count) {
+    const char **copy = cbm_arena_alloc(arena, (count + 1) * sizeof(*copy));
+    if (copy) {
+        CBM_MSAN_WRITTEN(names, count * sizeof(*names));
+        memcpy(copy, names, count * sizeof(*names));
+        copy[count] = NULL;
+    }
+    return copy;
+}
+
+static void go_ast_names(GoAstRegistry *ctx, int row, GoAstNameRows kind,
+                         const char *const *names, size_t count) {
+    const char **copy = go_ast_copy_names(ctx->file->arena, names, count);
+    if (copy) {
+        CBMRegisteredType *type = &ctx->registry->types[row];
+        if (kind == GO_AST_EMBEDS)
+            type->embedded_types = copy;
+        else
+            type->method_names = copy;
+    }
+}
+
+static void go_ast_fields(GoAstRegistry *ctx, int row, const char *const *names,
+                          const CBMType *const *types, size_t count) {
+    CBMArena *arena = ctx->file->arena;
+    const char **field_names = go_ast_copy_names(arena, names, count);
+    const CBMType **field_types = cbm_arena_alloc(arena, (count + 1) * sizeof(*field_types));
+    if (field_names && field_types) {
+        CBM_MSAN_WRITTEN(types, count * sizeof(*types));
+        memcpy(field_types, types, count * sizeof(*types));
+        field_types[count] = NULL;
+        ctx->registry->types[row].field_names = field_names;
+        ctx->registry->types[row].field_types = field_types;
+    }
+}
+
+static const CBMType *go_ast_parse_type(GoAstRegistry *ctx, const TSNode *node) {
+    return go_eval_parse_type(ctx->file, node);
+}
+
+static void go_refine_registry_ast(GoAstRegistry ctx, TSNode root, bool refine_interfaces) {
+    if (ts_node_is_null(root) || !ctx.file->source || ctx.file->source_len < 0 ||
+        !ctx.file->package_qn)
+        return;
+    static const GoAstRegistryOps ops = {
+        .name = go_ast_name,
+        .find_type = go_ast_find_type,
+        .alias = go_ast_alias,
+        .names = go_ast_names,
+        .fields = go_ast_fields,
+        .parse_type = go_ast_parse_type,
+    };
+    GoAstRegistryInput input = {
+        .root = root,
+        .source = (const unsigned char *)ctx.file->source,
+        .source_len = (size_t)ctx.file->source_len,
+        .package = ctx.file->package_qn,
+        .context = &ctx,
+        .ops = &ops,
+        .refine_interfaces = refine_interfaces,
+    };
+    mori_go_refine_registry_ast(&input);
+}
+
 // --- Entry point: build registry from file defs + run LSP ---
 
 void cbm_run_go_lsp(CBMArena *arena, CBMFileResult *result, const char *source, int source_len,
@@ -699,193 +824,14 @@ void cbm_run_go_lsp(CBMArena *arena, CBMFileResult *result, const char *source, 
         }
     }
 
-    // Phase 1b: Scan AST for struct definitions to populate embedded_types
-    {
-        // Collect top-level children once (O(n)); ts_node_child(root,i) is O(i) → O(n²).
-        uint32_t rkn = 0;
-        TSNode *rkids = cbm_lsp_collect_children(arena, root, &rkn);
-        for (uint32_t i = 0; i < rkn; i++) {
-            TSNode top = rkids[i];
-            const char *tk = ts_node_type(top);
-            // type_declaration contains type_spec children
-            if (strcmp(tk, "type_declaration") != 0)
-                continue;
-            uint32_t td_nc = ts_node_child_count(top);
-            for (uint32_t j = 0; j < td_nc; j++) {
-                TSNode spec = ts_node_child(top, j);
-                if (ts_node_is_null(spec) || !ts_node_is_named(spec))
-                    continue;
-                const char *spec_kind = ts_node_type(spec);
-
-                // type_alias: type Foo = Bar
-                if (strcmp(spec_kind, "type_alias") == 0) {
-                    TSNode alias_name = ts_node_child_by_field_name(spec, "name", 4);
-                    TSNode alias_type = ts_node_child_by_field_name(spec, "type", 4);
-                    if (!ts_node_is_null(alias_name) && !ts_node_is_null(alias_type)) {
-                        char *aname = cbm_node_text(arena, alias_name, source);
-                        char *atarget = cbm_node_text(arena, alias_type, source);
-                        if (aname && aname[0] && atarget && atarget[0]) {
-                            const char *alias_type_qn =
-                                cbm_arena_sprintf(arena, "%s.%s", module_qn, aname);
-                            const char *alias_target_qn =
-                                cbm_arena_sprintf(arena, "%s.%s", module_qn, atarget);
-                            int alias_at = go_type_rows_first(&own_types, &reg, alias_type_qn);
-                            if (alias_at >= 0) {
-                                reg.types[alias_at].alias_of = alias_target_qn;
-                            } else {
-                                CBMRegisteredType alias_rt;
-                                memset(&alias_rt, 0, sizeof(alias_rt));
-                                alias_rt.qualified_name = alias_type_qn;
-                                alias_rt.short_name = aname;
-                                alias_rt.alias_of = alias_target_qn;
-                                go_type_rows_add(&reg, &own_types, alias_rt);
-                            }
-                        }
-                    }
-                    continue;
-                }
-
-                if (strcmp(spec_kind, "type_spec") != 0)
-                    continue;
-
-                TSNode name_node = ts_node_child_by_field_name(spec, "name", 4);
-                TSNode type_node = ts_node_child_by_field_name(spec, "type", 4);
-                if (ts_node_is_null(name_node) || ts_node_is_null(type_node))
-                    continue;
-
-                char *type_name = cbm_node_text(arena, name_node, source);
-                if (!type_name || !type_name[0])
-                    continue;
-                const char *type_qn = cbm_arena_sprintf(arena, "%s.%s", module_qn, type_name);
-
-                // Interface type: extract method names for satisfaction checking
-                if (strcmp(ts_node_type(type_node), "interface_type") == 0) {
-                    const char *iface_methods[64];
-                    int iface_method_count = 0;
-                    uint32_t inl_nc = ts_node_named_child_count(type_node);
-                    for (uint32_t k = 0; k < inl_nc && iface_method_count < 63; k++) {
-                        TSNode child = ts_node_named_child(type_node, k);
-                        if (ts_node_is_null(child))
-                            continue;
-                        const char *ck = ts_node_type(child);
-                        // method_spec: MethodName(params) returns
-                        if (strcmp(ck, "method_spec") == 0 || strcmp(ck, "method_elem") == 0) {
-                            TSNode mname = ts_node_child_by_field_name(child, "name", 4);
-                            if (!ts_node_is_null(mname)) {
-                                char *mn = cbm_node_text(arena, mname, source);
-                                if (mn && mn[0]) {
-                                    iface_methods[iface_method_count++] = mn;
-                                }
-                            }
-                        }
-                    }
-                    int iface_at =
-                        iface_method_count > 0 ? go_type_rows_first(&own_types, &reg, type_qn) : -1;
-                    if (iface_at >= 0) {
-                        const char **names = (const char **)cbm_arena_alloc(
-                            arena, (iface_method_count + 1) * sizeof(const char *));
-                        for (int mi = 0; mi < iface_method_count; mi++) {
-                            names[mi] = iface_methods[mi];
-                        }
-                        names[iface_method_count] = NULL;
-                        reg.types[iface_at].method_names = names;
-                    }
-                    continue;
-                }
-
-                if (strcmp(ts_node_type(type_node), "struct_type") != 0)
-                    continue;
-
-                // Find field_declaration_list inside struct_type
-                TSNode field_list = ts_node_child_by_field_name(type_node, "body", 4);
-                if (ts_node_is_null(field_list)) {
-                    // Some grammars use first named child
-                    if (ts_node_named_child_count(type_node) > 0)
-                        field_list = ts_node_named_child(type_node, 0);
-                }
-                if (ts_node_is_null(field_list))
-                    continue;
-
-                // Scan field_declarations for embeds and named fields
-                const char *embeds[16];
-                int embed_count = 0;
-                const char *fld_names[64];
-                const CBMType *fld_types[64];
-                int fld_count = 0;
-
-                // Create a temporary LSP context for parsing field types
-                GoLSPContext tmp_ctx;
-                memset(&tmp_ctx, 0, sizeof(tmp_ctx));
-                tmp_ctx.arena = arena;
-                tmp_ctx.source = source;
-                tmp_ctx.source_len = source_len;
-                tmp_ctx.registry = &reg;
-                tmp_ctx.package_qn = module_qn;
-
-                uint32_t fl_nc = ts_node_child_count(field_list);
-                for (uint32_t k = 0; k < fl_nc; k++) {
-                    TSNode field = ts_node_child(field_list, k);
-                    if (ts_node_is_null(field) || !ts_node_is_named(field))
-                        continue;
-                    if (strcmp(ts_node_type(field), "field_declaration") != 0)
-                        continue;
-
-                    TSNode fname = ts_node_child_by_field_name(field, "name", 4);
-                    TSNode ftype = ts_node_child_by_field_name(field, "type", 4);
-
-                    if (ts_node_is_null(fname) && !ts_node_is_null(ftype)) {
-                        // Embedded field: has type but no name
-                        if (embed_count < 15) {
-                            char *embed_text = cbm_node_text(arena, ftype, source);
-                            if (embed_text && embed_text[0]) {
-                                const char *et = embed_text;
-                                while (*et == '*')
-                                    et++;
-                                embeds[embed_count++] =
-                                    cbm_arena_sprintf(arena, "%s.%s", module_qn, et);
-                            }
-                        }
-                    } else if (!ts_node_is_null(fname) && !ts_node_is_null(ftype) &&
-                               fld_count < 63) {
-                        // Named field: name + type
-                        char *fn = cbm_node_text(arena, fname, source);
-                        if (fn && fn[0]) {
-                            fld_names[fld_count] = fn;
-                            fld_types[fld_count] = go_parse_type_node(&tmp_ctx, ftype);
-                            fld_count++;
-                        }
-                    }
-                }
-
-                // Find the registered type and update it
-                int ti = go_type_rows_first(&own_types, &reg, type_qn);
-                if (ti >= 0) {
-                    if (embed_count > 0) {
-                        const char **arr = (const char **)cbm_arena_alloc(
-                            arena, (embed_count + 1) * sizeof(const char *));
-                        for (int ei = 0; ei < embed_count; ei++)
-                            arr[ei] = embeds[ei];
-                        arr[embed_count] = NULL;
-                        reg.types[ti].embedded_types = arr;
-                    }
-                    if (fld_count > 0) {
-                        const char **names = (const char **)cbm_arena_alloc(
-                            arena, (fld_count + 1) * sizeof(const char *));
-                        const CBMType **types = (const CBMType **)cbm_arena_alloc(
-                            arena, (fld_count + 1) * sizeof(const CBMType *));
-                        for (int fi = 0; fi < fld_count; fi++) {
-                            names[fi] = fld_names[fi];
-                            types[fi] = fld_types[fi];
-                        }
-                        names[fld_count] = NULL;
-                        types[fld_count] = NULL;
-                        reg.types[ti].field_names = names;
-                        reg.types[ti].field_types = types;
-                    }
-                }
-            }
-        }
-    }
+    GoLSPContext ast = {
+        .arena = arena,
+        .source = source,
+        .source_len = source_len,
+        .registry = &reg,
+        .package_qn = module_qn,
+    };
+    go_refine_registry_ast((GoAstRegistry){&ast, &reg, &own_types}, root, true);
     cbm_arena_destroy(&memo_arena);
 
     // Phase 1c: Extract type parameters from generic function declarations
@@ -1472,161 +1418,17 @@ void cbm_run_go_lsp_cross(CBMArena *arena, const char *source, int source_len,
         }
     }
 
-    // 3. Phase 1b: Scan AST for struct definitions to populate embedded_types
-    {
-        /* One context parses every struct's field types, so its import rows are
-         * chained once (resolve_import), not once per struct. */
-        GoLSPContext tmp_ctx;
-        memset(&tmp_ctx, 0, sizeof(tmp_ctx));
-        tmp_ctx.arena = arena;
-        tmp_ctx.source = source;
-        tmp_ctx.source_len = source_len;
-        tmp_ctx.registry = &reg;
-        tmp_ctx.package_qn = module_qn;
-        tmp_ctx.import_local_names = import_names;
-        tmp_ctx.import_package_qns = import_qns;
-        tmp_ctx.import_count = import_count;
-
-        // Collect top-level children once (O(n)); ts_node_child(root,i) is O(i) → O(n²).
-        uint32_t rkn = 0;
-        TSNode *rkids = cbm_lsp_collect_children(arena, root, &rkn);
-        for (uint32_t i = 0; i < rkn; i++) {
-            TSNode top = rkids[i];
-            if (strcmp(ts_node_type(top), "type_declaration") != 0)
-                continue;
-            uint32_t td_nc = ts_node_child_count(top);
-            for (uint32_t j = 0; j < td_nc; j++) {
-                TSNode spec = ts_node_child(top, j);
-                if (ts_node_is_null(spec) || !ts_node_is_named(spec))
-                    continue;
-                const char *spec_kind2 = ts_node_type(spec);
-
-                // type_alias: type Foo = Bar
-                if (strcmp(spec_kind2, "type_alias") == 0) {
-                    TSNode alias_name = ts_node_child_by_field_name(spec, "name", 4);
-                    TSNode alias_type = ts_node_child_by_field_name(spec, "type", 4);
-                    if (!ts_node_is_null(alias_name) && !ts_node_is_null(alias_type)) {
-                        char *aname = cbm_node_text(arena, alias_name, source);
-                        char *atarget = cbm_node_text(arena, alias_type, source);
-                        if (aname && aname[0] && atarget && atarget[0]) {
-                            const char *alias_type_qn =
-                                cbm_arena_sprintf(arena, "%s.%s", module_qn, aname);
-                            const char *alias_target_qn =
-                                cbm_arena_sprintf(arena, "%s.%s", module_qn, atarget);
-                            bool found_a = false;
-                            for (int ti = 0; ti < reg.type_count; ti++) {
-                                if (reg.types[ti].qualified_name &&
-                                    strcmp(reg.types[ti].qualified_name, alias_type_qn) == 0) {
-                                    reg.types[ti].alias_of = alias_target_qn;
-                                    found_a = true;
-                                    break;
-                                }
-                            }
-                            if (!found_a) {
-                                CBMRegisteredType alias_rt;
-                                memset(&alias_rt, 0, sizeof(alias_rt));
-                                alias_rt.qualified_name = alias_type_qn;
-                                alias_rt.short_name = aname;
-                                alias_rt.alias_of = alias_target_qn;
-                                cbm_registry_add_type(&reg, alias_rt);
-                            }
-                        }
-                    }
-                    continue;
-                }
-
-                if (strcmp(spec_kind2, "type_spec") != 0)
-                    continue;
-
-                TSNode name_node = ts_node_child_by_field_name(spec, "name", 4);
-                TSNode type_node = ts_node_child_by_field_name(spec, "type", 4);
-                if (ts_node_is_null(name_node) || ts_node_is_null(type_node))
-                    continue;
-                if (strcmp(ts_node_type(type_node), "struct_type") != 0)
-                    continue;
-
-                char *type_name = cbm_node_text(arena, name_node, source);
-                if (!type_name || !type_name[0])
-                    continue;
-                const char *type_qn = cbm_arena_sprintf(arena, "%s.%s", module_qn, type_name);
-
-                TSNode field_list = ts_node_child_by_field_name(type_node, "body", 4);
-                if (ts_node_is_null(field_list)) {
-                    if (ts_node_named_child_count(type_node) > 0)
-                        field_list = ts_node_named_child(type_node, 0);
-                }
-                if (ts_node_is_null(field_list))
-                    continue;
-
-                const char *embeds[16];
-                int embed_count = 0;
-                const char *fld_names[64];
-                const CBMType *fld_types[64];
-                int fld_count = 0;
-
-                uint32_t fl_nc = ts_node_child_count(field_list);
-                for (uint32_t k = 0; k < fl_nc; k++) {
-                    TSNode field = ts_node_child(field_list, k);
-                    if (ts_node_is_null(field) || !ts_node_is_named(field))
-                        continue;
-                    if (strcmp(ts_node_type(field), "field_declaration") != 0)
-                        continue;
-                    TSNode fname = ts_node_child_by_field_name(field, "name", 4);
-                    TSNode ftype = ts_node_child_by_field_name(field, "type", 4);
-                    if (ts_node_is_null(fname) && !ts_node_is_null(ftype)) {
-                        if (embed_count < 15) {
-                            char *embed_text = cbm_node_text(arena, ftype, source);
-                            if (embed_text && embed_text[0]) {
-                                const char *et = embed_text;
-                                while (*et == '*')
-                                    et++;
-                                embeds[embed_count++] =
-                                    cbm_arena_sprintf(arena, "%s.%s", module_qn, et);
-                            }
-                        }
-                    } else if (!ts_node_is_null(fname) && !ts_node_is_null(ftype) &&
-                               fld_count < 63) {
-                        char *fn = cbm_node_text(arena, fname, source);
-                        if (fn && fn[0]) {
-                            fld_names[fld_count] = fn;
-                            fld_types[fld_count] = go_parse_type_node(&tmp_ctx, ftype);
-                            fld_count++;
-                        }
-                    }
-                }
-
-                for (int ti = 0; ti < reg.type_count; ti++) {
-                    if (!reg.types[ti].qualified_name ||
-                        strcmp(reg.types[ti].qualified_name, type_qn) != 0)
-                        continue;
-
-                    if (embed_count > 0) {
-                        const char **arr = (const char **)cbm_arena_alloc(
-                            arena, (embed_count + 1) * sizeof(const char *));
-                        for (int ei = 0; ei < embed_count; ei++)
-                            arr[ei] = embeds[ei];
-                        arr[embed_count] = NULL;
-                        reg.types[ti].embedded_types = arr;
-                    }
-                    if (fld_count > 0) {
-                        const char **names = (const char **)cbm_arena_alloc(
-                            arena, (fld_count + 1) * sizeof(const char *));
-                        const CBMType **types = (const CBMType **)cbm_arena_alloc(
-                            arena, (fld_count + 1) * sizeof(const CBMType *));
-                        for (int fi = 0; fi < fld_count; fi++) {
-                            names[fi] = fld_names[fi];
-                            types[fi] = fld_types[fi];
-                        }
-                        names[fld_count] = NULL;
-                        types[fld_count] = NULL;
-                        reg.types[ti].field_names = names;
-                        reg.types[ti].field_types = types;
-                    }
-                    break;
-                }
-            }
-        }
-    }
+    GoLSPContext ast = {
+        .arena = arena,
+        .source = source,
+        .source_len = source_len,
+        .registry = &reg,
+        .package_qn = module_qn,
+        .import_local_names = import_names,
+        .import_package_qns = import_qns,
+        .import_count = import_count,
+    };
+    go_refine_registry_ast((GoAstRegistry){&ast, &reg, NULL}, root, false);
 
     // 3b. Phase 1c: Extract type params from generic function declarations
     extract_type_params_from_ast(arena, &reg, root, source, source_len, module_qn);
