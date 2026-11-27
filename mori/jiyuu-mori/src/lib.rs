@@ -40,6 +40,8 @@ mod native_parser;
 #[cfg(any(feature = "native-engine-abi", test))]
 mod operator_helm;
 #[cfg(feature = "native-engine-abi")]
+mod pkgmap;
+#[cfg(feature = "native-engine-abi")]
 mod pdf_doc_links;
 #[cfg(feature = "native-engine-abi")]
 mod rust_doc_cargo;
