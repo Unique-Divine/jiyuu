@@ -26,6 +26,9 @@ mod csharp_doc_links;
 #[path = "pipeline/definition_props.rs"]
 mod definition_props;
 #[cfg(feature = "native-engine-abi")]
+#[path = "mcp/detect_changes/mod.rs"]
+mod detect_changes;
+#[cfg(feature = "native-engine-abi")]
 #[path = "pipeline/doc_file_links.rs"]
 mod doc_file_links;
 #[cfg(feature = "native-engine-abi")]
@@ -49,6 +52,9 @@ mod jvm_doc_links;
 #[cfg(feature = "native-engine-abi")]
 #[path = "pipeline/kubernetes.rs"]
 mod kubernetes;
+#[cfg(feature = "native-engine-abi")]
+#[path = "mcp/impact_graph.rs"]
+mod mcp_impact_graph;
 #[cfg(feature = "native-engine-abi")]
 #[path = "pipeline/msbuild_condition.rs"]
 mod msbuild_condition;

@@ -1,10 +1,11 @@
 //! The engine owns the model, source, seeds and pinned store read scope.
 //! Keep this ABI in step with test_impact_engine_reach.h and the native
 //! declarations in test_impact{,_seed,_source}.h and store{,_impact}.h.
-use std::ffi::{CStr, c_char, c_int, c_long, c_void};
+pub(super) use crate::mcp_impact_graph::*;
+use std::ffi::{c_char, c_int, c_long, c_void};
 use std::mem::ManuallyDrop;
 use std::ops::{Deref, DerefMut};
-use std::ptr::{null, null_mut};
+use std::ptr::null_mut;
 use std::slice;
 
 macro_rules! opaque {
@@ -14,9 +15,7 @@ macro_rules! opaque {
     )+};
 }
 
-opaque!(
-    Context, Store, Scope, Graph, Source, Model, Policy, Seeds, ImpactWalk
-);
+opaque!(Context, Scope, Graph, Source, Model, Policy, Seeds);
 
 pub(super) type Text = *const c_char;
 pub(super) type Id = i64;
@@ -102,19 +101,6 @@ pub(super) struct Definition {
 }
 
 #[repr(C)]
-pub(super) struct Node {
-    pub id: Id,
-    _project: Text,
-    pub label: Text,
-    _name: Text,
-    _qualified_name: Text,
-    pub file_path: Text,
-    _start_line: Index,
-    _end_line: Index,
-    _properties_json: Text,
-}
-
-#[repr(C)]
 pub(super) struct Edge {
     _id: Id,
     _project: Text,
@@ -129,26 +115,6 @@ pub(super) struct CoverageRow {
     pub rel_path: Text,
     pub kind: Text,
     pub detail: Text,
-}
-
-#[repr(C)]
-pub(super) struct WalkPolicy {
-    pub project: Text,
-    pub edge_types: *const Text,
-    pub edge_type_count: Index,
-    pub follow_routes: bool,
-    pub follow_variant_keys: bool,
-    pub max_hops: Index,
-}
-
-#[repr(C)]
-pub(super) struct Hit {
-    pub id: Id,
-    _hop: Index,
-    pub via_id: Id,
-    pub via_edge: Text,
-    pub qualified_name: Text,
-    pub label: Text,
 }
 
 #[repr(C)]
@@ -181,7 +147,6 @@ pub(super) enum Fallback {
 }
 
 unsafe extern "C" {
-    fn cbm_ffi_mark_written(address: *const c_void, size: usize);
     pub fn te_oom(context: *mut Context) -> bool;
     pub fn te_fallback(
         context: *mut Context,
@@ -304,7 +269,6 @@ unsafe extern "C" {
         out: *mut *mut CoverageRow,
         count: *mut Index,
     ) -> Index;
-    pub fn cbm_store_free_nodes(rows: *mut Node, count: Index);
     pub fn cbm_store_free_edges(rows: *mut Edge, count: Index);
     pub fn cbm_store_free_coverage(rows: *mut CoverageRow, count: Index);
 
@@ -318,46 +282,10 @@ unsafe extern "C" {
         ids: *const Id,
         count: Index,
     ) -> Index;
-    pub fn cbm_impact_walk_run(
-        walk: *mut ImpactWalk,
-        ids: *const Id,
-        count: Index,
-    ) -> Index;
-    pub fn cbm_impact_walk_count(walk: *const ImpactWalk) -> Index;
-    pub fn cbm_impact_walk_hits(walk: *const ImpactWalk) -> *const Hit;
     pub fn cbm_impact_walk_hit(walk: *const ImpactWalk, id: Id) -> *const Hit;
     pub fn cbm_impact_walk_reached(walk: *const ImpactWalk, id: Id) -> bool;
-    pub fn cbm_impact_walk_close(walk: *mut ImpactWalk);
 
     pub fn strtol(text: Text, end: *mut *mut c_char, base: c_int) -> c_long;
-}
-
-pub(super) unsafe fn view<'a, T>(ptr: *const T, count: usize) -> &'a [T] {
-    if count == 0 {
-        &[]
-    } else {
-        unsafe { slice::from_raw_parts(ptr, count) }
-    }
-}
-
-pub(super) unsafe fn bytes<'a>(text: Text) -> &'a [u8] {
-    if text.is_null() {
-        &[]
-    } else {
-        unsafe { CStr::from_ptr(text) }.to_bytes()
-    }
-}
-
-// C may be instrumented by MemorySanitizer while Rust is not.
-pub(super) fn mark_written<T>(items: &[T]) {
-    if !items.is_empty() {
-        unsafe {
-            cbm_ffi_mark_written(
-                items.as_ptr().cast(),
-                std::mem::size_of_val(items),
-            )
-        };
-    }
 }
 
 // Grow request scratch through the same native memory class as the C engine.
@@ -438,49 +366,5 @@ impl<T: Copy> DerefMut for Scratch<T> {
 impl<T: Copy> Drop for Scratch<T> {
     fn drop(&mut self) {
         unsafe { cbm_test_impact_reach_free(self.items.cast()) };
-    }
-}
-
-// Store result allocations are independent of later reads in the same scope.
-pub(super) struct StoreRows<T> {
-    rows: *mut T,
-    count: Index,
-    free: unsafe extern "C" fn(*mut T, Index),
-}
-
-impl<T> StoreRows<T> {
-    pub fn read(
-        free: unsafe extern "C" fn(*mut T, Index),
-        query: impl FnOnce(*mut *mut T, *mut Index) -> Index,
-    ) -> Checked<Self> {
-        let mut rows = null_mut();
-        let mut count = 0;
-        if query(&mut rows, &mut count) == 0 {
-            Ok(Self { rows, count, free })
-        } else {
-            Err(())
-        }
-    }
-}
-
-impl<T> Deref for StoreRows<T> {
-    type Target = [T];
-
-    fn deref(&self) -> &[T] {
-        unsafe { view(self.rows, self.count as usize) }
-    }
-}
-
-impl<T> Drop for StoreRows<T> {
-    fn drop(&mut self) {
-        unsafe { (self.free)(self.rows, self.count) };
-    }
-}
-
-pub(super) fn ptr_or_null<T>(items: &[T]) -> *const T {
-    if items.is_empty() {
-        null()
-    } else {
-        items.as_ptr()
     }
 }
