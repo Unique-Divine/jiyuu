@@ -39,6 +39,9 @@ repeated_cu/main.cu	occurrence_probe	Bravo.render	Method	177:191	bravo.render()	
 ruby/main.rb	Admin::User.shout	Admin::User.name	Method	82:91	self.name	self.name
 ruby/main.rb	Outside.probe	Admin::User	Class	136:151	Admin::User.new	Admin::User
 ruby/main.rb	Outside.probe	Admin::User.name	Method	156:162	u.name	u.name
+# Ruby superclass and included module lookup
+ruby_ancestry/main.rb	Child.probe	Base.helper	Method	149:160	self.helper	self.helper
+ruby_ancestry/main.rb	Child.probe	Greetable.greet	Method	165:175	self.greet	self.greet
 # rubylsp_block_param_shadows_local
 ruby_shadow/main.rb	Worker.run	Foo	Class	67:74	Foo.new	Foo
 ruby_shadow/main.rb	Worker.run	Foo.bar	Method	231:236	a.bar	a.bar
