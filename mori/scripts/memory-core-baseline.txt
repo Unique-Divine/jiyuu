@@ -30,7 +30,6 @@ src/daemon/bootstrap.c	13
 src/daemon/daemon.c	31
 src/daemon/frontend.c	12
 src/daemon/ipc.c	146
-src/daemon/project_lock.c	6
 src/daemon/runtime.c	45
 src/daemon/service.c	6
 src/daemon/version_cohort.c	9
