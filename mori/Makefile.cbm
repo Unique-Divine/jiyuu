@@ -489,7 +489,6 @@ MCP_SRCS = src/mcp/mcp.c src/mcp/index_supervisor.c src/mcp/compact_out.c src/mc
 # Shared MCP daemon coordination and local transport
 DAEMON_SRCS = \
     src/daemon/daemon.c \
-    src/daemon/project_lock.c \
     src/daemon/version_cohort.c \
     src/daemon/service.c \
     src/daemon/runtime.c \
