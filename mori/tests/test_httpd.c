@@ -31,6 +31,8 @@
 #include "ui/activity.h"
 #include "ui/atlas.h"
 #include "ui/layout3d.h"
+#include "pipeline/pass_cross_repo.h"
+#include <sqlite3/sqlite3.h>
 #include <yyjson/yyjson.h>
 #include "ui/http_server.h"
 #include <store/store.h>
@@ -748,6 +750,449 @@ static void th_server_stop(th_server_t *ts) {
         fprintf(stderr, "HTTP test server failed to stop and free\n");
         abort();
     }
+}
+
+/* Run each request through both listener configurations and compare the body.
+ * Headers differ in the advertised CORS methods. */
+static yyjson_doc *xrepo_request(const char *dir, const char *target, int status) {
+    char request[4096], response[8192], daemon_body[8192], status_line[32];
+    const char *previous = getenv("CBM_CACHE_DIR");
+    char *saved = previous ? strdup(previous) : NULL;
+    yyjson_doc *doc = NULL;
+    snprintf(request, sizeof(request), "GET %s HTTP/1.1\r\n\r\n", target);
+    snprintf(status_line, sizeof(status_line), "HTTP/1.1 %d ", status);
+    cbm_setenv("CBM_CACHE_DIR", dir, 1);
+    for (int read_only = 0; read_only < 2; read_only++) {
+        th_server_t server = {
+            .srv = read_only ? cbm_http_server_new_read_only(0) : cbm_http_server_new(0),
+        };
+        if (!server.srv)
+            break;
+        if (th_server_thread_start(&server.tid, server.srv) != 0) {
+            (void)cbm_http_server_free(server.srv);
+            break;
+        }
+        int length = th_http(cbm_http_server_port(server.srv), request, response, sizeof(response));
+        th_server_stop(&server);
+        const char *body = length > 0 ? strstr(response, "\r\n\r\n") : NULL;
+        if (!body || strncmp(response, status_line, strlen(status_line)) != 0 ||
+            !strstr(response, "\r\nContent-Type: application/json\r\n")) {
+            fprintf(stderr, "Expected HTTP %d for %s, got %.*s\n", status, target, length, response);
+            break;
+        }
+        body += 4;
+        if (!read_only)
+            snprintf(daemon_body, sizeof(daemon_body), "%s", body);
+        else if (strcmp(body, daemon_body) == 0)
+            doc = yyjson_read(body, strlen(body), 0);
+    }
+    if (saved)
+        cbm_setenv("CBM_CACHE_DIR", saved, 1);
+    else
+        cbm_unsetenv("CBM_CACHE_DIR");
+    free(saved);
+    return doc;
+}
+
+/* ── Cross-repo views (Rust listener) ───────────────────────────────── */
+
+/* One project index in dir with a caller (or listener) node, a local target
+ * node and one CROSS_* edge carrying props. Returns false on failure. */
+static bool xrepo_seed(const char *dir, const char *project, const char *type, const char *props,
+                       const char *second_type) {
+    char path[1024];
+    snprintf(path, sizeof(path), "%s/%s.db", dir, project);
+    cbm_store_t *s = cbm_store_open_path(path);
+    if (!s)
+        return false;
+    cbm_store_upsert_project(s, project, "/tmp/xrepo");
+    char qn_a[128], qn_b[128];
+    snprintf(qn_a, sizeof(qn_a), "%s.client.fetchOrders", project);
+    snprintf(qn_b, sizeof(qn_b), "%s.__route__orders", project);
+    cbm_node_t a = {.project = project, .label = "Function", .name = "fetchOrders",
+                    .qualified_name = qn_a, .file_path = "src/client.ts", .start_line = 12,
+                    .end_line = 20};
+    cbm_node_t b = {.project = project, .label = "Route", .name = "orders",
+                    .qualified_name = qn_b, .file_path = "", .start_line = 0, .end_line = 0};
+    int64_t ia = cbm_store_upsert_node(s, &a), ib = cbm_store_upsert_node(s, &b);
+    bool ok = ia > 0 && ib > 0;
+    if (ok && type) {
+        cbm_edge_t e = {.project = project, .source_id = ia, .target_id = ib, .type = type,
+                        .properties_json = props};
+        ok = cbm_store_insert_edge(s, &e) > 0;
+    }
+    if (ok && second_type) {
+        cbm_edge_t e = {.project = project, .source_id = ia, .target_id = ib,
+                        .type = second_type};
+        ok = cbm_store_insert_edge(s, &e) > 0;
+    }
+    cbm_store_close(s);
+    return ok;
+}
+
+TEST(xrepo_summary_counts_caller_side_links_once) {
+    char tmpl[256] = "/tmp/cbm_xrepo_XXXXXX";
+    char *dir = cbm_mkdtemp(tmpl);
+    ASSERT_NOT_NULL(dir);
+    /* web calls api over GraphQL; api holds the provider-side copy with a
+     * "callers" object, which must not count a second time. */
+    ASSERT_TRUE(xrepo_seed(dir, "web", "CROSS_GRAPHQL_CALLS",
+                           "{\"target_project\":\"api\",\"target_function\":\"orders\","
+                           "\"target_file\":\"graph/orders.go\",\"operation\":\"Orders\"}",
+                           NULL));
+    ASSERT_TRUE(xrepo_seed(dir, "api", "CROSS_GRAPHQL_CALLS",
+                           "{\"target_project\":\"web\",\"target_function\":\"fetchOrders\","
+                           "\"callers\":{\"web:x\":{\"project\":\"web\"}}}",
+                           NULL));
+    /* bus emits on a channel its listener in api hears; api's copy is the
+     * listener's (no EMITS), so only bus's counts. */
+    ASSERT_TRUE(xrepo_seed(dir, "bus", "CROSS_CHANNEL",
+                           "{\"target_project\":\"api\",\"channel_name\":\"orders\"}", "EMITS"));
+    ASSERT_TRUE(xrepo_seed(dir, "lone", NULL, NULL, NULL));
+    /* Another store in the cache directory: not a repository. */
+    char other[1024];
+    snprintf(other, sizeof(other), "%s/activity.db", dir);
+    sqlite3 *odb = NULL;
+    ASSERT_EQ(sqlite3_open(other, &odb), SQLITE_OK);
+    ASSERT_EQ(sqlite3_exec(odb, "CREATE TABLE agent_events (id INTEGER)", NULL, NULL, NULL),
+              SQLITE_OK);
+    sqlite3_close(odb);
+
+    yyjson_doc *doc = xrepo_request(dir, "/api/xrepo/summary", 200);
+    ASSERT_NOT_NULL(doc);
+    yyjson_val *root = yyjson_doc_get_root(doc);
+    ASSERT_EQ(yyjson_get_int(yyjson_obj_get(root, "total_links")), 2);
+    yyjson_val *links = yyjson_obj_get(root, "links");
+    ASSERT_EQ((int)yyjson_arr_size(links), 2);
+    bool graphql = false, channel = false;
+    size_t idx, max;
+    yyjson_val *link;
+    yyjson_arr_foreach(links, idx, max, link) {
+        const char *from = yyjson_get_str(yyjson_obj_get(link, "from"));
+        const char *type = yyjson_get_str(yyjson_obj_get(link, "type"));
+        ASSERT_STR_EQ(yyjson_get_str(yyjson_obj_get(link, "to")), "api");
+        graphql |= strcmp(from, "web") == 0 && strcmp(type, "CROSS_GRAPHQL_CALLS") == 0;
+        channel |= strcmp(from, "bus") == 0 && strcmp(type, "CROSS_CHANNEL") == 0;
+    }
+    ASSERT_TRUE(graphql);
+    ASSERT_TRUE(channel);
+    yyjson_val *repos = yyjson_obj_get(root, "repos");
+    ASSERT_EQ((int)yyjson_arr_size(repos), 4);
+    ASSERT_EQ((int)yyjson_arr_size(yyjson_obj_get(root, "skipped")), 0);
+    yyjson_val *repo;
+    yyjson_arr_foreach(repos, idx, max, repo) {
+        const char *name = yyjson_get_str(yyjson_obj_get(repo, "name"));
+        ASSERT_TRUE(yyjson_get_bool(yyjson_obj_get(repo, "indexed")));
+        ASSERT_EQ(yyjson_get_int(yyjson_obj_get(repo, "nodes")), 2);
+        if (strcmp(name, "api") == 0)
+            ASSERT_EQ(yyjson_get_int(yyjson_obj_get(repo, "links_in")), 2);
+        if (strcmp(name, "lone") == 0)
+            ASSERT_EQ(yyjson_get_int(yyjson_obj_get(repo, "links_out")), 0);
+    }
+    yyjson_doc_free(doc);
+
+    doc = xrepo_request(dir, "/api/xrepo/links?from=web&to=api&type=CROSS_GRAPHQL_CALLS"
+                             "&limit=10&offset=0", 200);
+    ASSERT_NOT_NULL(doc);
+    root = yyjson_doc_get_root(doc);
+    ASSERT_EQ(yyjson_get_int(yyjson_obj_get(root, "total")), 1);
+    link = yyjson_arr_get_first(yyjson_obj_get(root, "links"));
+    ASSERT_NOT_NULL(link);
+    ASSERT_STR_EQ(yyjson_get_str(yyjson_obj_get(link, "via")), "Orders");
+    ASSERT_STR_EQ(yyjson_get_str(yyjson_obj_get(link, "target_file")), "graph/orders.go");
+    yyjson_val *source = yyjson_obj_get(link, "source");
+    ASSERT_STR_EQ(yyjson_get_str(yyjson_obj_get(source, "file_path")), "src/client.ts");
+    ASSERT_EQ(yyjson_get_int(yyjson_obj_get(source, "line")), 12);
+    yyjson_doc_free(doc);
+
+    /* The provider side lists nothing: its copy is the reverse edge. */
+    doc = xrepo_request(dir, "/api/xrepo/links?from=api", 200);
+    ASSERT_NOT_NULL(doc);
+    ASSERT_EQ(yyjson_get_int(yyjson_obj_get(yyjson_doc_get_root(doc), "total")), 0);
+    yyjson_doc_free(doc);
+
+    const struct {
+        const char *target;
+        int status;
+        const char *message;
+    } errors[] = {
+        {"/api/xrepo/links", 400, "missing from parameter"},
+        {"/api/xrepo/links?from=../web", 400, "invalid from, to or type"},
+        {"/api/xrepo/links?from=web&type=CALLS", 400, "invalid from, to or type"},
+        {"/api/xrepo/links?from=web&to=%zz", 400, "invalid to or type"},
+        {"/api/xrepo/links?from=missing", 404, "project not found"},
+    };
+    for (size_t i = 0; i < sizeof(errors) / sizeof(errors[0]); i++) {
+        doc = xrepo_request(dir, errors[i].target, errors[i].status);
+        ASSERT_NOT_NULL(doc);
+        ASSERT_STR_EQ(yyjson_get_str(yyjson_obj_get(yyjson_doc_get_root(doc), "error")),
+                      errors[i].message);
+        yyjson_doc_free(doc);
+    }
+    (void)th_rmtree(dir);
+    PASS();
+}
+
+/* Seed `count` HTTP calls from client to server (caller -> local Route with
+ * HTTP_CALLS in the client, handler -HANDLES-> Route in the server), the
+ * shape the cross-repo pass matches. */
+static bool xrepo_seed_http(const char *dir, const char *client, const char *server, int count) {
+    char cpath[1024], spath[1024];
+    snprintf(cpath, sizeof(cpath), "%s/%s.db", dir, client);
+    snprintf(spath, sizeof(spath), "%s/%s.db", dir, server);
+    cbm_store_t *c = cbm_store_open_path(cpath), *sv = cbm_store_open_path(spath);
+    bool ok = c && sv && cbm_store_upsert_project(c, client, dir) == CBM_STORE_OK &&
+              cbm_store_upsert_project(sv, server, dir) == CBM_STORE_OK;
+    for (int i = 0; ok && i < count; i++) {
+        char qn[256], route_qn[256], name[64], props[128], handler_qn[256];
+        snprintf(qn, sizeof(qn), "%s.call%d", client, i);
+        snprintf(route_qn, sizeof(route_qn), "%s.local-route%d", client, i);
+        snprintf(name, sizeof(name), "GET /orders/%d", i);
+        snprintf(props, sizeof(props), "{\"url_path\":\"/orders/%d\",\"method\":\"GET\"}", i);
+        cbm_node_t caller = {.project = client, .label = "Function", .name = "fetchOrders",
+                             .qualified_name = qn, .file_path = "src/client.ts",
+                             .start_line = 10 + i};
+        cbm_node_t local = {.project = client, .label = "Route", .name = name,
+                            .qualified_name = route_qn, .file_path = "src/client.ts"};
+        int64_t caller_id = cbm_store_upsert_node(c, &caller);
+        int64_t local_id = cbm_store_upsert_node(c, &local);
+        cbm_edge_t call = {.project = client, .source_id = caller_id, .target_id = local_id,
+                           .type = "HTTP_CALLS", .properties_json = props};
+        ok = caller_id > 0 && local_id > 0 && cbm_store_insert_edge(c, &call) > 0;
+        snprintf(route_qn, sizeof(route_qn), "__route__GET__/orders/%d", i);
+        snprintf(handler_qn, sizeof(handler_qn), "%s.handle%d", server, i);
+        cbm_node_t route = {.project = server, .label = "Route", .name = name,
+                            .qualified_name = route_qn, .file_path = "server.go"};
+        cbm_node_t handler = {.project = server, .label = "Function", .name = "handleOrders",
+                              .qualified_name = handler_qn, .file_path = "server.go"};
+        int64_t route_id = ok ? cbm_store_upsert_node(sv, &route) : 0;
+        int64_t handler_id = ok ? cbm_store_upsert_node(sv, &handler) : 0;
+        cbm_edge_t handles = {.project = server, .source_id = handler_id, .target_id = route_id,
+                              .type = "HANDLES"};
+        ok = ok && route_id > 0 && handler_id > 0 && cbm_store_insert_edge(sv, &handles) > 0;
+    }
+    cbm_store_close(c);
+    cbm_store_close(sv);
+    return ok;
+}
+
+/* Seed a channel `orders` that emitter_project EMITS on and
+ * listener_project LISTENS_ON. */
+static bool xrepo_seed_channel(const char *dir, const char *emitter_project,
+                               const char *listener_project) {
+    const char *projects[2] = {emitter_project, listener_project};
+    const char *edge_types[2] = {"EMITS", "LISTENS_ON"};
+    bool ok = true;
+    for (int i = 0; ok && i < 2; i++) {
+        char path[1024], fn_qn[256], ch_qn[256];
+        snprintf(path, sizeof(path), "%s/%s.db", dir, projects[i]);
+        snprintf(fn_qn, sizeof(fn_qn), "%s.%s", projects[i], i ? "onOrder" : "publishOrder");
+        snprintf(ch_qn, sizeof(ch_qn), "%s.channel.orders", projects[i]);
+        cbm_store_t *s = cbm_store_open_path(path);
+        ok = s && cbm_store_upsert_project(s, projects[i], dir) == CBM_STORE_OK;
+        cbm_node_t fn = {.project = projects[i], .label = "Function",
+                         .name = i ? "onOrder" : "publishOrder", .qualified_name = fn_qn,
+                         .file_path = "bus.ts", .start_line = 3};
+        cbm_node_t ch = {.project = projects[i], .label = "Channel", .name = "orders",
+                         .qualified_name = ch_qn, .properties_json = "{\"transport\":\"kafka\"}"};
+        int64_t fn_id = ok ? cbm_store_upsert_node(s, &fn) : 0;
+        int64_t ch_id = ok ? cbm_store_upsert_node(s, &ch) : 0;
+        cbm_edge_t e = {.project = projects[i], .source_id = fn_id, .target_id = ch_id,
+                        .type = edge_types[i]};
+        ok = ok && fn_id > 0 && ch_id > 0 && cbm_store_insert_edge(s, &e) > 0;
+        cbm_store_close(s);
+    }
+    return ok;
+}
+
+/* Count of the aggregate from -> to of `type` in a summary, or -1. */
+static int64_t xrepo_arc(yyjson_val *root, const char *from, const char *to, const char *type) {
+    size_t idx, max;
+    yyjson_val *link;
+    yyjson_arr_foreach(yyjson_obj_get(root, "links"), idx, max, link) {
+        if (strcmp(yyjson_get_str(yyjson_obj_get(link, "from")), from) == 0 &&
+            strcmp(yyjson_get_str(yyjson_obj_get(link, "to")), to) == 0 &&
+            strcmp(yyjson_get_str(yyjson_obj_get(link, "type")), type) == 0)
+            return yyjson_get_int(yyjson_obj_get(link, "count"));
+    }
+    return -1;
+}
+
+/* Run the pass with CBM_CACHE_DIR pointed at dir; restore it afterwards. */
+static bool xrepo_run_pass(const char *dir, const char *project, const char *target) {
+    const char *saved_env = getenv("CBM_CACHE_DIR");
+    char *saved = saved_env ? strdup(saved_env) : NULL;
+    bool ok = cbm_setenv("CBM_CACHE_DIR", dir, 1) == 0;
+    const char *targets[1] = {target};
+    if (ok) {
+        cbm_cross_repo_result_t r = cbm_cross_repo_match(project, targets, 1);
+        ok = r.http_edges + r.channel_edges > 0;
+        cbm_cross_repo_result_free(&r);
+    }
+    if (saved)
+        (void)cbm_setenv("CBM_CACHE_DIR", saved, 1);
+    else
+        (void)cbm_unsetenv("CBM_CACHE_DIR");
+    free(saved);
+    return ok;
+}
+
+TEST(xrepo_summary_skips_provider_and_listener_copies_from_the_pass) {
+    char tmpl[256] = "/tmp/cbm_xrepo_pass_XXXXXX";
+    char *dir = cbm_mkdtemp(tmpl);
+    ASSERT_NOT_NULL(dir);
+    ASSERT_TRUE(xrepo_seed_http(dir, "web", "api", 3));
+    ASSERT_TRUE(xrepo_seed_channel(dir, "bus", "api"));
+    ASSERT_TRUE(xrepo_run_pass(dir, "web", "api"));
+    ASSERT_TRUE(xrepo_run_pass(dir, "bus", "api"));
+
+    /* The pass wrote reverse copies into api: 3 HTTP (handler -> Route) and
+     * one channel (listener -> Channel). */
+    char api_path[1024];
+    snprintf(api_path, sizeof(api_path), "%s/api.db", dir);
+    sqlite3 *api = NULL;
+    ASSERT_EQ(sqlite3_open(api_path, &api), SQLITE_OK);
+    sqlite3_stmt *st = NULL;
+    ASSERT_EQ(sqlite3_prepare_v2(api, "SELECT count(*) FROM edges WHERE type LIKE 'CROSS_%'", -1,
+                                 &st, NULL),
+              SQLITE_OK);
+    ASSERT_EQ(sqlite3_step(st), SQLITE_ROW);
+    ASSERT_EQ(sqlite3_column_int(st, 0), 4);
+    sqlite3_finalize(st);
+
+    for (int pass = 0; pass < 2; pass++) {
+        yyjson_doc *doc = xrepo_request(dir, "/api/xrepo/summary", 200);
+        ASSERT_NOT_NULL(doc);
+        yyjson_val *root = yyjson_doc_get_root(doc);
+        ASSERT_EQ(xrepo_arc(root, "web", "api", "CROSS_HTTP_CALLS"), 3);
+        ASSERT_EQ(xrepo_arc(root, "bus", "api", "CROSS_CHANNEL"), 1);
+        ASSERT_EQ(xrepo_arc(root, "api", "web", "CROSS_HTTP_CALLS"), -1);
+        ASSERT_EQ(xrepo_arc(root, "api", "bus", "CROSS_CHANNEL"), -1);
+        ASSERT_EQ(yyjson_get_int(yyjson_obj_get(root, "total_links")), 4);
+        yyjson_doc_free(doc);
+        /* Second round: provider copies as written before 2026-11-18, without
+         * the "callers" object. They must still be skipped. */
+        ASSERT_EQ(sqlite3_exec(api,
+                               "UPDATE edges SET properties = json_remove(properties, "
+                               "'$.callers') WHERE type LIKE 'CROSS_%'",
+                               NULL, NULL, NULL),
+                  SQLITE_OK);
+    }
+    sqlite3_close(api);
+    (void)th_rmtree(dir);
+    PASS();
+}
+
+TEST(xrepo_links_page_cap_and_not_found) {
+    char tmpl[256] = "/tmp/cbm_xrepo_page_XXXXXX";
+    char *dir = cbm_mkdtemp(tmpl);
+    ASSERT_NOT_NULL(dir);
+    ASSERT_TRUE(xrepo_seed_http(dir, "web", "api", 3));
+    ASSERT_TRUE(xrepo_run_pass(dir, "web", "api"));
+
+    /* Both readers should see the committed page while a WAL writer has
+     * removed its edges in an uncommitted transaction. */
+    char web_path[1024];
+    snprintf(web_path, sizeof(web_path), "%s/web.db", dir);
+    sqlite3 *writer = NULL;
+    ASSERT_EQ(sqlite3_open(web_path, &writer), SQLITE_OK);
+    ASSERT_EQ(sqlite3_exec(writer, "BEGIN IMMEDIATE; DELETE FROM edges", NULL, NULL, NULL),
+              SQLITE_OK);
+    yyjson_doc *doc = xrepo_request(dir, "/api/xrepo/links?from=web&to=api&limit=2&offset=2", 200);
+    ASSERT_EQ(sqlite3_exec(writer, "ROLLBACK", NULL, NULL, NULL), SQLITE_OK);
+    ASSERT_EQ(sqlite3_close(writer), SQLITE_OK);
+    ASSERT_NOT_NULL(doc);
+    yyjson_val *root = yyjson_doc_get_root(doc);
+    ASSERT_EQ(yyjson_get_int(yyjson_obj_get(root, "total")), 3);
+    ASSERT_EQ((int)yyjson_arr_size(yyjson_obj_get(root, "links")), 1);
+    yyjson_val *source = yyjson_obj_get(yyjson_arr_get_first(yyjson_obj_get(root, "links")),
+                                        "source");
+    ASSERT_EQ(yyjson_get_int(yyjson_obj_get(source, "line")), 12);
+    yyjson_doc_free(doc);
+
+    doc = xrepo_request(dir, "/api/xrepo/links?from=web&limit=5000&offset=-4", 200);
+    ASSERT_NOT_NULL(doc);
+    root = yyjson_doc_get_root(doc);
+    ASSERT_EQ(yyjson_get_int(yyjson_obj_get(root, "limit")), 1000);
+    ASSERT_EQ(yyjson_get_int(yyjson_obj_get(root, "offset")), 0);
+    yyjson_doc_free(doc);
+
+    /* An ADR sidecar is not a project index, even though the file exists. */
+    char adr[1024];
+    snprintf(adr, sizeof(adr), "%s/web.adr.db", dir);
+    FILE *fp = cbm_fopen(adr, "wb");
+    ASSERT_NOT_NULL(fp);
+    fclose(fp);
+    doc = xrepo_request(dir, "/api/xrepo/links?from=web.adr", 404);
+    ASSERT_NOT_NULL(doc);
+    yyjson_doc_free(doc);
+    (void)th_rmtree(dir);
+    PASS();
+}
+
+TEST(xrepo_summary_names_unreadable_project_databases) {
+    char tmpl[256] = "/tmp/cbm_xrepo_bad_XXXXXX";
+    char *dir = cbm_mkdtemp(tmpl);
+    ASSERT_NOT_NULL(dir);
+    ASSERT_TRUE(xrepo_seed(dir, "web", NULL, NULL, NULL));
+    char bad[1024];
+    snprintf(bad, sizeof(bad), "%s/broken.db", dir);
+    FILE *fp = cbm_fopen(bad, "wb");
+    ASSERT_NOT_NULL(fp);
+    for (int i = 0; i < 256; i++)
+        fputs("not a sqlite database ", fp);
+    fclose(fp);
+    yyjson_doc *doc = xrepo_request(dir, "/api/xrepo/summary", 200);
+    ASSERT_NOT_NULL(doc);
+    yyjson_val *root = yyjson_doc_get_root(doc);
+    yyjson_val *skipped = yyjson_obj_get(root, "skipped");
+    ASSERT_EQ((int)yyjson_arr_size(skipped), 1);
+    ASSERT_STR_EQ(yyjson_get_str(yyjson_arr_get_first(skipped)), "broken");
+    ASSERT_EQ((int)yyjson_arr_size(yyjson_obj_get(root, "repos")), 1);
+    ASSERT_FALSE(yyjson_get_bool(yyjson_obj_get(root, "truncated")));
+    yyjson_doc_free(doc);
+    doc = xrepo_request(dir, "/api/xrepo/links?from=broken", 500);
+    ASSERT_NOT_NULL(doc);
+    ASSERT_STR_EQ(yyjson_get_str(yyjson_obj_get(yyjson_doc_get_root(doc), "error")),
+                  "cannot read links");
+    yyjson_doc_free(doc);
+    char missing[1024];
+    snprintf(missing, sizeof(missing), "%s/nonexistent", dir);
+    doc = xrepo_request(missing, "/api/xrepo/summary", 500);
+    ASSERT_NOT_NULL(doc);
+    ASSERT_STR_EQ(yyjson_get_str(yyjson_obj_get(yyjson_doc_get_root(doc), "error")),
+                  "cannot read the project cache");
+    yyjson_doc_free(doc);
+    (void)th_rmtree(dir);
+    PASS();
+}
+
+TEST(xrepo_summary_caps_projects_after_sorting) {
+    char tmpl[256] = "/tmp/cbm_xrepo_cap_XXXXXX";
+    char *dir = cbm_mkdtemp(tmpl);
+    ASSERT_NOT_NULL(dir);
+    /* Insert the last project first so directory order is insufficient. The
+     * 511 empty databases fill the candidate list but contribute no repos. */
+    ASSERT_TRUE(xrepo_seed(dir, "z-excluded", NULL, NULL, NULL));
+    for (int i = 0; i < 511; i++) {
+        char path[1024];
+        snprintf(path, sizeof(path), "%s/m%03d.db", dir, i);
+        FILE *file = cbm_fopen(path, "wb");
+        ASSERT_NOT_NULL(file);
+        fclose(file);
+    }
+    ASSERT_TRUE(xrepo_seed(dir, "a-kept", NULL, NULL, NULL));
+
+    yyjson_doc *doc = xrepo_request(dir, "/api/xrepo/summary", 200);
+    ASSERT_NOT_NULL(doc);
+    yyjson_val *root = yyjson_doc_get_root(doc);
+    yyjson_val *repos = yyjson_obj_get(root, "repos");
+    ASSERT_TRUE(yyjson_get_bool(yyjson_obj_get(root, "truncated")));
+    ASSERT_EQ(yyjson_arr_size(repos), 1);
+    ASSERT_STR_EQ(yyjson_get_str(yyjson_obj_get(yyjson_arr_get_first(repos), "name")), "a-kept");
+    yyjson_doc_free(doc);
+    (void)th_rmtree(dir);
+    PASS();
 }
 
 typedef struct {
@@ -4202,6 +4647,11 @@ TEST(ui_server_index_status_long_roots_render_whole) {
 /* ── Suite ────────────────────────────────────────────────────── */
 
 SUITE(httpd) {
+    RUN_TEST(xrepo_summary_counts_caller_side_links_once);
+    RUN_TEST(xrepo_summary_skips_provider_and_listener_copies_from_the_pass);
+    RUN_TEST(xrepo_links_page_cap_and_not_found);
+    RUN_TEST(xrepo_summary_names_unreadable_project_databases);
+    RUN_TEST(xrepo_summary_caps_projects_after_sorting);
     RUN_TEST(ui_server_configuration_is_atomic_and_origin_protected);
     RUN_TEST(ui_server_browse_non_ascii_directory);
     RUN_TEST(ui_server_browse_wide_dir_no_overflow);

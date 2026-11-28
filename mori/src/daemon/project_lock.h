@@ -10,6 +10,8 @@
 typedef struct cbm_project_lock_manager cbm_project_lock_manager_t;
 typedef struct cbm_project_lock_lease cbm_project_lock_lease_t;
 
+/* Implemented by the Rust engine on both native and Rust-linked entry points. */
+
 /* Each manager is an independent process-local registry over the endpoint's
  * owner-only runtime directory. Separate CBM processes therefore coordinate
  * through the same native lock files without sharing memory. */
@@ -17,7 +19,9 @@ cbm_project_lock_manager_t *cbm_project_lock_manager_new(const cbm_daemon_ipc_en
 
 /* Normal projects hold SH(project-set) + EX(project). "*" holds
  * EX(project-set), blocking every named project. Project lock keys are ASCII
- * case-folded to cover filename aliases on case-insensitive filesystems. */
+ * case-folded to cover filename aliases on case-insensitive filesystems.
+ * A non-NULL lease on any status must be released, including after failed
+ * acquisition if native cleanup is still retryable. */
 cbm_private_file_lock_status_t cbm_project_lock_acquire(cbm_project_lock_manager_t *manager,
                                                         const char *project, uint64_t deadline_ms,
                                                         const cbm_lock_cancel_token_t *cancel_token,

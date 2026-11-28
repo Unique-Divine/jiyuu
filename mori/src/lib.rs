@@ -3,6 +3,11 @@
 #[path = "daemon/ipc/mod.rs"]
 pub mod ipc;
 
+#[cfg(feature = "native-engine-abi")]
+#[doc(hidden)]
+#[path = "cypher/cypher_scalar.rs"]
+pub mod cypher_scalar;
+
 #[cfg(any(feature = "native-engine-abi", test))]
 #[path = "mcp/stdio/mod.rs"]
 mod stdio;
@@ -26,8 +31,14 @@ mod csharp_doc_links;
 #[path = "pipeline/definition_props.rs"]
 mod definition_props;
 #[cfg(feature = "native-engine-abi")]
+#[path = "mcp/detect_changes/mod.rs"]
+mod detect_changes;
+#[cfg(feature = "native-engine-abi")]
 #[path = "pipeline/doc_file_links.rs"]
 mod doc_file_links;
+#[cfg(feature = "native-engine-abi")]
+#[path = "store/doc_links_preview.rs"]
+mod doc_links_preview;
 #[cfg(feature = "native-engine-abi")]
 #[path = "pipeline/docker_image.rs"]
 mod docker_image;
@@ -49,6 +60,9 @@ mod jvm_doc_links;
 #[cfg(feature = "native-engine-abi")]
 #[path = "pipeline/kubernetes.rs"]
 mod kubernetes;
+#[cfg(feature = "native-engine-abi")]
+#[path = "mcp/impact_graph.rs"]
+mod mcp_impact_graph;
 #[cfg(feature = "native-engine-abi")]
 #[path = "pipeline/msbuild_condition.rs"]
 mod msbuild_condition;
@@ -109,12 +123,18 @@ mod terraform;
 #[path = "cli/test_impact_cli.rs"]
 mod test_impact_cli;
 #[cfg(feature = "native-engine-abi")]
+#[path = "mcp/test_impact_engine_reach/mod.rs"]
+mod test_impact_engine_reach;
+#[cfg(feature = "native-engine-abi")]
 #[path = "mcp/test_impact_git.rs"]
 mod test_impact_git;
 
 #[cfg(any(feature = "native-engine-abi", test))]
 #[path = "cli/config_cli/mod.rs"]
 mod config_cli;
+#[cfg(any(feature = "native-engine-abi", test))]
+#[path = "cli/tiered_profiles/mod.rs"]
+mod tiered_profiles;
 
 #[cfg(any(feature = "native-engine-abi", test))]
 #[path = "mcp/mcp_dispatch/methods.rs"]
@@ -143,6 +163,10 @@ mod ui_http_host;
 #[path = "ui/http_transport.rs"]
 mod ui_http_transport;
 
+#[cfg(feature = "native-engine-abi")]
+#[path = "ui/xrepo.rs"]
+mod ui_xrepo;
+
 #[cfg(any(feature = "graphql-callbacks", test))]
 #[path = "pipeline/gqlgen.rs"]
 mod gqlgen;
@@ -165,6 +189,9 @@ mod index_supervision;
 #[cfg(any(feature = "native-engine-abi", test))]
 #[path = "daemon/job_recovery/mod.rs"]
 mod job_recovery;
+#[cfg(feature = "native-engine-abi")]
+#[path = "daemon/project_lock.rs"]
+mod project_lock;
 #[cfg(any(feature = "native-engine-abi", test))]
 mod watcher;
 

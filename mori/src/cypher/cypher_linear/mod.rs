@@ -9,6 +9,7 @@ use std::hash::BuildHasher;
 #[cfg(test)]
 use std::time::{Duration, Instant};
 
+use jiyuu_mori::cypher_scalar::Scalar;
 use rusqlite::types::ValueRef;
 use rusqlite::{Connection, Row, Statement, params};
 
@@ -26,6 +27,9 @@ mod ordered_count;
 
 #[path = "paths.rs"]
 mod paths;
+#[cfg(test)]
+#[path = "scalar_tests.rs"]
+mod scalar_tests;
 
 use ordered_count::OrderedCount;
 use predicates::{Bindings, Expr};
@@ -378,8 +382,7 @@ enum ProjectionExpression<'a> {
     NodeLabels(usize),
     Id(Binding),
     Constant(&'static [u8]),
-    Coalesce(predicates::Coalesce<'a>),
-    Substring(predicates::Substring<'a>),
+    Scalar(predicates::ScalarCall<'a>),
     Count(Option<Binding>),
     CountDistinct(Binding, Option<&'a str>),
     Collect(Binding, Option<&'a str>),
@@ -447,24 +450,12 @@ impl ProjectionExpression<'_> {
             }
             Self::Field(Binding::Unbound, _) => Cow::Borrowed(b""),
             Self::Constant(bytes) => Cow::Borrowed(bytes),
-            Self::Coalesce(ref call) => Cow::Owned(
+            Self::Scalar(ref call) => Cow::Owned(
                 call.value(|binding, prop| {
-                    Some(
-                        ProjectionExpression::Field(binding, prop)
-                            .field_value(nodes, edges, context),
-                    )
+                    ProjectionExpression::Field(binding, prop)
+                        .field_value(nodes, edges, context)
                 })
-                .unwrap_or_default()
                 .into_owned(),
-            ),
-            Self::Substring(ref call) => Cow::Owned(
-                call.value(|binding, prop| {
-                    Some(
-                        ProjectionExpression::Field(binding, prop)
-                            .field_value(nodes, edges, context),
-                    )
-                })
-                .unwrap_or_default(),
             ),
             Self::StarField(index, field) => node(index)
                 .map_or(Cow::Borrowed(b""), |node| {
@@ -722,38 +713,27 @@ impl<'a> Parser<'a> {
     fn named_projection(&mut self) -> Result<Projection<'a>, ParseError> {
         let name = self.name()?;
         if self.consume(b'(') {
-            if !native_named_function(name) {
-                return Err(ParseError::UnsupportedProjectionFunction(
-                    name.to_owned(),
-                ));
-            }
-            if name.eq_ignore_ascii_case("coalesce") {
-                let call = self.coalesce(true)?;
-                let (var, property) =
-                    call.first_reference().ok_or(Unsupported)?;
-                return Ok(Projection {
-                    expression: ProjectionExpression::Coalesce(call),
-                    name: format!("coalesce({var})"),
-                    source_name: projection_name(var, property),
-                    scope_name: None,
-                });
-            }
-            if name.eq_ignore_ascii_case("substring") {
-                let call = self.substring(true)?;
+            if let Some(scalar) = Scalar::parse(name.as_bytes()) {
+                let call = self.scalar_call(scalar, true)?;
                 let reference = call.first_reference();
                 if reference.is_none() && !self.tokens.peek().is_some_and(
                     |token| matches!(token, Token::Word(word) if word.eq_ignore_ascii_case("AS"))
                 ) {
-                    // The native column name formats a null C pointer.
+                    // Delegate the platform-specific name for a null variable.
                     return Err(Unsupported.into());
                 }
                 let (var, property) = reference.unwrap_or(("", None));
                 return Ok(Projection {
-                    expression: ProjectionExpression::Substring(call),
-                    name: format!("substring({var})"),
+                    expression: ProjectionExpression::Scalar(call),
+                    name: format!("{}({var})", scalar.name()),
                     source_name: projection_name(var, property),
                     scope_name: None,
                 });
+            }
+            if !native_named_function(name) {
+                return Err(ParseError::UnsupportedProjectionFunction(
+                    name.to_owned(),
+                ));
             }
             let target = self.name()?;
             let binding = self.projection_binding(target);
@@ -907,6 +887,32 @@ impl<'a> Parser<'a> {
                 return Err(Unsupported.into());
             }
             projections.push(self.projection()?);
+        }
+        // The native row builder can retain a pointer into the property scratch
+        // ring. Keep newly supported projections on that executor when later
+        // property reads could overwrite the retained bytes.
+        let new_scalar = projections.iter().any(|item| {
+            let ProjectionExpression::Scalar(call) = &item.expression else {
+                return false;
+            };
+            match call.scalar() {
+                Scalar::Substring => false,
+                Scalar::Coalesce => call.first_reference().is_none(),
+                Scalar::Left | Scalar::Right | Scalar::Replace => true,
+            }
+        });
+        if new_scalar {
+            let reads = projections
+                .iter()
+                .map(|item| match &item.expression {
+                    ProjectionExpression::Scalar(call) => call.property_reads(),
+                    ProjectionExpression::Field(_, Some(_)) => 1,
+                    _ => 0,
+                })
+                .sum::<usize>();
+            if reads > NATIVE_EDGE_PROPERTY_BUFFERS {
+                return Err(Unsupported.into());
+            }
         }
         Ok(projections)
     }
@@ -1198,11 +1204,6 @@ fn native_named_function(name: &str) -> bool {
         "ltrim",
         "rtrim",
         "reverse",
-        "coalesce",
-        "substring",
-        "replace",
-        "left",
-        "right",
     ]
     .iter()
     .any(|function| function.eq_ignore_ascii_case(name))
