@@ -3,28 +3,14 @@ use std::ffi::{CStr, c_char, c_int, c_void};
 use std::marker::PhantomData;
 use std::ptr;
 
+use crate::native_type_registry::{
+    Arena, RegisteredFunc, RegisteredType, TypeRegistry, cbm_arena_alloc,
+    cbm_registry_lookup_func, cbm_registry_lookup_method,
+    cbm_registry_lookup_type,
+};
+
 #[repr(C)]
 struct PhpContext {
-    _opaque: [u8; 0],
-}
-
-#[repr(C)]
-struct Arena {
-    _opaque: [u8; 0],
-}
-
-#[repr(C)]
-struct TypeRegistry {
-    _opaque: [u8; 0],
-}
-
-#[repr(C)]
-struct RegisteredType {
-    _opaque: [u8; 0],
-}
-
-#[repr(C)]
-struct RegisteredFunc {
     _opaque: [u8; 0],
 }
 
@@ -54,20 +40,6 @@ unsafe extern "C" {
         visit: extern "C" fn(*mut c_void, *const RegisteredType),
         data: *mut c_void,
     );
-    fn cbm_php_arena_alloc(arena: *mut Arena, n: usize) -> *mut c_void;
-    fn cbm_php_registry_type(
-        registry: *const TypeRegistry,
-        qn: *const c_char,
-    ) -> *const RegisteredType;
-    fn cbm_php_registry_method(
-        registry: *const TypeRegistry,
-        receiver: *const c_char,
-        name: *const c_char,
-    ) -> *const RegisteredFunc;
-    fn cbm_php_registry_func(
-        registry: *const TypeRegistry,
-        qn: *const c_char,
-    ) -> *const RegisteredFunc;
 }
 
 #[derive(Clone)]
@@ -130,7 +102,7 @@ impl<'a> Registry<'a> for NativeRegistry<'a> {
     type Method = *const RegisteredFunc;
 
     fn exact_type(&self, qn: &CStr) -> Option<Self::Type> {
-        let ty = unsafe { cbm_php_registry_type(self.registry, qn.as_ptr()) };
+        let ty = unsafe { cbm_registry_lookup_type(self.registry, qn.as_ptr()) };
         (!ty.is_null()).then_some(ty)
     }
 
@@ -139,7 +111,7 @@ impl<'a> Registry<'a> for NativeRegistry<'a> {
     fn joined_type(&self, prefix: &[u8], qn: &CStr) -> Option<Self::Type> {
         let qn = qn.to_bytes_with_nul();
         let len = prefix.len() + 1 + qn.len();
-        let key = unsafe { cbm_php_arena_alloc(self.arena, len) }.cast::<u8>();
+        let key = unsafe { cbm_arena_alloc(self.arena, len) }.cast::<u8>();
         if key.is_null() {
             return None;
         }
@@ -154,7 +126,7 @@ impl<'a> Registry<'a> for NativeRegistry<'a> {
 
     fn method(&self, receiver: &CStr, name: &CStr) -> Option<Self::Method> {
         let row = unsafe {
-            cbm_php_registry_method(
+            cbm_registry_lookup_method(
                 self.registry,
                 receiver.as_ptr(),
                 name.as_ptr(),
@@ -164,7 +136,8 @@ impl<'a> Registry<'a> for NativeRegistry<'a> {
     }
 
     fn function(&self, qn: &CStr) -> Option<Self::Method> {
-        let row = unsafe { cbm_php_registry_func(self.registry, qn.as_ptr()) };
+        let row =
+            unsafe { cbm_registry_lookup_func(self.registry, qn.as_ptr()) };
         (!row.is_null()).then_some(row)
     }
 

@@ -315,6 +315,10 @@ mod go_types_native;
 #[path = "../internal/cbm/native_tree.rs"]
 mod native_tree;
 
+#[cfg(feature = "native-engine-abi")]
+#[path = "../internal/cbm/lsp/native_type_registry.rs"]
+mod native_type_registry;
+
 #[cfg(any(feature = "native-engine-abi", test))]
 #[path = "../internal/cbm/lsp/php_resolver/mod.rs"]
 mod php_resolver;
