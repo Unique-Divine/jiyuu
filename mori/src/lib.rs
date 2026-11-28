@@ -168,6 +168,9 @@ mod index_supervision;
 #[cfg(any(feature = "native-engine-abi", test))]
 #[path = "daemon/job_recovery/mod.rs"]
 mod job_recovery;
+#[cfg(feature = "native-engine-abi")]
+#[path = "daemon/project_lock.rs"]
+mod project_lock;
 #[cfg(any(feature = "native-engine-abi", test))]
 mod watcher;
 
