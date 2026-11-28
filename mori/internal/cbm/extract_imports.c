@@ -2,6 +2,7 @@
 #include "arena.h" // CBMArena, cbm_arena_strdup/strndup/sprintf
 #include "helpers.h"
 #include "lang_specs.h"      // CBMLangSpec, CBMEmbeddedLangSpec, cbm_lang_spec, cbm_ts_language
+#include "native_tree_ffi.h"
 #include "tree_sitter/api.h" // TSNode, ts_node_*
 #include "foundation/constants.h"
 #include "foundation/log.h"
@@ -184,6 +185,7 @@ extern void mori_python_extract_imports(TSNode node, const char *source, size_t 
 static void python_emit_import_row(void *context, const python_import_row_t *row) {
     CBMExtractCtx *ctx = context;
     CBMArena *arena = ctx->arena;
+    CBM_MSAN_WRITTEN(row, sizeof(*row));
     char *module_path = NULL;
     if (row->prefix.len == 0 && !row->needs_dot) {
         module_path = cbm_arena_strndup(arena, row->member.data, row->member.len);
@@ -1627,12 +1629,19 @@ static bool emit_ts_static_import(void *context, TSNode source, const TSNode *lo
     CBMExtractCtx *ctx = output->ctx;
     CBMArena *arena = ctx->arena;
     if (!output->path) {
+        cbm_ffi_ts_node_written(&source);
         output->path = strip_quotes(arena, cbm_node_text(arena, source, ctx->source));
         /* The source is shared by every binding. Decline before writing any
          * row so the statement can fall back to native extraction. */
         if (!output->path || !output->path[0]) {
             return false;
         }
+    }
+    if (local) {
+        cbm_ffi_ts_node_written(local);
+    }
+    if (member) {
+        cbm_ffi_ts_node_written(member);
     }
     const char *exported = member ? cbm_node_text(arena, *member, ctx->source) : NULL;
     const char *name = local    ? cbm_node_text(arena, *local, ctx->source)
@@ -1894,8 +1903,13 @@ extern bool mori_rust_extract_use_imports(TSNode root, const char *source, size_
 static void emit_rust_use_import(void *context, const char *path, size_t path_len,
                                  const char *alias, size_t alias_len) {
     CBMExtractCtx *ctx = context;
+    CBM_MSAN_WRITTEN(path, path_len);
     const char *module = cbm_arena_strndup(ctx->arena, path, path_len);
-    const char *local = alias_len > 0 ? cbm_arena_strndup(ctx->arena, alias, alias_len) : NULL;
+    const char *local = NULL;
+    if (alias_len > 0) {
+        CBM_MSAN_WRITTEN(alias, alias_len);
+        local = cbm_arena_strndup(ctx->arena, alias, alias_len);
+    }
     rust_import_push(ctx, module, local);
 }
 
