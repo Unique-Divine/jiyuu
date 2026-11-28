@@ -1821,9 +1821,9 @@ static CBMFileResult *calls_get_or_extract(cbm_pipeline_ctx_t *ctx, int idx,
     CBMFileResult *r =
         cbm_pipeline_test_force_extract_null(ctx, fi->language)
             ? NULL
-            : cbm_extract_file_ex_with_tests(
+            : cbm_extract_file_ex_with_tests_cancellable(
                   src, slen, fi->language, ctx->project_name, fi->rel_path, CBM_EXTRACT_BUDGET,
-                  NULL, NULL, ctx->macro_table, ctx->return_type_table, ctx->test_declarations);
+                  NULL, NULL, ctx->macro_table, ctx->return_type_table, ctx->test_declarations, ctx->cancelled);
     free(src);
     (void)cbm_pipeline_test_extraction_ok(ctx, fi->language, r);
     if (r) {

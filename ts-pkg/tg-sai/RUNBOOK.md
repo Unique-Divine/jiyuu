@@ -518,6 +518,24 @@ If `actorCanApply` is false, the logged-in account cannot change admins in that
 chat. For example, auditing a chat from a non-owner session shows false when a
 different user is the creator.
 
+### Deal Desk registration diagnostics
+
+```bash
+tg-sai audit --chat=<chat-id> --for-registration
+```
+
+The command reads the named chat as the selected Telegram user. It prints
+the observed owner, SaiTeam_bot membership, invite and pin rights, and
+visible blockers as JSON. A plain member's effective rights can come from
+the group defaults. Deal Desk still requires the bot to be an administrator.
+Basic-group administrators can have implicit rights even when MTProto
+returns no explicit rights.
+
+Use `sai-ops chat-setups register --chat=<chat-id> --deal <deal-id>` for
+registration. That command checks the bot's own Bot API view and records
+the result. An empty diagnostic blocker list means the user session saw
+no blocker.
+
 ## Suggested workflow
 
 1. Run command `tg-sai profile find` to inspect available Telegram
