@@ -31,6 +31,7 @@
 #include "foundation/compat_fs.h"  // cbm_fopen — crash-supervisor per-file marker write
 #include "foundation/hash_table.h" // CBMHashTable — crash-supervisor quarantine set
 #include "foundation/str_util.h"   // cbm_json_escape — variants file_path
+#include "foundation/ts_alloc.h"
 #include "tree_sitter/api.h" // TSParser, TSNode, TSTree, TSInput, TSLanguage, TSPoint, TSParseOptions, TSParseState
 #include "foundation/platform.h"
 #include "foundation/constants.h"
@@ -817,7 +818,7 @@ static int cbm_sqlite_roundup(int n) {
 /* Same reasoning as the sqlite bindings: tree-sitter allocates its parse trees
  * through these, and they too skip the interposer. */
 static void *cbm_ts_malloc(size_t n) {
-    void *block = mi_malloc(n);
+    void *block = cbm_ts_alloc_or_abort(mi_malloc(n), 1, n);
     if (block) {
         cbm_mem_class_add_external(CBM_MEM_CLASS_TS_TREE, mi_usable_size(block));
     }
@@ -825,7 +826,7 @@ static void *cbm_ts_malloc(size_t n) {
     return block;
 }
 static void *cbm_ts_calloc(size_t count, size_t size) {
-    void *block = mi_calloc(count, size);
+    void *block = cbm_ts_alloc_or_abort(mi_calloc(count, size), count, size);
     if (block) {
         cbm_mem_class_add_external(CBM_MEM_CLASS_TS_TREE, mi_usable_size(block));
     }
@@ -837,6 +838,7 @@ static void *cbm_ts_realloc(void *p, size_t n) {
     CBM_MEMEV_BACKING(1);
     void *grown = mi_realloc(p, n);
     CBM_MEMEV_BACKING(-1);
+    grown = cbm_ts_alloc_or_abort(grown, 1, n);
     if (grown) {
         cbm_mem_class_remove_external(CBM_MEM_CLASS_TS_TREE, old_size);
         cbm_mem_class_add_external(CBM_MEM_CLASS_TS_TREE, mi_usable_size(grown));
