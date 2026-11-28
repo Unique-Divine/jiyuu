@@ -101,3 +101,20 @@ python_callable_values/main.py	passes_method	Box.method	Method	309:319	box.metho
 python_callable_values/main.py	passes_method	apply	Function	303:323	apply(box.method, 2)	apply
 python_callable_values/main.py	stored	apply	Function	477:489	apply(fn, 5)	apply
 python_callable_values/main.py	stored	helper	Function	459:465	helper	helper	CALL_REFERENCE
+# Python walk: operators, subscripts, a comprehension, with, branches, a loop,
+# try, match patterns, a lambda and a class attribute initializer
+python_walk/main.py		make	Function	918:924	make()	make
+python_walk/main.py	Holder.use	Vector.norm	Method	960:979	self.default.norm()	self.default.norm
+python_walk/main.py	branches	Vector	Class	699:707	Vector()	Vector
+python_walk/main.py	branches	Vector.norm	Method	719:727	v.norm()	v.norm
+python_walk/main.py	branches	make	Function	670:676	make()	make
+python_walk/main.py	comprehension	make	Function	518:524	make()	make
+python_walk/main.py	guarded	make	Function	831:837	make()	make
+python_walk/main.py	lambdas	make	Function	1182:1188	make()	make
+python_walk/main.py	loop	make	Function	756:762	make()	make
+python_walk/main.py	make	Vector	Class	333:341	Vector()	Vector
+python_walk/main.py	matched	make	Function	1123:1129	make()	make
+python_walk/main.py	operators	make	Function	384:390	make()	make
+python_walk/main.py	subscript	make	Function	460:466	make()	make
+python_walk/main.py	with_block	Resource	Class	578:588	Resource()	Resource
+python_walk/main.py	with_block	Resource.read	Method	612:622	res.read()	res.read
