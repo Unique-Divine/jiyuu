@@ -35,7 +35,7 @@ impl Drop for Scratch {
 
 type ImportEdge = (String, String, String);
 
-fn index(root: &Path, repo: &Path, backend: &str) -> Vec<ImportEdge> {
+fn index(root: &Path, repo: &Path) -> Vec<ImportEdge> {
     const PROJECT: &str = "go-import-probe";
     let cache = root.join("cache");
     let runtime = root.join("rt");
@@ -54,8 +54,7 @@ fn index(root: &Path, repo: &Path, backend: &str) -> Vec<ImportEdge> {
             .env("CBM_CACHE_DIR", &cache)
             .env("CBM_RUNTIME_DIR", &runtime)
             .env("CBM_PROFILE", "1")
-            .env("CBM_LOG_LEVEL", "debug")
-            .env("MORI_IMPL_GO_IMPORTS", backend);
+            .env("CBM_LOG_LEVEL", "debug");
         command
     };
     let args = json!({"repo_path": repo, "name": PROJECT, "mode": "moderate"});
@@ -80,7 +79,7 @@ fn index(root: &Path, repo: &Path, backend: &str) -> Vec<ImportEdge> {
                 .unwrap()
                 .contains("msg=extract.go_imports implementation=rust")
     });
-    assert_eq!(ran_rust, backend == "rust");
+    assert!(ran_rust, "worker did not run the Rust Go import extractor");
 
     let db = Connection::open_with_flags(
         cache.join(format!("{PROJECT}.db")),
@@ -104,7 +103,7 @@ fn index(root: &Path, repo: &Path, backend: &str) -> Vec<ImportEdge> {
 }
 
 #[test]
-fn go_import_edges_match_native_with_single_grouped_and_recovered_imports() {
+fn go_import_edges_keep_single_grouped_and_recovered_imports() {
     let scratch = Scratch::new();
     let repo = scratch.0.join("repo");
     fs::create_dir(&repo).unwrap();
@@ -146,9 +145,7 @@ import (
     .unwrap();
     fs::write(repo.join("c_decoy.go"), "package main\nfunc C() {}\n").unwrap();
 
-    let native = index(&scratch.0.join("native"), &repo, "c");
-    let rust = index(&scratch.0.join("rust"), &repo, "rust");
-    assert_eq!(rust, native);
+    let rust = index(&scratch.0.join("rust"), &repo);
     for (file, alias, package) in [
         ("main.go", "aliased", "alpha"),
         ("main.go", "beta", "beta"),

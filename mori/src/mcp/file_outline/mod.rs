@@ -3,6 +3,8 @@
 use std::ffi::{CStr, c_char, c_int, c_void};
 use std::{mem, panic, ptr, slice};
 
+mod request;
+
 use rusqlite::ffi::{sqlite3, sqlite3_free, sqlite3_malloc64};
 use rusqlite::types::{ToSqlOutput, ValueRef};
 use rusqlite::{Connection, Error, ErrorCode, params_from_iter};
@@ -80,6 +82,8 @@ impl Page {
         row.name = copy_text(text[0])?;
         row.label = copy_text(text[1])?;
         row.qualified_name = copy_text(text[2])?;
+        // SAFETY: All row fields now contain initialized values.
+        unsafe { crate::ffi_output::written(row, 1) };
         Ok(())
     }
 
@@ -118,6 +122,7 @@ fn copy_text(bytes: &[u8]) -> Result<*const c_char, c_int> {
         }
         ptr::copy_nonoverlapping(bytes.as_ptr(), copy, len);
         copy.add(len).write(0);
+        crate::ffi_output::written(copy, len + 1);
         Ok(copy.cast())
     }
 }
@@ -256,8 +261,10 @@ pub(crate) unsafe extern "C" fn mori_read_file_outline(
         Ok(Ok((page, filtered_total))) => {
             // SAFETY: The store supplies distinct writable output fields.
             unsafe {
-                (*out, *count) = page.into_raw();
-                *total = filtered_total;
+                let (rows, len) = page.into_raw();
+                crate::ffi_output::write(out, rows);
+                crate::ffi_output::write(count, len);
+                crate::ffi_output::write(total, filtered_total);
             }
             OK
         }

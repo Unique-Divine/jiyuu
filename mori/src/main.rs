@@ -31,10 +31,6 @@ mod tools;
 mod ui;
 
 #[cfg(feature = "c-backend")]
-#[path = "mcp/search.rs"]
-mod search;
-
-#[cfg(feature = "c-backend")]
 #[path = "discover/path_verdict.rs"]
 mod path_verdict;
 
@@ -49,10 +45,6 @@ mod index_route;
 #[cfg(any(feature = "c-backend", test))]
 #[path = "pipeline/importance.rs"]
 mod importance;
-
-#[cfg(any(feature = "c-backend", test))]
-#[path = "../internal/cbm/lsp/go_results.rs"]
-mod go_results;
 
 #[cfg(any(feature = "c-backend", test))]
 #[path = "watcher/repair_recovery.rs"]

@@ -3,18 +3,18 @@ use crate::ffi_output;
 use std::ffi::{CStr, CString, c_char, c_int, c_void};
 use std::{ptr, slice};
 
-const CANDIDATES_NOTE: &[u8] =
+pub(crate) const CANDIDATES_NOTE: &[u8] =
     b"doc<->code candidates by shared terms or the doc's folder, not links: p is the judged probability the section is about the target; verify";
 
 #[repr(C)]
-struct Node {
+pub(crate) struct Node {
     id: i64,
     project: *const c_char,
     label: *const c_char,
     name: *const c_char,
-    qualified_name: *const c_char,
-    file_path: *const c_char,
-    start_line: c_int,
+    pub(crate) qualified_name: *const c_char,
+    pub(crate) file_path: *const c_char,
+    pub(crate) start_line: c_int,
     end_line: c_int,
     properties_json: *const c_char,
 }
@@ -55,11 +55,11 @@ pub(super) struct Input {
 }
 
 #[repr(C)]
-struct Candidate {
-    node: *const Node,
-    probability: f64,
-    kind: *const c_char,
-    position: *const c_char,
+pub(crate) struct Candidate {
+    pub(crate) node: *const Node,
+    pub(crate) probability: f64,
+    pub(crate) kind: *const c_char,
+    pub(crate) position: *const c_char,
     shared_terms: c_int,
     name_tokens: c_int,
     has_shared_terms: bool,

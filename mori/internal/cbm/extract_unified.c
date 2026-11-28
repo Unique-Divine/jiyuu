@@ -1300,7 +1300,7 @@ static const char *compute_func_qn(CBMExtractCtx *ctx, TSNode node, const CBMLan
     if (ctx->language == CBM_LANG_GO && strcmp(ts_node_type(node), "method_declaration") == 0) {
         TSNode recv = ts_node_child_by_field_name(node, TS_FIELD("receiver"));
         if (!ts_node_is_null(recv)) {
-            char *recv_type = cbm_go_receiver_type_name(ctx->arena, recv, ctx->source);
+            char *recv_type = cbm_go_receiver_type_name(ctx->arena, recv, ctx->source, ctx->source_len);
             if (recv_type && recv_type[0]) {
                 const char *type_qn = cbm_fqn_compute_source_lang(
                     ctx->arena, ctx->project, ctx->rel_path, recv_type, ctx->language);
@@ -1326,7 +1326,7 @@ static const char *compute_func_qn(CBMExtractCtx *ctx, TSNode node, const CBMLan
         /* NULL only on allocation failure: fall through to the flat QN, as
          * the receiver branch above does. */
         if (base_qn) {
-            return cbm_go_init_qn(ctx->arena, base_qn, ctx->rel_path, node, ctx->source);
+            return cbm_go_init_qn(ctx->arena, base_qn, ctx->rel_path, node, ctx->source, ctx->source_len);
         }
     }
 

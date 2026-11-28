@@ -17,6 +17,7 @@
 
 #include "pipeline/lsp_surface.h"
 #include "foundation/mem_core.h"
+#include "foundation/sanitized.h"
 #include "result_spill.h"
 #include "resolve_stats.h"
 #include "pipeline/pipeline_internal.h"
@@ -170,180 +171,28 @@ static const char *pxc_join_pipe(CBMArena *arena, const char *const *items) {
 /* ── Go result lists for the cross-file registrar ─────────────────
  *
  * The Go registrar reads a def's return_types as '|'-separated type texts and
- * parses each piece on its own (go_lsp.c split_pipe_types ->
- * cbm_parse_return_type_text: `*T`, `[]T`, builtins, named types). A single
+ * parses each piece in Rust as a pointer, slice, builtin, or named type. A single
  * result already is one such text. A result LIST arrives as its raw source,
  * `(*T, error)` or the named `(t *T, err error)`, which parses as nothing, so
  * pxc_go_result_list splits it into its element types. The extractor's
  * return_types are no substitute: clean_type_name strips `[]` and `*` for
  * type-reference edges, and `[]T` read as `T` mistypes `xs[0].M()`. */
 
-enum { PXC_GO_MAX_RESULTS = 16 };
-
-typedef struct {
-    const char *text;
-    size_t len;
-} pxc_span_t;
-
-static bool pxc_is_space(char c) {
-    return c == ' ' || c == '\t' || c == '\n' || c == '\r';
-}
-
-static bool pxc_is_ident_char(char c) {
-    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_';
-}
-
-static int pxc_go_depth(char c, int depth) {
-    if (c == '(' || c == '[' || c == '{') {
-        return depth + 1;
-    }
-    if ((c == ')' || c == ']' || c == '}') && depth > 0) {
-        return depth - 1;
-    }
-    return depth;
-}
-
-static pxc_span_t pxc_trim(const char *s, size_t n) {
-    while (n > 0 && pxc_is_space(*s)) {
-        s++;
-        n--;
-    }
-    while (n > 0 && pxc_is_space(s[n - 1])) {
-        n--;
-    }
-    return (pxc_span_t){s, n};
-}
-
-/* Split `(a, b)` at its top-level commas into trimmed elements. A trailing
- * comma (a multi-line list) leaves no element. Returns the element count, or
- * -1 for text that is no result list or holds an empty element. */
-static int pxc_go_split_results(const char *raw, pxc_span_t *out) {
-    size_t n = strlen(raw);
-    if (n < 2 || raw[0] != '(' || raw[n - 1] != ')') {
-        return -1;
-    }
-    const char *s = raw + 1;
-    size_t len = n - 2;
-    int count = 0;
-    int depth = 0;
-    size_t start = 0;
-    for (size_t i = 0; i <= len; i++) {
-        bool end = i == len;
-        if (!end && (s[i] != ',' || depth != 0)) {
-            depth = pxc_go_depth(s[i], depth);
-            continue;
-        }
-        pxc_span_t e = pxc_trim(s + start, i - start);
-        if (e.len == 0 && !(end && count > 0)) {
-            return -1;
-        }
-        if (e.len > 0) {
-            if (count == PXC_GO_MAX_RESULTS) {
-                return -1;
-            }
-            out[count++] = e;
-        }
-        start = i + 1;
-    }
-    return count;
-}
-
-/* Length of the result NAME that starts an element (`err` in `err error`),
- * 0 when the element is a bare type. A type keyword is never a name: `chan T`
- * and `func() T` are types. *lone is set when the whole element is one
- * identifier: a type in `(T, error)`, a grouped name in `(a, b int)`. */
-static size_t pxc_go_result_name(pxc_span_t e, bool *lone) {
-    size_t k = 0;
-    while (k < e.len && pxc_is_ident_char(e.text[k])) {
-        k++;
-    }
-    *lone = k > 0 && k == e.len;
-    if (k == 0 || k == e.len || !pxc_is_space(e.text[k])) {
-        return 0;
-    }
-    static const char *const type_keywords[] = {"chan", "func", "map", "struct", "interface", NULL};
-    for (int i = 0; type_keywords[i]; i++) {
-        if (strlen(type_keywords[i]) == k && memcmp(e.text, type_keywords[i], k) == 0) {
-            return 0;
-        }
-    }
-    return k;
-}
-
-/* Named results: each lone name takes the type of the next `name type`
- * element, as Go groups them. Returns count, or -1 when the list is not a
- * well-formed named list. */
-static int pxc_go_named_types(CBMArena *arena, const pxc_span_t *el, int count,
-                              const char **types) {
-    int pending = 0;
-    for (int i = 0; i < count; i++) {
-        bool lone = false;
-        size_t k = pxc_go_result_name(el[i], &lone);
-        if (k == 0) {
-            if (!lone) {
-                return -1;
-            }
-            pending++;
-            continue;
-        }
-        pxc_span_t t = pxc_trim(el[i].text + k, el[i].len - k);
-        const char *type = cbm_arena_sprintf(arena, "%.*s", (int)t.len, t.text);
-        for (int j = i - pending; j <= i; j++) {
-            types[j] = type;
-        }
-        pending = 0;
-    }
-    return pending == 0 ? count : -1;
-}
-
-/* `(*T, error)` -> `*T|error`; `(t *T, err error)` -> `*T|error`;
- * `(a, b int)` -> `int|int`. NULL when raw is no result list (a single
- * result) or does not split cleanly: the caller keeps the raw text then. */
-static const char *pxc_go_result_list_c(CBMArena *arena, const char *raw) {
-    pxc_span_t el[PXC_GO_MAX_RESULTS];
-    int count = pxc_go_split_results(raw, el);
-    if (count <= 0) {
-        return NULL;
-    }
-    bool named = false;
-    for (int i = 0; i < count && !named; i++) {
-        bool lone = false;
-        named = pxc_go_result_name(el[i], &lone) > 0;
-    }
-    const char *types[PXC_GO_MAX_RESULTS + 1];
-    if (named) {
-        if (pxc_go_named_types(arena, el, count, types) < 0) {
-            return NULL;
-        }
-    } else {
-        for (int i = 0; i < count; i++) {
-            types[i] = cbm_arena_sprintf(arena, "%.*s", (int)el[i].len, el[i].text);
-        }
-    }
-    types[count] = NULL;
-    return pxc_join_pipe(arena, types);
-}
-
 typedef char *(*pxc_go_results_alloc_fn)(void *context, size_t len);
-typedef const char *(*pxc_go_results_fn)(const char *raw, void *context,
-                                        pxc_go_results_alloc_fn alloc);
-
-static pxc_go_results_fn go_results_driver;
-
-void cbm_pxc_set_go_results_driver(pxc_go_results_fn driver);
-void cbm_pxc_set_go_results_driver(pxc_go_results_fn driver) {
-    go_results_driver = driver;
-}
+extern const char *mori_go_encode_results(const char *raw, void *context,
+                                          pxc_go_results_alloc_fn alloc);
 
 static char *pxc_go_results_arena_alloc(void *context, size_t len) {
-    return cbm_arena_alloc(context, len);
+    char *result = cbm_arena_alloc(context, len);
+    /* The encoder fills this entire buffer before returning it to C. */
+    if (result) {
+        CBM_MSAN_WRITTEN(result, len);
+    }
+    return result;
 }
 
 static const char *pxc_go_result_list(CBMArena *arena, const char *raw) {
-    if (!go_results_driver) {
-        return pxc_go_result_list_c(arena, raw);
-    }
-    const char *list = go_results_driver(raw, arena, pxc_go_results_arena_alloc);
+    const char *list = mori_go_encode_results(raw, arena, pxc_go_results_arena_alloc);
     if (list) {
         cbm_log_debug("lsp.go_result_list", "implementation", "rust");
     }
@@ -704,8 +553,8 @@ static int pxc_build_lsp_def(CBMArena *arena, const CBMDefinition *src, const ch
             src->decl_namespace ? cbm_arena_strdup(arena, src->decl_namespace) : NULL;
     }
     dst->is_interface = (strcmp(label, "Interface") == 0 || strcmp(label, "Protocol") == 0);
-    /* The return-type string. The Go registrar splits it on '|' (go_lsp.c
-     * split_pipe_types), so a Go result LIST arrives split into its element
+    /* The Rust Go registrar splits return types on '|', so a Go result
+     * list must arrive split into its element
      * types: `(*T, error)` as `*T|error`, a named `(t *T)` as `*T`. The raw
      * list text did not parse, so every variable bound by a cross-file
      * multi-value or named-result call (`t, err := pkg.New()`) stayed untyped
@@ -2121,14 +1970,15 @@ void cbm_pxc_run_one(CBMLanguage lang, CBMFileResult *r, const char *source, int
                      const char *module_qn, CBMLSPDef *defs, int def_count, const char **imp_names,
                      const char **imp_qns, int imp_count) {
     cbm_pxc_run_one_with_php_bindings(lang, r, source, source_len, module_qn, NULL, defs, def_count,
-                                      imp_names, imp_qns, imp_count, NULL);
+                                      imp_names, imp_qns, imp_count, NULL, NULL);
 }
 
 void cbm_pxc_run_one_with_php_bindings(CBMLanguage lang, CBMFileResult *r, const char *source,
                                        int source_len, const char *module_qn, const char *rel_path,
                                        CBMLSPDef *defs, int def_count, const char **imp_names,
                                        const char **imp_qns, int imp_count,
-                                       const CBMPHPImportBindings *bindings) {
+                                       const CBMPHPImportBindings *bindings,
+                                       const _Atomic int *cancelled) {
     TSTree *tree = r->cached_tree; /* may be NULL — LSP re-parses then */
 
     CBMArena scratch;
@@ -2139,10 +1989,16 @@ void cbm_pxc_run_one_with_php_bindings(CBMLanguage lang, CBMFileResult *r, const
     memset(&synthetic_calls, 0, sizeof(synthetic_calls));
 
     switch (lang) {
-    case CBM_LANG_GO:
-        cbm_run_go_lsp_cross(&scratch, source, source_len, module_qn, rel_path, defs, def_count,
-                             imp_names, imp_qns, imp_count, tree, &out);
+    case CBM_LANG_GO: {
+        CBMGoResolveStatus status = cbm_run_go_lsp_cross_status(
+            &scratch, source, source_len, module_qn, rel_path, defs, def_count, imp_names,
+            imp_qns, imp_count, tree, &out, cancelled);
+        if (status == CBM_GO_RESOLVE_FAILED) {
+            r->has_error = true;
+            r->error_msg = CBM_GO_RESOLVE_ERROR;
+        }
         break;
+    }
     case CBM_LANG_C:
     case CBM_LANG_CPP:
     case CBM_LANG_CUDA: {
@@ -2289,7 +2145,7 @@ void cbm_pxc_dispatch_file(CBMLanguage lang, CBMFileResult *result, const char *
     cbm_pxc_dispatch_file_with_php_bindings(lang, result, source, source_len, rel, def_module,
                                             cross_registries, module_def_index, all_defs,
                                             all_def_count, imp_keys, imp_vals, imp_count,
-                                            rust_shared_get, rust_shared_ctx, NULL);
+                                            rust_shared_get, rust_shared_ctx, NULL, NULL);
 }
 
 void cbm_pxc_dispatch_file_with_php_bindings(
@@ -2298,7 +2154,7 @@ void cbm_pxc_dispatch_file_with_php_bindings(
     const CBMModuleDefIndex *module_def_index, CBMLSPDef *all_defs, int all_def_count,
     const char **imp_keys, const char **imp_vals, int imp_count,
     CBMTypeRegistry *(*rust_shared_get)(void *), void *rust_shared_ctx,
-    const CBMPHPImportBindings *bindings) {
+    const CBMPHPImportBindings *bindings, const _Atomic int *cancelled) {
     if (result && result->lsp_skipped) {
         if (result->has_test_definition_owners) {
             cbm_pipeline_test_owner_error(result);
@@ -2330,16 +2186,27 @@ void cbm_pxc_dispatch_file_with_php_bindings(
         CBMResolvedCallArray out = {0};
         CBMCallArray synthetic_calls = {0};
         switch (lang) {
-        case CBM_LANG_GO:
-            /* Tier 3 (metadata-driven): pure lookup over the Tier-1
-             * lsp_unresolved entries -- no parse, no AST walk -- then the
-             * AST walk against the overlay (chained to the sealed base). */
-            cbm_go_fast_resolve_qualified_calls(result, prebuilt, imp_keys, imp_vals, imp_count);
-            cbm_run_go_lsp_cross_with_registry(&scratch, source, source_len, def_module, rel,
-                                               &overlay, imp_keys, imp_vals, imp_count,
-                                               result->cached_tree, &out);
+        case CBM_LANG_GO: {
+            CBMResolvedCallArray prior = result->resolved_calls;
+            CBMGoResolveStatus status = cbm_go_resolve_cross_metadata(
+                result, prebuilt, imp_keys, imp_vals, imp_count, cancelled);
+            if (status == CBM_GO_RESOLVE_COMPLETE) {
+                status = cbm_run_go_lsp_cross_with_registry_status(
+                    &scratch, source, source_len, def_module, rel, &overlay, imp_keys, imp_vals,
+                    imp_count, result->cached_tree, &out, cancelled);
+            }
+            if (status == CBM_GO_RESOLVE_FAILED || status == CBM_GO_RESOLVE_CANCELLED) {
+                result->resolved_calls = prior;
+                if (status == CBM_GO_RESOLVE_FAILED) {
+                    result->has_error = true;
+                    result->error_msg = CBM_GO_RESOLVE_ERROR;
+                }
+                pxc_scratch_give(PXC_SCRATCH_DISPATCH, &scratch);
+                return;
+            }
             used_prebuilt = true;
             break;
+        }
         case CBM_LANG_PYTHON: {
             CBMLSPStatus status = cbm_run_py_lsp_cross_with_registry_status(
                 &scratch, source, source_len, def_module, &overlay, imp_keys, imp_vals, imp_count,
@@ -2473,7 +2340,7 @@ void cbm_pxc_dispatch_file_with_php_bindings(
         } else {
             cbm_pxc_run_one_with_php_bindings(lang, result, source, source_len, def_module, rel,
                                               file_defs, file_def_count, imp_keys, imp_vals,
-                                              imp_count, bindings);
+                                              imp_count, bindings, cancelled);
         }
     } else if (lang == CBM_LANG_JAVASCRIPT || lang == CBM_LANG_TYPESCRIPT || lang == CBM_LANG_TSX) {
         bool js;
@@ -2485,7 +2352,7 @@ void cbm_pxc_dispatch_file_with_php_bindings(
     } else {
         cbm_pxc_run_one_with_php_bindings(lang, result, source, source_len, def_module, rel,
                                           file_defs, file_def_count, imp_keys, imp_vals, imp_count,
-                                          bindings);
+                                          bindings, cancelled);
     }
     free(filtered);
 }
@@ -2644,6 +2511,8 @@ int cbm_pipeline_pass_lsp_cross(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t *
     int per_lang_calls = 0;
 
     for (int i = 0; i < file_count; i++) {
+        if (ctx->cancelled && atomic_load_explicit(ctx->cancelled, memory_order_relaxed))
+            break;
         if (!cache[i])
             continue;
         if (!cbm_pipeline_test_result_ok(ctx, cache[i])) {
@@ -2704,7 +2573,7 @@ int cbm_pipeline_pass_lsp_cross(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t *
         cbm_pxc_dispatch_file_with_php_bindings(
             lang, cache[i], source, source_len, files[i].rel_path, def_modules[i],
             &cross_registries, module_def_index, all_defs, def_count, imp_keys, imp_vals, imp_count,
-            NULL, NULL, &php_bindings);
+            NULL, NULL, &php_bindings, ctx->cancelled);
         cbm_pipeline_php_vendor_names_free(&php_bindings);
         cbm_index_mark_done(files[i].rel_path);
         if (!had_error && cache[i]->has_error && ctx->pipeline)
