@@ -32,6 +32,8 @@
 #include "foundation/compat.h"
 #include "foundation/log.h"
 
+#include <float.h>
+#include <limits.h>
 #include <math.h>
 #include <stdatomic.h>
 #include <stdint.h>
@@ -876,6 +878,320 @@ TEST(importance_distinct_file_count_is_linear_in_group_size) {
     PASS();
 }
 
+/* ── Parity: the Rust pass (importance.rs) against the C reference ───── */
+
+static uint32_t imp_next(uint32_t *state) {
+    *state = *state * 1664525U + 1013904223U;
+    return *state >> 8;
+}
+
+/* Property blobs the writer must append to, overwrite in, or leave alone. */
+static const char *const kImpProps[] = {
+    "{}",
+    "{\"a\":1}",
+    "{\"importance\":1.0}",
+    "{\"importance\":1.0,\"b\":2}",
+    "{ \"importance\" :  {\"x\":[1,\"}\"]}, \"b\":2}",
+    "{\"doc\":\"\\\"importance\\\":1\"}",
+    "{\"importance\":\"open}",
+    "{\"importance\":}",
+    "{\"importance\"}",
+    "{  }",
+    "[]",
+    "{",
+    "",
+    "not json",
+};
+enum { IMP_PROP_COUNT = (int)(sizeof(kImpProps) / sizeof(kImpProps[0])) };
+
+/* Names across every multiplier, files across the test-path rule, and
+ * labels inside and outside the scored set. */
+static void imp_build(cbm_gbuf_t *gb, uint32_t seed) {
+    static const char *const names[] = {
+        "_run",     "run",       "load_user_profile", "loadUserProfile", "aggregate", "get_x",
+        "toString", "_long_key", "getURLId",          "TestThing",       "x",         "Example",
+    };
+    static const char *const files[] = {
+        "pkg/a.go",       "pkg/b.go", "pkg/c_test.go", "src/x.test.ts",           "tests/util.py",
+        "lib/d.py",       "lib/e.py", "lib/f.py",      "pkg/testutil_helpers.go", "",
+        "OrderTest.java",
+    };
+    static const char *const labels[] = {"Function", "Method", "Class", "File", "Variable"};
+    static const char *const kinds[] = {"CALLS", "USAGE", "TESTS", "IMPORTS"};
+    enum { IMP_NODES = 240, IMP_EDGES = 1600 };
+    uint32_t state = seed;
+    int64_t ids[IMP_NODES];
+    for (int i = 0; i < IMP_NODES; i++) {
+        char qn[CBM_SZ_64];
+        const char *name = names[imp_next(&state) % (sizeof(names) / sizeof(names[0]))];
+        snprintf(qn, sizeof(qn), "imp.%s.%d", name, i);
+        ids[i] = cbm_gbuf_upsert_node(gb, labels[imp_next(&state) % 5], name, qn,
+                                      files[imp_next(&state) % (sizeof(files) / sizeof(files[0]))],
+                                      1, 1, kImpProps[imp_next(&state) % IMP_PROP_COUNT]);
+    }
+    for (int e = 0; e < IMP_EDGES; e++) {
+        int64_t a = ids[imp_next(&state) % IMP_NODES];
+        int64_t b = ids[imp_next(&state) % IMP_NODES];
+        cbm_gbuf_insert_edge(gb, a, b, kinds[imp_next(&state) % 4], "{}");
+    }
+}
+
+typedef struct {
+    char **lines;
+    int count;
+    int cap;
+} imp_lines_t;
+
+static void imp_collect_node(const cbm_gbuf_node_t *n, void *data) {
+    imp_lines_t *lines = data;
+    if (lines->count == lines->cap) {
+        lines->cap = lines->cap ? lines->cap * 2 : 256;
+        lines->lines = realloc(lines->lines, (size_t)lines->cap * sizeof(char *));
+    }
+    size_t len = strlen(n->qualified_name) + strlen(n->properties_json) + 2;
+    char *line = malloc(len);
+    snprintf(line, len, "%s %s", n->qualified_name, n->properties_json);
+    lines->lines[lines->count++] = line;
+}
+
+static int imp_cmp_line(const void *a, const void *b) {
+    return strcmp(*(char *const *)a, *(char *const *)b);
+}
+
+static void imp_lines_free(imp_lines_t *lines) {
+    for (int i = 0; i < lines->count; i++) {
+        free(lines->lines[i]);
+    }
+    free(lines->lines);
+    memset(lines, 0, sizeof(*lines));
+}
+
+static void imp_gbuf_lines(const cbm_gbuf_t *gb, imp_lines_t *out) {
+    memset(out, 0, sizeof(*out));
+    cbm_gbuf_foreach_node(gb, imp_collect_node, out);
+    qsort(out->lines, (size_t)out->count, sizeof(char *), imp_cmp_line);
+}
+
+static void imp_store_lines(cbm_store_t *s, const char *project, imp_lines_t *out) {
+    static const char *const labels[] = {"Function", "Method", "Class", "File", "Variable"};
+    memset(out, 0, sizeof(*out));
+    for (int li = 0; li < 5; li++) {
+        cbm_node_t *nodes = NULL;
+        int n = 0;
+        if (cbm_store_find_nodes_by_label(s, project, labels[li], &nodes, &n) != CBM_STORE_OK) {
+            continue;
+        }
+        for (int i = 0; i < n; i++) {
+            cbm_gbuf_node_t view = {.qualified_name = (char *)nodes[i].qualified_name,
+                                    .properties_json = (char *)nodes[i].properties_json};
+            if (!view.properties_json) {
+                view.properties_json = "(null)";
+            }
+            imp_collect_node(&view, out);
+        }
+        cbm_store_free_nodes(nodes, n);
+    }
+    qsort(out->lines, (size_t)out->count, sizeof(char *), imp_cmp_line);
+}
+
+static int imp_lines_diff(const imp_lines_t *a, const imp_lines_t *b) {
+    if (a->count != b->count) {
+        printf("    node count c=%d rust=%d\n", a->count, b->count);
+        return -1;
+    }
+    for (int i = 0; i < a->count; i++) {
+        if (strcmp(a->lines[i], b->lines[i]) != 0) {
+            printf("    c=%s\n    rust=%s\n", a->lines[i], b->lines[i]);
+            return i + 1;
+        }
+    }
+    return 0;
+}
+
+/* The writer and the rule agree on every blob, score and input set. Scores
+ * include exact printf rounding ties, signed zero, values too wide for the
+ * writer's buffer, infinities and NaN. */
+TEST(importance_writer_and_rule_rust_match_c) {
+    static const double scores[] = {
+        0.0,     -0.0,      1.5,       42.25,           0.0078125, 0.0000005,
+        2.5e-7,  1.0 / 3.0, sqrt(2.0), 1234567.8912345, 1e20,      1e24,
+        1e25,    1e40,      -3.75,     INFINITY,        -INFINITY, NAN,
+        DBL_MAX, DBL_MIN,   4.9e-324,
+    };
+    for (int p = 0; p < IMP_PROP_COUNT; p++) {
+        for (size_t k = 0; k < sizeof(scores) / sizeof(scores[0]); k++) {
+            char *c_out = cbm_pipeline_importance_set_prop_c_ref(kImpProps[p], scores[k]);
+            char *rust_out = cbm_pipeline_importance_set_prop(kImpProps[p], scores[k]);
+            if ((c_out == NULL) != (rust_out == NULL) || (c_out && strcmp(c_out, rust_out) != 0)) {
+                printf("    props=%s score=%g c=%s rust=%s\n", kImpProps[p], scores[k],
+                       c_out ? c_out : "(null)", rust_out ? rust_out : "(null)");
+            }
+            ASSERT_EQ(c_out == NULL, rust_out == NULL);
+            if (c_out) {
+                ASSERT_STR_EQ(c_out, rust_out);
+            }
+            free(c_out);
+            free(rust_out);
+        }
+    }
+    char *c_null = cbm_pipeline_importance_set_prop_c_ref(NULL, 2.0);
+    char *rust_null = cbm_pipeline_importance_set_prop(NULL, 2.0);
+    ASSERT_STR_EQ(c_null, rust_null);
+    free(c_null);
+    free(rust_null);
+
+    /* Generated scores: sqrt of a count times the multipliers, as the pass
+     * writes them, plus arbitrary doubles. */
+    uint32_t state = 0x1a2b3c4dU;
+    for (int t = 0; t < 20000; t++) {
+        double score = t % 2 ? sqrt((double)(imp_next(&state) % 100000)) *
+                                   (imp_next(&state) % 2 ? 0.1 : 1.0) *
+                                   (imp_next(&state) % 2 ? 10.0 : 1.0)
+                             : (double)imp_next(&state) / (double)(1U << (imp_next(&state) % 24));
+        char *c_out = cbm_pipeline_importance_set_prop_c_ref("{}", score);
+        char *rust_out = cbm_pipeline_importance_set_prop("{}", score);
+        if (!c_out || !rust_out || strcmp(c_out, rust_out) != 0) {
+            printf("    score=%.17g c=%s rust=%s\n", score, c_out ? c_out : "(null)",
+                   rust_out ? rust_out : "(null)");
+        }
+        ASSERT_NOT_NULL(c_out);
+        ASSERT_NOT_NULL(rust_out);
+        ASSERT_STR_EQ(c_out, rust_out);
+        free(c_out);
+        free(rust_out);
+    }
+
+    static const char *const names[] = {NULL,       "",         "_plain",   "_long_key",
+                                        "getUser",  "getURLId", "longword", "get_name",
+                                        "aBcDeFgH", "abcdefgH"};
+    static const char *const paths[] = {NULL, "pkg/testutil_helpers.go", "pkg/thing_test.go",
+                                        "tests/x.py", "x.go"};
+    static const int refs[] = {INT_MIN, -1, 0, 1, 2, 37, INT_MAX};
+    static const int files[] = {INT_MIN, 0, 4, 5, 6, INT_MAX};
+    for (size_t a = 0; a < sizeof(names) / sizeof(names[0]); a++) {
+        for (size_t b = 0; b < sizeof(paths) / sizeof(paths[0]); b++) {
+            for (size_t c = 0; c < sizeof(refs) / sizeof(refs[0]); c++) {
+                for (size_t d = 0; d < sizeof(files) / sizeof(files[0]); d++) {
+                    for (int tests = 0; tests < 2; tests++) {
+                        cbm_importance_inputs_t in = {
+                            .name = names[a],
+                            .file_path = paths[b],
+                            .num_refs = refs[c],
+                            .name_distinct_files = files[d],
+                            .tests_target = tests != 0,
+                        };
+                        double c_score = cbm_pipeline_importance_score_c_ref(&in);
+                        double rust_score = cbm_pipeline_importance_score(&in);
+                        ASSERT_EQ(memcmp(&c_score, &rust_score, sizeof(double)), 0);
+                    }
+                }
+            }
+        }
+    }
+    ASSERT_EQ(cbm_pipeline_importance_score_c_ref(NULL), cbm_pipeline_importance_score(NULL));
+    PASS();
+}
+
+/* The Rust pass writes byte-identical properties to the C reference on the
+ * same graphs and does the same counted work. */
+TEST(importance_pass_rust_matches_c) {
+    for (uint32_t seed = 1; seed <= 12; seed++) {
+        cbm_gbuf_t *c_graph = cbm_gbuf_new("imp-proj", "/tmp/imp");
+        cbm_gbuf_t *rust_graph = cbm_gbuf_new("imp-proj", "/tmp/imp");
+        ASSERT_NOT_NULL(c_graph);
+        ASSERT_NOT_NULL(rust_graph);
+        imp_build(c_graph, seed * 2246822519U);
+        imp_build(rust_graph, seed * 2246822519U);
+
+        atomic_int cancelled = 0;
+        cbm_pipeline_ctx_t ctx = {
+            .project_name = "imp-proj",
+            .repo_path = "/tmp/imp",
+            .gbuf = c_graph,
+            .cancelled = &cancelled,
+        };
+        uint64_t nodes0 = atomic_load_explicit(&g_importance_nodes, memory_order_relaxed);
+        uint64_t visits0 = atomic_load_explicit(&g_importance_name_visits, memory_order_relaxed);
+        cbm_pipeline_pass_importance_c_ref(&ctx);
+        uint64_t nodes1 = atomic_load_explicit(&g_importance_nodes, memory_order_relaxed);
+        uint64_t visits1 = atomic_load_explicit(&g_importance_name_visits, memory_order_relaxed);
+        mori_pipeline_pass_importance(rust_graph);
+        uint64_t nodes2 = atomic_load_explicit(&g_importance_nodes, memory_order_relaxed);
+        uint64_t visits2 = atomic_load_explicit(&g_importance_name_visits, memory_order_relaxed);
+        ASSERT_GT((long long)(nodes1 - nodes0), 0);
+        ASSERT_EQ((long long)(nodes2 - nodes1), (long long)(nodes1 - nodes0));
+        ASSERT_EQ((long long)(visits2 - visits1), (long long)(visits1 - visits0));
+
+        imp_lines_t c_lines;
+        imp_lines_t rust_lines;
+        imp_gbuf_lines(c_graph, &c_lines);
+        imp_gbuf_lines(rust_graph, &rust_lines);
+        int diff = imp_lines_diff(&c_lines, &rust_lines);
+        if (diff != 0) {
+            printf("  importance parity seed %u differs (%d)\n", seed, diff);
+        }
+        ASSERT_EQ(diff, 0);
+
+        /* A second run overwrites in place on both sides. */
+        cbm_pipeline_pass_importance_c_ref(&ctx);
+        mori_pipeline_pass_importance(rust_graph);
+        imp_lines_free(&c_lines);
+        imp_lines_free(&rust_lines);
+        imp_gbuf_lines(c_graph, &c_lines);
+        imp_gbuf_lines(rust_graph, &rust_lines);
+        ASSERT_EQ(imp_lines_diff(&c_lines, &rust_lines), 0);
+
+        imp_lines_free(&c_lines);
+        imp_lines_free(&rust_lines);
+        cbm_gbuf_free(c_graph);
+        cbm_gbuf_free(rust_graph);
+    }
+    mori_pipeline_pass_importance(NULL);
+    PASS();
+}
+
+/* The SQL recompute of the closure-delta route rescores a store the same
+ * way through either side's functions. */
+TEST(importance_store_recompute_rust_matches_c) {
+    for (uint32_t seed = 1; seed <= 6; seed++) {
+        cbm_store_t *stores[2];
+        for (int side = 0; side < 2; side++) {
+            cbm_gbuf_t *gb = cbm_gbuf_new("imp-proj", "/tmp/imp");
+            ASSERT_NOT_NULL(gb);
+            imp_build(gb, seed * 3266489917U);
+            stores[side] = cbm_store_open_memory();
+            ASSERT_NOT_NULL(stores[side]);
+            ASSERT_EQ(cbm_gbuf_flush_to_store(gb, stores[side]), 0);
+            cbm_gbuf_free(gb);
+        }
+        uint64_t rows0 = atomic_load_explicit(&g_importance_store_rows, memory_order_relaxed);
+        ASSERT_EQ(cbm_pipeline_importance_recompute_store_c_ref(stores[0], "imp-proj"), 0);
+        uint64_t rows1 = atomic_load_explicit(&g_importance_store_rows, memory_order_relaxed);
+        ASSERT_EQ(cbm_pipeline_importance_recompute_store(stores[1], "imp-proj"), 0);
+        uint64_t rows2 = atomic_load_explicit(&g_importance_store_rows, memory_order_relaxed);
+        ASSERT_GT((long long)(rows1 - rows0), 0);
+        ASSERT_EQ((long long)(rows2 - rows1), (long long)(rows1 - rows0));
+
+        imp_lines_t c_lines;
+        imp_lines_t rust_lines;
+        imp_store_lines(stores[0], "imp-proj", &c_lines);
+        imp_store_lines(stores[1], "imp-proj", &rust_lines);
+        ASSERT_GT(c_lines.count, 0);
+        int diff = imp_lines_diff(&c_lines, &rust_lines);
+        if (diff != 0) {
+            printf("  store parity seed %u differs (%d)\n", seed, diff);
+        }
+        ASSERT_EQ(diff, 0);
+        imp_lines_free(&c_lines);
+        imp_lines_free(&rust_lines);
+        cbm_store_close(stores[0]);
+        cbm_store_close(stores[1]);
+    }
+    ASSERT_EQ(cbm_pipeline_importance_recompute_store(NULL, "imp-proj"), -1);
+    ASSERT_EQ(cbm_pipeline_importance_recompute_store_c_ref(NULL, "imp-proj"), -1);
+    PASS();
+}
+
 /* ── Suite ────────────────────────────────────────────────────────────── */
 
 SUITE(importance) {
@@ -901,4 +1217,9 @@ SUITE(importance) {
 
     /* Cost shape. */
     RUN_TEST(importance_distinct_file_count_is_linear_in_group_size);
+
+    /* Parity — the Rust pass against the C reference. */
+    RUN_TEST(importance_writer_and_rule_rust_match_c);
+    RUN_TEST(importance_pass_rust_matches_c);
+    RUN_TEST(importance_store_recompute_rust_matches_c);
 }
