@@ -297,7 +297,7 @@ pub unsafe extern "C" fn main(argc: c_int, argv: *mut *mut c_char) -> c_int {
         crate::mcp_dispatch::register();
         crate::cypher_ffi::register();
         crate::tool_list::c_tool_list::register();
-        crate::search::register();
+        jiyuu_mori::register_search_readers();
         crate::path_verdict::register();
         crate::trace_predecessor::register();
         crate::ingest_trace::register();

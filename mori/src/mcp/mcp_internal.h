@@ -30,6 +30,93 @@ void cbm_mcp_project_catalog_close(cbm_mcp_project_catalog_t *catalog);
 
 char *cbm_rust_mcp_list_projects(cbm_mcp_server_t *server, const char *args_json);
 
+/* The native dispatcher owns the request scope and ends the read batch. */
+char *cbm_rust_mcp_get_file_outline(cbm_mcp_server_t *server, const char *args_json);
+char *cbm_mcp_resolve_project_arg(const char *args_json);
+cbm_store_t *cbm_mcp_resolve_read_store(cbm_mcp_server_t *server, const char *project, char **error);
+bool cbm_mcp_read_request_cancelled(void *context);
+bool cbm_mcp_normalize_read_path(const char *path, char *normalized, size_t capacity);
+
+typedef struct {
+    const char *fts_query;
+    const char *project;
+    const char *file_like;
+    const char *label;
+    const char *kind;
+    const char *ns;
+    double label_weight;
+} cbm_rank_search_filters_t;
+typedef struct {
+    const cbm_rank_search_filters_t *filters;
+    const char *exact_query;
+    int limit;
+    int offset;
+    int candidate_limit;
+} cbm_rank_search_request_t;
+typedef void (*cbm_rank_search_row_fn)(void *context, struct sqlite3_stmt *row);
+/* False means FTS is unavailable and the caller can use the pattern path. */
+bool mori_rank_search(struct sqlite3 *db, const cbm_rank_search_request_t *request, int *total,
+                      bool *window_saturated, void *context, cbm_rank_search_row_fn emit);
+
+/* The trace pager borrows the request strings and reads the filtered legs
+ * through a row accessor. Rows are in (hop, node ID) order. */
+typedef struct {
+    const char *project;
+    const char *function_name;
+    const char *direction;
+    const char *mode;
+    const char *parameter_name;
+    int depth;
+    int limit;
+    bool include_tests;
+    bool risk_labels;
+    bool include_evidence;
+    bool include_overrides;
+} cbm_trace_params_t;
+
+typedef struct {
+    uint64_t hash;
+    int64_t node_id;
+    int hop;
+    char leg;
+} cbm_trace_pagination_t;
+
+typedef struct {
+    const void *rows;
+    int count;
+} cbm_trace_leg_t;
+
+typedef struct {
+    int outbound;
+    int inbound;
+} cbm_trace_page_start_t;
+
+typedef struct {
+    int outbound;
+    int inbound;
+    bool has_more;
+    char next[192];
+} cbm_trace_page_t;
+
+typedef struct {
+    int64_t node_id;
+    int hop;
+} cbm_trace_watermark_t;
+
+typedef const char *(*cbm_trace_next_edge_fn)(void *context);
+typedef cbm_trace_watermark_t (*cbm_trace_read_row_fn)(const void *rows, int index);
+
+const char *mori_trace_cursor(const cbm_trace_params_t *params, const char *generation,
+                              const char *token, cbm_trace_next_edge_fn next_edge, void *edges,
+                              cbm_trace_pagination_t *state);
+const char *mori_trace_page_start(const cbm_trace_pagination_t *state, const cbm_trace_leg_t *out,
+                                  const cbm_trace_leg_t *in, cbm_trace_read_row_fn read,
+                                  cbm_trace_page_start_t *start);
+void mori_trace_page(const cbm_trace_pagination_t *state, const char *generation,
+                     const cbm_trace_leg_t *out, const cbm_trace_leg_t *in,
+                     cbm_trace_read_row_fn read, const cbm_trace_page_start_t *start, int budget,
+                     cbm_trace_page_t *page);
+
 /* Snippet inputs are borrowed until Rust returns a C-owned MCP result. */
 typedef struct {
     const cbm_node_t *node;
@@ -72,6 +159,8 @@ typedef void (*cbm_mcp_snippet_candidate_sink_fn)(void *context,
                                                   const cbm_mcp_snippet_candidate_t *candidate);
 void cbm_mcp_snippet_visit_candidates(cbm_store_t *store, const cbm_node_t *node, bool by_section,
                                       cbm_mcp_snippet_candidate_sink_fn emit, void *context);
+void cbm_mcp_visit_path_candidates(cbm_store_t *store, const char *project, const char *path,
+                                   cbm_mcp_snippet_candidate_sink_fn emit, void *context);
 void cbm_mcp_snippet_free_tree(char *tree);
 char *mori_snippet_response(const cbm_mcp_snippet_input_t *input);
 char *mori_snippet_suggestions(const char *input, const cbm_node_t *nodes, int count);

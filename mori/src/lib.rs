@@ -67,6 +67,9 @@ mod mcp_impact_graph;
 #[path = "pipeline/msbuild_condition.rs"]
 mod msbuild_condition;
 #[cfg(any(feature = "native-engine-abi", test))]
+#[path = "pipeline/msbuild_expand.rs"]
+mod msbuild_expand;
+#[cfg(any(feature = "native-engine-abi", test))]
 #[path = "pipeline/msbuild_import.rs"]
 mod msbuild_import;
 #[cfg(feature = "native-engine-abi")]
@@ -94,8 +97,14 @@ mod rust_doc_cargo;
 #[path = "pipeline/rust_doc_path.rs"]
 mod rust_doc_path;
 #[cfg(feature = "native-engine-abi")]
+#[path = "mcp/search/mod.rs"]
+mod search;
+#[cfg(feature = "native-engine-abi")]
 #[path = "mcp/search_code_request/mod.rs"]
 mod search_code_request;
+#[cfg(any(feature = "native-engine-abi", test))]
+#[path = "pipeline/semantic_admission.rs"]
+mod semantic_admission;
 #[cfg(any(feature = "native-engine-abi", test))]
 #[path = "pipeline/semantic_candidates.rs"]
 mod semantic_candidates;
@@ -122,6 +131,12 @@ mod terraform;
 #[cfg(feature = "native-engine-abi")]
 #[path = "cli/test_impact_cli.rs"]
 mod test_impact_cli;
+#[cfg(any(feature = "native-engine-abi", test))]
+#[path = "mcp/trace_page.rs"]
+mod trace_page;
+
+#[cfg(all(feature = "c-backend", not(test)))]
+pub use search::register_search_readers;
 #[cfg(feature = "native-engine-abi")]
 #[path = "mcp/test_impact_engine_reach/mod.rs"]
 mod test_impact_engine_reach;
@@ -280,6 +295,10 @@ mod go_types_native;
 #[path = "../internal/cbm/native_tree.rs"]
 mod native_tree;
 
+#[cfg(feature = "native-engine-abi")]
+#[path = "../internal/cbm/lsp/rust_path.rs"]
+mod rust_path;
+
 #[cfg(feature = "c-backend")]
 #[path = "../internal/cbm/rust_use_imports.rs"]
 mod rust_use_imports;
@@ -314,11 +333,14 @@ mod config_toml_edit;
 #[path = "cli/config_yaml_edit/mod.rs"]
 mod config_yaml_edit;
 #[cfg(feature = "native-engine-abi")]
-#[path = "mcp/file_outline.rs"]
+#[path = "mcp/file_outline/mod.rs"]
 mod file_outline;
 #[cfg(feature = "native-engine-abi")]
 #[path = "store/fts_writer.rs"]
 mod fts_writer;
+#[cfg(any(feature = "native-engine-abi", test))]
+#[path = "store/leiden.rs"]
+mod leiden;
 #[cfg(feature = "native-engine-abi")]
 #[path = "store/store_digest/mod.rs"]
 mod store_digest;
