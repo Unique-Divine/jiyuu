@@ -106,7 +106,9 @@ impl Fixture {
         }
         let mut command = self.command(side);
         for (selector, _) in SELECTORS {
-            command.env(selector, side);
+            if side == "c" || *selector != "MORI_IMPL_RUST_IMPORTS" {
+                command.env(selector, side);
+            }
         }
         let arguments =
             json!({"repo_path": self.0.join("repo"), "name": "mixed"});
