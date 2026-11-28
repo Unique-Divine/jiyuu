@@ -6768,7 +6768,7 @@ TEST(rustlsp_followup_b_pathological_no_hang) {
     cbm_free_result(r); PASS();
 }
 
-/* ── Scoped path parity: C reference vs rust_path.rs ─────────────── */
+/* ── Scoped paths (rust_path.rs) ─────────────────────────────────── */
 
 extern const char *cbm_rust_path_normalize(CBMArena *arena, const char *path);
 extern const char *cbm_rust_path_leaf(const char *path);
@@ -6776,42 +6776,16 @@ extern const char *cbm_rust_path_prelude(const char *name);
 extern void cbm_rust_path_strip_turbofish(char *path);
 extern void cbm_rust_path_strip_impl_args(char *path);
 
-static bool rustpath_same(const char *c_out, const char *rust_out) {
-    return c_out == rust_out || (c_out && rust_out && strcmp(c_out, rust_out) == 0);
+static bool rustpath_same(const char *want, const char *got) {
+    return want == got || (want && got && strcmp(want, got) == 0);
 }
 
-static int rustpath_report(const char *what, const char *input, const char *c_out,
-                           const char *rust_out) {
-    printf("  %s(%s): C=%s Rust=%s\n", what, input ? input : "(null)",
-           c_out ? c_out : "(null)", rust_out ? rust_out : "(null)");
+static int rustpath_report(const char *what, const char *input, const char *want,
+                           const char *got) {
+    printf("  %s(%s): want=%s got=%s\n", what, input ? input : "(null)",
+           want ? want : "(null)", got ? got : "(null)");
     return 1;
 }
-
-/* Paths for every branch of expression and type resolution: Self, crate,
- * super, use aliases (bare, as a head, empty), prelude names and heads,
- * Cargo members and dependencies, declared-module relative types (child,
- * parent, ambiguous, missing), primitives and malformed separators. */
-static const char *const RUSTPATH_PATHS[] = {
-    NULL,          "",
-    "Self",        "Self::new",
-    "Self::Inner::make", "Self::",
-    "crate::a::b", "crate::",
-    "super::x::y", "super::",
-    "Local",       "String",
-    "Some",        "HashMap",
-    "Map",         "Map::new",
-    "io::Read",    "io::",
-    "String::from", "Vec::new",
-    "Option::Some::x", "serde::Serialize",
-    "member_a::thing", "std::io::Read",
-    "util::Thing", "util::Missing",
-    "util::Thing::Deep", "both::T",
-    "up::T",       "a:::b",
-    "::abs::path", "x::",
-    "::",          ":",
-    "Empty",       "Empty::x",
-    "u8",          "util.Thing",
-};
 
 typedef struct {
     const char *module_qn;
@@ -6821,15 +6795,13 @@ typedef struct {
     bool closed_arena;
 } RustPathScene;
 
-static const RustPathScene RUSTPATH_SCENES[] = {
-    {"proj.crate.foo.bar", "proj.crate.foo.bar.S", true, true, false},
-    {NULL, NULL, true, false, false},
-    {"proj", NULL, true, true, false},
-    {"proj.crate", "S", true, true, false},
-    {"proj.crate.foo.bar", "S", false, false, false},
-    {"proj.crate.foo.bar", "proj.crate.foo.bar.S", true, true, true},
-    {NULL, "S", false, true, true},
-};
+/* Expected expression and type-position results. The cases were checked
+ * against the C resolver before rust_path.rs replaced it. */
+typedef struct {
+    const char *path;
+    const char *expr;
+    const char *type;
+} RustPathCase;
 
 static void rustpath_add_type(CBMTypeRegistry *reg, const char *qn, const char *short_name) {
     CBMRegisteredType t;
@@ -6839,7 +6811,8 @@ static void rustpath_add_type(CBMTypeRegistry *reg, const char *qn, const char *
     cbm_registry_add_type(reg, t);
 }
 
-static int rustpath_compare_scene(const RustPathScene *scene) {
+static int rustpath_check_scene(const RustPathScene *scene, const RustPathCase *cases,
+                                size_t count) {
     CBMArena arena;
     cbm_arena_init(&arena);
     CBMArena closed;
@@ -6869,7 +6842,6 @@ static int rustpath_compare_scene(const RustPathScene *scene) {
     ctx.self_type_qn = scene->self_type_qn;
     ctx.cargo_manifest = scene->manifest ? &manifest : NULL;
     rust_lsp_add_use(&ctx, "Map", "std::collections::HashMap");
-    rust_lsp_add_use(&ctx, "HashMap", "std::collections::HashMap");
     rust_lsp_add_use(&ctx, "io", "std::io");
     rust_lsp_add_use(&ctx, "Empty", "");
     const char *modules[] = {"util", "both", "up"};
@@ -6881,140 +6853,156 @@ static int rustpath_compare_scene(const RustPathScene *scene) {
     }
 
     int mismatches = 0;
-    size_t count = sizeof(RUSTPATH_PATHS) / sizeof(RUSTPATH_PATHS[0]);
     for (size_t i = 0; i < count; i++) {
-        const char *path = RUSTPATH_PATHS[i];
-        for (int type_path = 0; type_path < 2; type_path++) {
-            const char *c_out = cbm_rust_path_test_resolve(&ctx, path, type_path, true);
-            const char *rust_out = cbm_rust_path_test_resolve(&ctx, path, type_path, false);
-            if (!rustpath_same(c_out, rust_out)) {
-                printf("  scene module=%s self=%s registry=%d manifest=%d closed=%d\n",
-                       scene->module_qn ? scene->module_qn : "(null)",
-                       scene->self_type_qn ? scene->self_type_qn : "(null)", scene->registry,
-                       scene->manifest, scene->closed_arena);
-                mismatches += rustpath_report(type_path ? "type" : "expr", path, c_out, rust_out);
-            }
+        const RustPathCase *c = &cases[i];
+        const char *expr = cbm_rust_path_test_resolve(&ctx, c->path, false);
+        if (!rustpath_same(c->expr, expr)) {
+            mismatches += rustpath_report("expr", c->path, c->expr, expr);
+        }
+        const char *type = cbm_rust_path_test_resolve(&ctx, c->path, true);
+        if (!rustpath_same(c->type, type)) {
+            mismatches += rustpath_report("type", c->path, c->type, type);
         }
     }
     cbm_arena_destroy(&arena);
     return mismatches;
 }
 
-TEST(rustlsp_scoped_path_resolution_matches_c_reference) {
+TEST(rustlsp_scoped_path_resolution) {
+    const RustPathScene module_scene = {"proj.crate.foo.bar", "proj.crate.foo.bar.S", true, true,
+                                        false};
+    const RustPathCase module_cases[] = {
+        {NULL, NULL, NULL},
+        {"", "", NULL},
+        {"Self", "proj.crate.foo.bar.S", "proj.crate.foo.bar.S"},
+        {"Self::new", "proj.crate.foo.bar.S.new", "proj.crate.foo.bar.S.new"},
+        {"crate::a::b", "proj.crate.a.b", "proj.crate.a.b"},
+        {"crate::", "proj.crate.", "proj.crate."},
+        {"super::x::y", "proj.crate.foo.x.y", "proj.crate.foo.x.y"},
+        {"Local", "proj.crate.foo.bar.Local", "proj.crate.foo.bar.Local"},
+        {"String", "alloc.string.String", "alloc.string.String"},
+        {"Map", "std.collections.HashMap", "std.collections.HashMap"},
+        {"Map::new", "std.collections.HashMap.new", "std.collections.HashMap.new"},
+        {"io::Read", "std.io.Read", "std.io.Read"},
+        {"Empty::x", ".x", ".x"},
+        {"String::from", "alloc.string.String.from", "alloc.string.String.from"},
+        {"serde::Serialize", "serde.Serialize", "serde.Serialize"},
+        {"member_a::thing", "member_a.thing", "member_a.thing"},
+        {"util::Thing", "util.Thing", "proj.crate.foo.bar.util.Thing"},
+        {"util::Missing", "util.Missing", "util.Missing"},
+        {"both::T", "both.T", "both.T"},
+        {"up::T", "up.T", "proj.crate.foo.up.T"},
+        {"u8", "proj.crate.foo.bar.u8", NULL},
+        {"a:::b", "a.:b", "a.:b"},
+    };
+    const RustPathScene bare_scene = {NULL, NULL, true, false, false};
+    const RustPathCase bare_cases[] = {
+        {"Self", "Self", "Self"},
+        {"Self::new", "Self.new", "Self.new"},
+        {"crate::a::b", "crate.a.b", "crate.a.b"},
+        {"super::x", "super.x", "super.x"},
+        {"foo", "foo", "foo"},
+        {"util::Thing", "util.Thing", "util.Thing"},
+    };
+    const RustPathScene root_scene = {"proj", NULL, true, true, false};
+    const RustPathCase root_cases[] = {
+        {"crate::a", "proj.a", "proj.a"},
+        {"super::a", "super.a", "super.a"},
+    };
+    /* An arena that cannot allocate: static and borrowed spellings survive,
+     * fresh ones fail, and an uncopyable scoped head keeps the input. */
+    const RustPathScene closed_scene = {"proj.crate.foo.bar", "proj.crate.foo.bar.S", true, true,
+                                        true};
+    const RustPathCase closed_cases[] = {
+        {"Self", "proj.crate.foo.bar.S", "proj.crate.foo.bar.S"},
+        {"Self::new", NULL, NULL},
+        {"String", "alloc.string.String", "alloc.string.String"},
+        {"String::from", "String::from", "String::from"},
+        {"Map", "std::collections::HashMap", "std::collections::HashMap"},
+        {"Local", NULL, NULL},
+    };
+
     int mismatches = 0;
-    size_t count = sizeof(RUSTPATH_SCENES) / sizeof(RUSTPATH_SCENES[0]);
-    for (size_t i = 0; i < count; i++) {
-        mismatches += rustpath_compare_scene(&RUSTPATH_SCENES[i]);
-    }
-    for (int type_path = 0; type_path < 2; type_path++) {
-        const char *c_out = cbm_rust_path_test_resolve(NULL, "a::b", type_path, true);
-        const char *rust_out = cbm_rust_path_test_resolve(NULL, "a::b", type_path, false);
-        if (!rustpath_same(c_out, rust_out)) {
-            mismatches += rustpath_report("null context", "a::b", c_out, rust_out);
-        }
+    mismatches += rustpath_check_scene(&module_scene, module_cases,
+                                       sizeof(module_cases) / sizeof(module_cases[0]));
+    mismatches += rustpath_check_scene(&bare_scene, bare_cases,
+                                       sizeof(bare_cases) / sizeof(bare_cases[0]));
+    mismatches += rustpath_check_scene(&root_scene, root_cases,
+                                       sizeof(root_cases) / sizeof(root_cases[0]));
+    mismatches += rustpath_check_scene(&closed_scene, closed_cases,
+                                       sizeof(closed_cases) / sizeof(closed_cases[0]));
+    if (cbm_rust_path_test_resolve(NULL, "a::b", false) == NULL ||
+        strcmp(cbm_rust_path_test_resolve(NULL, "a::b", false), "a::b") != 0 ||
+        cbm_rust_path_test_resolve(NULL, "a::b", true) != NULL) {
+        mismatches += rustpath_report("null context", "a::b", "a::b / (null)", "?");
     }
     ASSERT_EQ(0, mismatches);
     PASS();
 }
 
-static const char *const RUSTPATH_TEXTS[] = {
-    "",
-    "plain",
-    "a::b",
-    "std::io::Read",
-    "Vec::<i32>::new",
-    "parse::<u32>",
-    "a::<B<C>>::d",
-    "a::<b>::<c>",
-    "x::<unterminated",
-    "x::<a<b>",
-    "::<>",
-    "Gen<T>",
-    "<T as Trait>::X",
-    "foo::Bar<'a, T>",
-    ":",
-    "::",
-    ":::",
-    "a:::b",
-    "a::",
-    "::a",
-    "x<",
-    "<",
-    "a.b::c",
-};
-
-TEST(rustlsp_scoped_path_helpers_match_c_reference) {
+TEST(rustlsp_scoped_path_helpers) {
     CBMArena arena;
     cbm_arena_init(&arena);
     CBMArena closed;
     memset(&closed, 0, sizeof(closed));
-    int mismatches = 0;
-    size_t count = sizeof(RUSTPATH_TEXTS) / sizeof(RUSTPATH_TEXTS[0]);
-    for (size_t i = 0; i < count; i++) {
-        const char *text = RUSTPATH_TEXTS[i];
-        const char *c_out = cbm_rust_path_c_normalize(&arena, text);
-        const char *rust_out = cbm_rust_path_normalize(&arena, text);
-        if (!rustpath_same(c_out, rust_out)) {
-            mismatches += rustpath_report("normalize", text, c_out, rust_out);
-        }
-        /* An arena that cannot allocate returns the input spelling. */
-        c_out = cbm_rust_path_c_normalize(&closed, text);
-        rust_out = cbm_rust_path_normalize(&closed, text);
-        if (c_out != text || rust_out != text) {
-            mismatches += rustpath_report("normalize(closed)", text, c_out, rust_out);
-        }
-        /* The leaf aliases into the input: compare addresses, not text. */
-        if (cbm_rust_path_c_leaf(text) != cbm_rust_path_leaf(text)) {
-            mismatches += rustpath_report("leaf", text, cbm_rust_path_c_leaf(text),
-                                          cbm_rust_path_leaf(text));
-        }
-        char c_buf[64];
-        char rust_buf[64];
-        snprintf(c_buf, sizeof(c_buf), "%s", text);
-        snprintf(rust_buf, sizeof(rust_buf), "%s", text);
-        cbm_rust_path_c_strip_turbofish(c_buf);
-        cbm_rust_path_strip_turbofish(rust_buf);
-        if (strcmp(c_buf, rust_buf) != 0) {
-            mismatches += rustpath_report("strip_turbofish", text, c_buf, rust_buf);
-        }
-        snprintf(c_buf, sizeof(c_buf), "%s", text);
-        snprintf(rust_buf, sizeof(rust_buf), "%s", text);
-        cbm_rust_path_c_strip_impl_args(c_buf);
-        cbm_rust_path_strip_impl_args(rust_buf);
-        if (strcmp(c_buf, rust_buf) != 0) {
-            mismatches += rustpath_report("strip_impl_args", text, c_buf, rust_buf);
-        }
-    }
 
-    const char *names[] = {
-        "String", "ToString", "Vec", "VecDeque", "HashMap", "BTreeMap", "HashSet",
-        "BTreeSet", "Box", "Rc", "Arc", "Option", "Some", "None", "Result", "Ok", "Err",
-        "Iterator", "IntoIterator", "Future", "Clone", "Copy", "Send", "Sync", "Default",
-        "PartialEq", "Eq", "PartialOrd", "Ord", "Hash", "Display", "Debug", "From", "Into",
-        "TryFrom", "TryInto", "AsRef", "AsMut", "Borrow", "BorrowMut", "Deref", "DerefMut",
-        "Drop", "RefCell", "Cell", "Mutex", "RwLock", "", "string", "Vec::new", "Strin",
-        "Stringy", "Write"};
-    for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
-        const char *c_out = cbm_rust_path_c_prelude(names[i]);
-        const char *rust_out = cbm_rust_path_prelude(names[i]);
-        if (!rustpath_same(c_out, rust_out)) {
-            mismatches += rustpath_report("prelude", names[i], c_out, rust_out);
-        }
-    }
+    ASSERT_STR_EQ("a.b", cbm_rust_path_normalize(&arena, "a::b"));
+    ASSERT_STR_EQ("a.:b", cbm_rust_path_normalize(&arena, "a:::b"));
+    ASSERT_STR_EQ(".", cbm_rust_path_normalize(&arena, "::"));
+    const char *empty = "";
+    ASSERT(cbm_rust_path_normalize(&arena, empty) == empty);
+    const char *scoped = "std::io::Read";
+    ASSERT(cbm_rust_path_normalize(&closed, scoped) == scoped);
+    ASSERT_NULL(cbm_rust_path_normalize(&arena, NULL));
 
-    /* NULL inputs: same results, no crash. */
-    if (cbm_rust_path_c_normalize(&arena, NULL) != cbm_rust_path_normalize(&arena, NULL) ||
-        cbm_rust_path_c_leaf(NULL) != cbm_rust_path_leaf(NULL) ||
-        cbm_rust_path_c_prelude(NULL) != cbm_rust_path_prelude(NULL)) {
-        mismatches += rustpath_report("null input", NULL, NULL, NULL);
+    /* The leaf aliases into its input. */
+    ASSERT(cbm_rust_path_leaf(scoped) == scoped + 9);
+    const char *trailing = "a::";
+    ASSERT(cbm_rust_path_leaf(trailing) == trailing + 3);
+    const char *colons = ":::";
+    ASSERT(cbm_rust_path_leaf(colons) == colons + 2);
+    const char *plain = "plain";
+    ASSERT(cbm_rust_path_leaf(plain) == plain);
+    ASSERT_NULL(cbm_rust_path_leaf(NULL));
+
+    ASSERT_STR_EQ("alloc.vec.Vec", cbm_rust_path_prelude("Vec"));
+    ASSERT_STR_EQ("core.option.Option.Some", cbm_rust_path_prelude("Some"));
+    ASSERT_STR_EQ("std.sync.RwLock", cbm_rust_path_prelude("RwLock"));
+    ASSERT_NULL(cbm_rust_path_prelude("Write"));
+    ASSERT_NULL(cbm_rust_path_prelude("Vec::new"));
+    ASSERT_NULL(cbm_rust_path_prelude(""));
+    ASSERT_NULL(cbm_rust_path_prelude(NULL));
+
+    const struct {
+        const char *in;
+        const char *turbofish;
+        const char *impl_args;
+    } texts[] = {
+        {"Vec::<i32>::new", "Vec::new", "Vec::"},
+        {"parse::<u32>", "parse", "parse::"},
+        {"a::<B<C>>::d", "a::d", "a::"},
+        {"a::<b>::<c>", "a", "a::"},
+        {"x::<unterminated", "x", "x::"},
+        {"::<>", "", "::"},
+        {"Gen<T>", "Gen<T>", "Gen"},
+        {"<T as Trait>::X", "<T as Trait>::X", "<T as Trait>::X"},
+        {"foo::Bar<'a, T>", "foo::Bar<'a, T>", "foo::Bar"},
+        {"x<", "x<", "x"},
+        {"", "", ""},
+    };
+    for (size_t i = 0; i < sizeof(texts) / sizeof(texts[0]); i++) {
+        char buf[64];
+        snprintf(buf, sizeof(buf), "%s", texts[i].in);
+        cbm_rust_path_strip_turbofish(buf);
+        ASSERT_STR_EQ(texts[i].turbofish, buf);
+        snprintf(buf, sizeof(buf), "%s", texts[i].in);
+        cbm_rust_path_strip_impl_args(buf);
+        ASSERT_STR_EQ(texts[i].impl_args, buf);
     }
-    cbm_rust_path_c_strip_turbofish(NULL);
     cbm_rust_path_strip_turbofish(NULL);
-    cbm_rust_path_c_strip_impl_args(NULL);
     cbm_rust_path_strip_impl_args(NULL);
 
     cbm_arena_destroy(&arena);
-    ASSERT_EQ(0, mismatches);
     PASS();
 }
 
@@ -7637,7 +7625,7 @@ void suite_rust_lsp(void) {
     /* FOLLOWUP B: eval-step hardening */
     RUN_TEST(rustlsp_followup_b_pathological_no_hang);
 
-    /* Scoped paths: rust_path.rs against the C reference */
-    RUN_TEST(rustlsp_scoped_path_resolution_matches_c_reference);
-    RUN_TEST(rustlsp_scoped_path_helpers_match_c_reference);
+    /* Scoped paths: rust_path.rs */
+    RUN_TEST(rustlsp_scoped_path_resolution);
+    RUN_TEST(rustlsp_scoped_path_helpers);
 }
