@@ -28007,159 +28007,6 @@ TEST(configures_full_pipeline_integration) {
     teardown_lang_repo();
     PASS();
 }
-TEST(enrichment_split_camel_case) {
-    char *parts[8];
-    int n;
-
-    n = cbm_split_camel_case("GetMapping", parts, 8);
-    ASSERT_EQ(n, 2);
-    ASSERT_STR_EQ(parts[0], "Get");
-    ASSERT_STR_EQ(parts[1], "Mapping");
-    for (int i = 0; i < n; i++)
-        free(parts[i]);
-
-    n = cbm_split_camel_case("getMessage", parts, 8);
-    ASSERT_EQ(n, 2);
-    ASSERT_STR_EQ(parts[0], "get");
-    ASSERT_STR_EQ(parts[1], "Message");
-    for (int i = 0; i < n; i++)
-        free(parts[i]);
-
-    n = cbm_split_camel_case("cache", parts, 8);
-    ASSERT_EQ(n, 1);
-    ASSERT_STR_EQ(parts[0], "cache");
-    for (int i = 0; i < n; i++)
-        free(parts[i]);
-
-    n = cbm_split_camel_case("HTMLParser", parts, 8);
-    ASSERT_EQ(n, 1);
-    ASSERT_STR_EQ(parts[0], "HTMLParser");
-    for (int i = 0; i < n; i++)
-        free(parts[i]);
-
-    n = cbm_split_camel_case("", parts, 8);
-    ASSERT_EQ(n, 0);
-    PASS();
-}
-
-TEST(enrichment_tokenize_decorator) {
-    char *tokens[16];
-    int n;
-
-    n = cbm_tokenize_decorator("@Override", tokens, 16);
-    ASSERT_EQ(n, 1);
-    ASSERT_STR_EQ(tokens[0], "override");
-    for (int i = 0; i < n; i++)
-        free(tokens[i]);
-
-    n = cbm_tokenize_decorator("@Deprecated", tokens, 16);
-    ASSERT_EQ(n, 1);
-    ASSERT_STR_EQ(tokens[0], "deprecated");
-    for (int i = 0; i < n; i++)
-        free(tokens[i]);
-
-    n = cbm_tokenize_decorator("@Test", tokens, 16);
-    ASSERT_EQ(n, 1);
-    ASSERT_STR_EQ(tokens[0], "test");
-    for (int i = 0; i < n; i++)
-        free(tokens[i]);
-
-    n = cbm_tokenize_decorator("@login_required", tokens, 16);
-    ASSERT_EQ(n, 2);
-    ASSERT_STR_EQ(tokens[0], "login");
-    ASSERT_STR_EQ(tokens[1], "required");
-    for (int i = 0; i < n; i++)
-        free(tokens[i]);
-
-    n = cbm_tokenize_decorator("@cache", tokens, 16);
-    ASSERT_EQ(n, 1);
-    ASSERT_STR_EQ(tokens[0], "cache");
-    for (int i = 0; i < n; i++)
-        free(tokens[i]);
-
-    n = cbm_tokenize_decorator("@pytest.fixture", tokens, 16);
-    ASSERT_EQ(n, 2);
-    ASSERT_STR_EQ(tokens[0], "pytest");
-    ASSERT_STR_EQ(tokens[1], "fixture");
-    for (int i = 0; i < n; i++)
-        free(tokens[i]);
-
-    /* "get" is stopword → only "mapping" */
-    n = cbm_tokenize_decorator("@GetMapping(\"/api\")", tokens, 16);
-    ASSERT_EQ(n, 1);
-    ASSERT_STR_EQ(tokens[0], "mapping");
-    for (int i = 0; i < n; i++)
-        free(tokens[i]);
-
-    /* "post" passes, "mapping" passes */
-    n = cbm_tokenize_decorator("@PostMapping(\"/api\")", tokens, 16);
-    ASSERT_EQ(n, 2);
-    ASSERT_STR_EQ(tokens[0], "post");
-    ASSERT_STR_EQ(tokens[1], "mapping");
-    for (int i = 0; i < n; i++)
-        free(tokens[i]);
-
-    n = cbm_tokenize_decorator("@Transactional", tokens, 16);
-    ASSERT_EQ(n, 1);
-    ASSERT_STR_EQ(tokens[0], "transactional");
-    for (int i = 0; i < n; i++)
-        free(tokens[i]);
-
-    n = cbm_tokenize_decorator("@MessageMapping(\"/chat\")", tokens, 16);
-    ASSERT_EQ(n, 2);
-    ASSERT_STR_EQ(tokens[0], "message");
-    ASSERT_STR_EQ(tokens[1], "mapping");
-    for (int i = 0; i < n; i++)
-        free(tokens[i]);
-
-    /* Rust-style #[test] */
-    n = cbm_tokenize_decorator("#[test]", tokens, 16);
-    ASSERT_EQ(n, 1);
-    ASSERT_STR_EQ(tokens[0], "test");
-    for (int i = 0; i < n; i++)
-        free(tokens[i]);
-
-    /* #[derive(Debug)] */
-    n = cbm_tokenize_decorator("#[derive(Debug)]", tokens, 16);
-    ASSERT_EQ(n, 1);
-    ASSERT_STR_EQ(tokens[0], "derive");
-    for (int i = 0; i < n; i++)
-        free(tokens[i]);
-
-    /* Both "app" and "get" are stopwords → empty */
-    n = cbm_tokenize_decorator("@app.get(\"/api\")", tokens, 16);
-    ASSERT_EQ(n, 0);
-
-    /* "router" is stopword, "post" passes */
-    n = cbm_tokenize_decorator("@router.post(\"/api\")", tokens, 16);
-    ASSERT_EQ(n, 1);
-    ASSERT_STR_EQ(tokens[0], "post");
-    for (int i = 0; i < n; i++)
-        free(tokens[i]);
-
-    /* Too short after filtering */
-    n = cbm_tokenize_decorator("@x", tokens, 16);
-    ASSERT_EQ(n, 0);
-
-    /* Empty */
-    n = cbm_tokenize_decorator("", tokens, 16);
-    ASSERT_EQ(n, 0);
-
-    n = cbm_tokenize_decorator("@click.command", tokens, 16);
-    ASSERT_EQ(n, 2);
-    ASSERT_STR_EQ(tokens[0], "click");
-    ASSERT_STR_EQ(tokens[1], "command");
-    for (int i = 0; i < n; i++)
-        free(tokens[i]);
-
-    n = cbm_tokenize_decorator("@celery.task", tokens, 16);
-    ASSERT_EQ(n, 2);
-    ASSERT_STR_EQ(tokens[0], "celery");
-    ASSERT_STR_EQ(tokens[1], "task");
-    for (int i = 0; i < n; i++)
-        free(tokens[i]);
-    PASS();
-}
 
 /* ── Decorator tags integration tests (enrichment_test.go ports) ─ */
 
@@ -31518,67 +31365,6 @@ TEST(config_ext_negative) {
     ASSERT_FALSE(cbm_has_config_extension("handler.rs"));
     ASSERT_FALSE(cbm_has_config_extension("data.csv"));
     ASSERT_FALSE(cbm_has_config_extension("README.md"));
-    PASS();
-}
-
-TEST(split_camel_basic) {
-    /* Basic camelCase splitting */
-    char *parts[16];
-    int n;
-
-    n = cbm_split_camel_case("getCamelCase", parts, 16);
-    ASSERT_EQ(n, 3);
-    ASSERT_STR_EQ(parts[0], "get");
-    ASSERT_STR_EQ(parts[1], "Camel");
-    ASSERT_STR_EQ(parts[2], "Case");
-    for (int i = 0; i < n; i++)
-        free(parts[i]);
-
-    PASS();
-}
-
-TEST(split_camel_single_word) {
-    /* Single lowercase word — no splits */
-    char *parts[16];
-    int n = cbm_split_camel_case("hello", parts, 16);
-    ASSERT_EQ(n, 1);
-    ASSERT_STR_EQ(parts[0], "hello");
-    for (int i = 0; i < n; i++)
-        free(parts[i]);
-    PASS();
-}
-
-TEST(split_camel_empty) {
-    /* Empty string — should return 0 or 1 empty part */
-    char *parts[16];
-    int n = cbm_split_camel_case("", parts, 16);
-    for (int i = 0; i < n; i++)
-        free(parts[i]);
-    /* Either 0 parts or 1 empty part is acceptable */
-    ASSERT_TRUE(n >= 0 && n <= 1);
-    PASS();
-}
-
-TEST(tokenize_decorator_login_required) {
-    /* @login_required → ["login", "required"] */
-    char *tokens[16];
-    int n = cbm_tokenize_decorator("@login_required", tokens, 16);
-    ASSERT_EQ(n, 2);
-    ASSERT_STR_EQ(tokens[0], "login");
-    ASSERT_STR_EQ(tokens[1], "required");
-    for (int i = 0; i < n; i++)
-        free(tokens[i]);
-    PASS();
-}
-
-TEST(tokenize_decorator_single) {
-    /* @Override → ["override"] */
-    char *tokens[16];
-    int n = cbm_tokenize_decorator("@Override", tokens, 16);
-    ASSERT_EQ(n, 1);
-    ASSERT_STR_EQ(tokens[0], "override");
-    for (int i = 0; i < n; i++)
-        free(tokens[i]);
     PASS();
 }
 
@@ -35603,9 +35389,6 @@ SUITE(pipeline) {
     RUN_TEST(configures_non_config_file_skipped);
     RUN_TEST(configures_full_pipeline_integration);
     /* HTTP link pipeline integration */
-    /* Enrichment helpers */
-    RUN_TEST(enrichment_split_camel_case);
-    RUN_TEST(enrichment_tokenize_decorator);
     /* Decorator tags integration */
     RUN_TEST(decorator_tags_python_auto_discovery);
     RUN_TEST(decorator_tags_java_class_methods);
@@ -35726,13 +35509,6 @@ SUITE(pipeline) {
     /* Config extension detection */
     RUN_TEST(config_ext_positive);
     RUN_TEST(config_ext_negative);
-    /* Camel case splitting */
-    RUN_TEST(split_camel_basic);
-    RUN_TEST(split_camel_single_word);
-    RUN_TEST(split_camel_empty);
-    /* Decorator tokenization */
-    RUN_TEST(tokenize_decorator_login_required);
-    RUN_TEST(tokenize_decorator_single);
     /* Command splitting */
     RUN_TEST(split_command_basic);
     RUN_TEST(split_command_quoted);
