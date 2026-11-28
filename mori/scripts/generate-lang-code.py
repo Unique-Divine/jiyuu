@@ -4,7 +4,7 @@
 Reads scripts/new-languages.json and generates:
 1. Grammar wrapper .c files (written directly)
 2. Enum entries for cbm.h
-3. Lang spec entries for lang_specs.c (designated initializer + factory)
+3. Lang spec entries for lang_specs.rs (grammar factory, kinds, table row)
 4. Extension/filename/name entries for language.c
 """
 import json
@@ -64,29 +64,29 @@ def generate_enum(langs):
 
 
 def generate_specs(langs):
-    """Print lang spec entries for lang_specs.c."""
-    print("\n=== Extern Declarations (paste at top of lang_specs.c) ===")
+    """Print lang spec entries for internal/cbm/lang_specs.rs."""
+    print("\n=== Grammar Factories (paste into the unsafe extern block) ===")
     for lang in langs:
-        print(f"extern const TSLanguage *{lang['ts_func']}(void);")
+        print(f"    fn {lang['ts_func']}() -> *const RawLanguage;")
 
-    print("\n=== Module Type Arrays (paste before spec table) ===")
+    print("\n=== Language Values (paste into mod lang, in cbm.h order) ===")
     for lang in langs:
-        arr = f"{lang['name']}_module_types"
-        print(
-            f'static const char *{arr}[] = {{"{lang["module_root"]}", NULL}};'
-        )
+        print(f"    pub(crate) const {lang['enum']}: c_int = /* cbm.h value */;")
 
-    print("\n=== Spec Table Entries (paste into lang_specs[]) ===")
+    print("\n=== Module Kinds (paste before the spec table) ===")
     for lang in langs:
-        mod = f"{lang['name']}_module_types"
-        print(f"    // CBM_LANG_{lang['enum']}")
-        print(
-            f"    [CBM_LANG_{lang['enum']}] = {{CBM_LANG_{lang['enum']}, "
-            f"empty_types, empty_types, empty_types, {mod}, "
-            f"empty_types, empty_types, empty_types, empty_types, "
-            f"empty_types, empty_types, empty_types, NULL, empty_types, "
-            f"NULL, NULL, {lang['ts_func']}}},"
-        )
+        arr = f"{lang['name'].upper()}_MODULE_TYPES"
+        print(f'static {arr}: Kinds<1> = kinds([c"{lang["module_root"]}"]);')
+
+    print("\n=== Spec Table Rows (paste into LANG_SPECS) ===")
+    for lang in langs:
+        mod = f"{lang['name'].upper()}_MODULE_TYPES"
+        print(f"    specs[lang::{lang['enum']} as usize] = CbmLangSpec {{")
+        print(f"        language: lang::{lang['enum']},")
+        print(f"        module_node_types: {mod}.as_ptr(),")
+        print(f"        ts_factory: Some({lang['ts_func']}),")
+        print("        ..LIST_DEFAULTS")
+        print("    };")
         print()
 
 
