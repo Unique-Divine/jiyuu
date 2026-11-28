@@ -40,6 +40,7 @@
 #include "foundation/compat.h"
 #include "foundation/compat_thread.h"
 #include "foundation/mem_core.h"
+#include "foundation/ts_alloc.h"
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -284,7 +285,7 @@ static void slab_reclaim_pages(slab_state_t *s, bool clear_installed) {
     }
 }
 
-/* ── Allocator functions (installed as tree-sitter callbacks) ───── */
+/* ── Slab allocation functions ─────────────────────────────────── */
 
 static void *slab_malloc(size_t size) {
     if (size == 0) {
@@ -410,8 +411,20 @@ static void slab_map_unregister_page(slab_page_t *page) {
 extern void ts_set_allocator(void *(*new_malloc)(size_t), void *(*new_calloc)(size_t, size_t),
                              void *(*new_realloc)(void *, size_t), void (*new_free)(void *));
 
+static void *slab_ts_malloc(size_t size) {
+    return cbm_ts_alloc_or_abort(slab_malloc(size), 1, size);
+}
+
+static void *slab_ts_calloc(size_t count, size_t size) {
+    return cbm_ts_alloc_or_abort(slab_calloc(count, size), count, size);
+}
+
+static void *slab_ts_realloc(void *ptr, size_t size) {
+    return cbm_ts_alloc_or_abort(slab_realloc(ptr, size), 1, size);
+}
+
 void cbm_slab_install(void) {
-    ts_set_allocator(slab_malloc, slab_calloc, slab_realloc, slab_free);
+    ts_set_allocator(slab_ts_malloc, slab_ts_calloc, slab_ts_realloc, slab_free);
 }
 
 void cbm_slab_reset_thread(void) {
