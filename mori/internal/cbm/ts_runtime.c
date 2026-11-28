@@ -13,14 +13,19 @@ const char *cbm_ffi_ts_node_type(const TSNode *node) {
     return ts_node_type(*node);
 }
 
-uint32_t cbm_ffi_ts_node_start_byte(const TSNode *node) {
+cbm_ts_node_byte_range cbm_ffi_ts_node_byte_range(const TSNode *node) {
     cbm_ffi_ts_node_written(node);
-    return ts_node_start_byte(*node);
+    return (cbm_ts_node_byte_range){ts_node_start_byte(*node), ts_node_end_byte(*node)};
 }
 
-uint32_t cbm_ffi_ts_node_end_byte(const TSNode *node) {
+uint32_t cbm_ffi_ts_node_child_count(const TSNode *node) {
     cbm_ffi_ts_node_written(node);
-    return ts_node_end_byte(*node);
+    return ts_node_child_count(*node);
+}
+
+TSNode cbm_ffi_ts_node_child(const TSNode *node, uint32_t index) {
+    cbm_ffi_ts_node_written(node);
+    return ts_node_child(*node, index);
 }
 
 bool cbm_ffi_ts_node_is_named(const TSNode *node) {

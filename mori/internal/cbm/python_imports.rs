@@ -51,7 +51,7 @@ impl ImportSink {
 
 unsafe fn text(node: RawNode, source: &[u8]) -> Option<&[u8]> {
     // SAFETY: The node borrows the live tree for this source.
-    let bytes = source.get(unsafe { node.range() })?;
+    let bytes = unsafe { node.text(source) }?;
     // Native import names are C strings. Keep raw bytes up to the first NUL.
     bytes.split(|&byte| byte == 0).next()
 }
