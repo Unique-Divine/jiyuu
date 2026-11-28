@@ -58,7 +58,9 @@ static inline char *tg_dump(const cbm_gbuf_t *gb) {
     tg_dump_t d = {.gb = gb};
     cbm_gbuf_foreach_node(gb, tg_dump_node, &d);
     cbm_gbuf_foreach_edge(gb, tg_dump_edge, &d);
-    qsort(d.lines, (size_t)d.count, sizeof(char *), tg_cmp_line);
+    if (d.count > 0) {
+        qsort(d.lines, (size_t)d.count, sizeof(char *), tg_cmp_line);
+    }
     size_t len = 1;
     for (int i = 0; i < d.count; i++) {
         len += strlen(d.lines[i]) + 1;
