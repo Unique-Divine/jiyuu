@@ -16,86 +16,10 @@
 
 /* ── Helpers — same shape as test_go_lsp.c ──────────────────────── */
 
-static CBMFileResult *extract_py_once(const char *source) {
+static CBMFileResult *extract_py(const char *source) {
     return cbm_extract_file(source, (int)strlen(source), CBM_LANG_PYTHON,
                             "test", "main.py", 0, NULL, NULL);
 }
-
-#ifdef CBM_ENABLE_TEST_SEAMS
-/* While the C reference of a Rust Python resolver stays compiled in, every
- * extract_py also extracts with the C reference and returns NULL when the
- * resolved calls, synthetic calls or usages differ, so each test below that
- * extracts a file doubles as a parity case. */
-static bool pyparity_str(const char *what, int i, const char *c, const char *rust) {
-    if (c == rust || (c && rust && strcmp(c, rust) == 0))
-        return true;
-    printf("  parity %s[%d]: C=%s Rust=%s\n", what, i, c ? c : "(null)",
-           rust ? rust : "(null)");
-    return false;
-}
-
-static bool pyparity_int(const char *what, int i, long long c, long long rust) {
-    if (c == rust)
-        return true;
-    printf("  parity %s[%d]: C=%lld Rust=%lld\n", what, i, c, rust);
-    return false;
-}
-
-static bool pyparity_same(const CBMFileResult *c, const CBMFileResult *r) {
-    bool same = pyparity_int("resolved_calls.count", 0, c->resolved_calls.count,
-                             r->resolved_calls.count);
-    for (int i = 0; same && i < c->resolved_calls.count; i++) {
-        const CBMResolvedCall *a = &c->resolved_calls.items[i];
-        const CBMResolvedCall *b = &r->resolved_calls.items[i];
-        same = pyparity_str("caller", i, a->caller_qn, b->caller_qn) &&
-               pyparity_str("callee", i, a->callee_qn, b->callee_qn) &&
-               pyparity_str("strategy", i, a->strategy, b->strategy) &&
-               pyparity_str("reason", i, a->reason, b->reason) &&
-               pyparity_str("callee_sig", i, a->callee_sig, b->callee_sig) &&
-               pyparity_int("confidence", i, (long long)(a->confidence * 1000.0f),
-                            (long long)(b->confidence * 1000.0f)) &&
-               pyparity_int("kind", i, a->kind, b->kind) &&
-               pyparity_int("site_start", i, a->site_start_byte, b->site_start_byte) &&
-               pyparity_int("site_end", i, a->site_end_byte, b->site_end_byte);
-    }
-    same = same && pyparity_int("calls.count", 0, c->calls.count, r->calls.count);
-    for (int i = 0; same && i < c->calls.count; i++) {
-        const CBMCall *a = &c->calls.items[i];
-        const CBMCall *b = &r->calls.items[i];
-        same = pyparity_str("call.callee", i, a->callee_name, b->callee_name) &&
-               pyparity_str("call.caller", i, a->enclosing_func_qn, b->enclosing_func_qn) &&
-               pyparity_int("call.site", i, a->site_start_byte, b->site_start_byte);
-    }
-    same = same && pyparity_int("usages.count", 0, c->usages.count, r->usages.count);
-    for (int i = 0; same && i < c->usages.count; i++) {
-        const CBMUsage *a = &c->usages.items[i];
-        const CBMUsage *b = &r->usages.items[i];
-        same = pyparity_str("usage.name", i, a->ref_name, b->ref_name) &&
-               pyparity_str("usage.caller", i, a->enclosing_func_qn, b->enclosing_func_qn) &&
-               pyparity_int("usage.kind", i, a->kind, b->kind) &&
-               pyparity_int("usage.site", i, a->site_start_byte, b->site_start_byte);
-    }
-    return same && pyparity_int("has_error", 0, c->has_error, r->has_error);
-}
-
-static CBMFileResult *extract_py(const char *source) {
-    cbm_py_lsp_test_use_c_reference(true);
-    CBMFileResult *c = extract_py_once(source);
-    cbm_py_lsp_test_use_c_reference(false);
-    CBMFileResult *r = extract_py_once(source);
-    if (!c != !r || (c && !pyparity_same(c, r))) {
-        printf("  parity mismatch for source:\n%s\n", source);
-        cbm_free_result(r);
-        r = NULL;
-    }
-    cbm_free_result(c);
-    return r;
-}
-#else
-static CBMFileResult *extract_py(const char *source) {
-    return extract_py_once(source);
-}
-#endif
 
 static int find_resolved(const CBMFileResult *r, const char *callerSub, const char *calleeSub) {
     for (int i = 0; i < r->resolved_calls.count; i++) {
@@ -5539,7 +5463,7 @@ TEST(pylsp_inheritance_lookup_cases) {
     PASS();
 }
 
-/* ── Annotation parity: C reference vs python_annotation.rs ─────────── */
+/* ── Annotation cases (python_annotation.rs) ─────────────────────────── */
 
 /* A compact spelling of an annotation's type: ? unknown, N:qn named,
  * B:name builtin, T:name[args] template, U(members) union. */
@@ -5587,47 +5511,271 @@ static void pyann_render(char *out, size_t cap, const CBMType *t) {
     }
 }
 
-/* Builtins, None, Optional and Union spellings, PEP 604 unions, generic
- * containers of both cases, quoted forward references, whitespace,
- * malformed brackets, dotted names, scope-bound and registered names, and
- * deep nesting. */
-static const char *const PYANN_CASES[] = {
-    NULL, "", " ", "int", "str", "bool", "float", "bytes", "None", "object", "Any", "Self",
-    "Foo", "  Foo  ", "'Foo'", "\"Foo\"", "'Foo", "Known", "Imported", "Imported.Inner",
-    "mod.Foo", "typing.Optional[Foo]", "Optional[Foo]", "Optional [Foo]", "Optional[]",
-    "Optional['Foo']", "Optional[Union[A, B]]", "Union[A, B]", "Union[A]", "Union[]",
-    "Union[A, B, A]", "Union[int, None]", "A | B", "A | None", "A|B|C", "int | 'Foo'",
-    "None | Known", "list[Foo]", "List[Foo]", "list[]", "list[Known]", "dict[str, Foo]",
-    "Dict[str, List[Foo]]", "set[Optional['Foo']]", "tuple[int, ...]", "Tuple[int, str]",
-    "Callable[[int], str]", "Literal['a']", "Annotated[Foo, 1]", "type[Foo]", "Type[Known]",
-    "Awaitable[Foo]", "Iterator[Imported]", "Foo[", "Foo]", "Foo[]]", "[Foo]", "Foo[Bar",
-    "list[list[list[list[Foo]]]]", "Optional[list[A | B]]", "Imported[int]", "Known | int",
+/* The type each spelling resolved to through the C reference before its
+ * removal, in registry form (scoped 0) and in a file scope that binds
+ * Imported (scoped 1), with and without a module: builtins, None,
+ * Optional and Union spellings, PEP 604 unions, generic containers,
+ * quoted forward references, whitespace, malformed brackets, dotted,
+ * scope-bound and registered names, and deep nesting. */
+typedef struct {
+    int scoped;
+    const char *module_qn;
+    const char *ann;
+    const char *type;
+} PyAnnCase;
+
+static const PyAnnCase PYANN_CASES[] = {
+    {0, NULL, NULL, "?"},
+    {1, NULL, NULL, "?"},
+    {0, NULL, "", "?"},
+    {1, NULL, "", "?"},
+    {0, NULL, " ", "N: "},
+    {1, NULL, " ", "N: "},
+    {0, NULL, "int", "B:int"},
+    {1, NULL, "int", "B:int"},
+    {0, NULL, "str", "B:str"},
+    {1, NULL, "str", "B:str"},
+    {0, NULL, "bool", "B:bool"},
+    {1, NULL, "bool", "B:bool"},
+    {0, NULL, "float", "B:float"},
+    {1, NULL, "float", "B:float"},
+    {0, NULL, "bytes", "B:bytes"},
+    {1, NULL, "bytes", "B:bytes"},
+    {0, NULL, "None", "B:None"},
+    {1, NULL, "None", "B:None"},
+    {0, NULL, "object", "B:object"},
+    {1, NULL, "object", "B:object"},
+    {0, NULL, "Any", "N:Any"},
+    {1, NULL, "Any", "N:Any"},
+    {0, NULL, "Self", "N:Self"},
+    {1, NULL, "Self", "N:Self"},
+    {0, NULL, "Foo", "N:Foo"},
+    {1, NULL, "Foo", "N:Foo"},
+    {0, NULL, "  Foo  ", "N:  Foo  "},
+    {1, NULL, "  Foo  ", "N:  Foo  "},
+    {0, NULL, "'Foo'", "N:Foo"},
+    {1, NULL, "'Foo'", "N:Foo"},
+    {0, NULL, "\"Foo\"", "N:Foo"},
+    {1, NULL, "\"Foo\"", "N:Foo"},
+    {0, NULL, "'Foo", "N:'Foo"},
+    {1, NULL, "'Foo", "N:'Foo"},
+    {0, NULL, "Known", "N:Known"},
+    {1, NULL, "Known", "N:Known"},
+    {0, NULL, "Imported", "N:Imported"},
+    {1, NULL, "Imported", "N:ext.Imported"},
+    {0, NULL, "Imported.Inner", "N:Imported.Inner"},
+    {1, NULL, "Imported.Inner", "N:Imported.Inner"},
+    {0, NULL, "mod.Foo", "N:mod.Foo"},
+    {1, NULL, "mod.Foo", "N:mod.Foo"},
+    {0, NULL, "typing.Optional[Foo]", "U(N:Foo,B:None)"},
+    {1, NULL, "typing.Optional[Foo]", "U(N:Foo,B:None)"},
+    {0, NULL, "Optional[Foo]", "U(N:Foo,B:None)"},
+    {1, NULL, "Optional[Foo]", "U(N:Foo,B:None)"},
+    {0, NULL, "Optional [Foo]", "U(N:Foo,B:None)"},
+    {1, NULL, "Optional [Foo]", "U(N:Foo,B:None)"},
+    {0, NULL, "Optional[]", "N:Optional"},
+    {1, NULL, "Optional[]", "N:Optional"},
+    {0, NULL, "Optional['Foo']", "U(N:Foo,B:None)"},
+    {1, NULL, "Optional['Foo']", "U(N:Foo,B:None)"},
+    {0, NULL, "Optional[Union[A, B]]", "U(N:A,N:B,B:None)"},
+    {1, NULL, "Optional[Union[A, B]]", "U(N:A,N:B,B:None)"},
+    {0, NULL, "Union[A, B]", "U(N:A,N:B)"},
+    {1, NULL, "Union[A, B]", "U(N:A,N:B)"},
+    {0, NULL, "Union[A]", "N:A"},
+    {1, NULL, "Union[A]", "N:A"},
+    {0, NULL, "Union[]", "N:Union"},
+    {1, NULL, "Union[]", "N:Union"},
+    {0, NULL, "Union[A, B, A]", "U(N:A,N:B)"},
+    {1, NULL, "Union[A, B, A]", "U(N:A,N:B)"},
+    {0, NULL, "Union[int, None]", "U(B:int,B:None)"},
+    {1, NULL, "Union[int, None]", "U(B:int,B:None)"},
+    {0, NULL, "A | B", "N:A | B"},
+    {1, NULL, "A | B", "U(N:A,N:B)"},
+    {0, NULL, "A | None", "N:A | None"},
+    {1, NULL, "A | None", "U(N:A,B:None)"},
+    {0, NULL, "A|B|C", "N:A|B|C"},
+    {1, NULL, "A|B|C", "U(N:A,N:B,N:C)"},
+    {0, NULL, "int | 'Foo'", "N:int | 'Foo'"},
+    {1, NULL, "int | 'Foo'", "U(B:int,N:Foo)"},
+    {0, NULL, "None | Known", "N:None | Known"},
+    {1, NULL, "None | Known", "U(B:None,N:Known)"},
+    {0, NULL, "list[Foo]", "T:list[N:Foo]"},
+    {1, NULL, "list[Foo]", "T:list[N:Foo]"},
+    {0, NULL, "List[Foo]", "T:List[N:Foo]"},
+    {1, NULL, "List[Foo]", "T:List[N:Foo]"},
+    {0, NULL, "list[]", "N:list"},
+    {1, NULL, "list[]", "N:list"},
+    {0, NULL, "list[Known]", "T:list[N:Known]"},
+    {1, NULL, "list[Known]", "T:list[N:Known]"},
+    {0, NULL, "dict[str, Foo]", "T:dict[B:str,N:Foo]"},
+    {1, NULL, "dict[str, Foo]", "T:dict[B:str,N:Foo]"},
+    {0, NULL, "Dict[str, List[Foo]]", "T:Dict[B:str,T:List[N:Foo]]"},
+    {1, NULL, "Dict[str, List[Foo]]", "T:Dict[B:str,T:List[N:Foo]]"},
+    {0, NULL, "set[Optional['Foo']]", "T:set[U(N:Foo,B:None)]"},
+    {1, NULL, "set[Optional['Foo']]", "T:set[U(N:Foo,B:None)]"},
+    {0, NULL, "tuple[int, ...]", "T:tuple[B:int,N:...]"},
+    {1, NULL, "tuple[int, ...]", "T:tuple[B:int,N:...]"},
+    {0, NULL, "Tuple[int, str]", "T:Tuple[B:int,B:str]"},
+    {1, NULL, "Tuple[int, str]", "T:Tuple[B:int,B:str]"},
+    {0, NULL, "Callable[[int], str]", "T:Callable[T:[B:int],B:str]"},
+    {1, NULL, "Callable[[int], str]", "T:Callable[T:[B:int],B:str]"},
+    {0, NULL, "Literal['a']", "T:Literal[N:a]"},
+    {1, NULL, "Literal['a']", "T:Literal[N:a]"},
+    {0, NULL, "Annotated[Foo, 1]", "N:Foo"},
+    {1, NULL, "Annotated[Foo, 1]", "N:Foo"},
+    {0, NULL, "type[Foo]", "N:Foo"},
+    {1, NULL, "type[Foo]", "N:Foo"},
+    {0, NULL, "Type[Known]", "N:Known"},
+    {1, NULL, "Type[Known]", "N:Known"},
+    {0, NULL, "Awaitable[Foo]", "T:Awaitable[N:Foo]"},
+    {1, NULL, "Awaitable[Foo]", "T:Awaitable[N:Foo]"},
+    {0, NULL, "Iterator[Imported]", "T:Iterator[N:Imported]"},
+    {1, NULL, "Iterator[Imported]", "T:Iterator[N:ext.Imported]"},
+    {0, NULL, "Foo[", "N:Foo["},
+    {1, NULL, "Foo[", "N:Foo["},
+    {0, NULL, "Foo]", "N:Foo]"},
+    {1, NULL, "Foo]", "N:Foo]"},
+    {0, NULL, "Foo[]]", "N:Foo"},
+    {1, NULL, "Foo[]]", "N:Foo"},
+    {0, NULL, "[Foo]", "T:[N:Foo]"},
+    {1, NULL, "[Foo]", "T:[N:Foo]"},
+    {0, NULL, "Foo[Bar", "N:Foo[Bar"},
+    {1, NULL, "Foo[Bar", "N:Foo[Bar"},
+    {0, NULL, "list[list[list[list[Foo]]]]", "T:list[T:list[T:list[T:list[N:Foo]]]]"},
+    {1, NULL, "list[list[list[list[Foo]]]]", "T:list[T:list[T:list[T:list[N:Foo]]]]"},
+    {0, NULL, "Optional[list[A | B]]", "U(T:list[N:A | B],B:None)"},
+    {1, NULL, "Optional[list[A | B]]", "U(T:list[U(N:A,N:B)],B:None)"},
+    {0, NULL, "Imported[int]", "T:Imported[B:int]"},
+    {1, NULL, "Imported[int]", "T:Imported[B:int]"},
+    {0, NULL, "Known | int", "N:Known | int"},
+    {1, NULL, "Known | int", "U(N:Known,B:int)"},
+    {0, "pkg.mod", NULL, "?"},
+    {1, "pkg.mod", NULL, "?"},
+    {0, "pkg.mod", "", "?"},
+    {1, "pkg.mod", "", "?"},
+    {0, "pkg.mod", " ", "N:pkg.mod. "},
+    {1, "pkg.mod", " ", "N: "},
+    {0, "pkg.mod", "int", "B:int"},
+    {1, "pkg.mod", "int", "B:int"},
+    {0, "pkg.mod", "str", "B:str"},
+    {1, "pkg.mod", "str", "B:str"},
+    {0, "pkg.mod", "bool", "B:bool"},
+    {1, "pkg.mod", "bool", "B:bool"},
+    {0, "pkg.mod", "float", "B:float"},
+    {1, "pkg.mod", "float", "B:float"},
+    {0, "pkg.mod", "bytes", "B:bytes"},
+    {1, "pkg.mod", "bytes", "B:bytes"},
+    {0, "pkg.mod", "None", "B:None"},
+    {1, "pkg.mod", "None", "B:None"},
+    {0, "pkg.mod", "object", "B:object"},
+    {1, "pkg.mod", "object", "B:object"},
+    {0, "pkg.mod", "Any", "N:Any"},
+    {1, "pkg.mod", "Any", "N:Any"},
+    {0, "pkg.mod", "Self", "N:Self"},
+    {1, "pkg.mod", "Self", "N:Self"},
+    {0, "pkg.mod", "Foo", "N:pkg.mod.Foo"},
+    {1, "pkg.mod", "Foo", "N:Foo"},
+    {0, "pkg.mod", "  Foo  ", "N:pkg.mod.  Foo  "},
+    {1, "pkg.mod", "  Foo  ", "N:  Foo  "},
+    {0, "pkg.mod", "'Foo'", "N:pkg.mod.Foo"},
+    {1, "pkg.mod", "'Foo'", "N:Foo"},
+    {0, "pkg.mod", "\"Foo\"", "N:pkg.mod.Foo"},
+    {1, "pkg.mod", "\"Foo\"", "N:Foo"},
+    {0, "pkg.mod", "'Foo", "N:pkg.mod.'Foo"},
+    {1, "pkg.mod", "'Foo", "N:'Foo"},
+    {0, "pkg.mod", "Known", "N:pkg.mod.Known"},
+    {1, "pkg.mod", "Known", "N:pkg.mod.Known"},
+    {0, "pkg.mod", "Imported", "N:pkg.mod.Imported"},
+    {1, "pkg.mod", "Imported", "N:ext.Imported"},
+    {0, "pkg.mod", "Imported.Inner", "N:Imported.Inner"},
+    {1, "pkg.mod", "Imported.Inner", "N:Imported.Inner"},
+    {0, "pkg.mod", "mod.Foo", "N:mod.Foo"},
+    {1, "pkg.mod", "mod.Foo", "N:mod.Foo"},
+    {0, "pkg.mod", "typing.Optional[Foo]", "U(N:pkg.mod.Foo,B:None)"},
+    {1, "pkg.mod", "typing.Optional[Foo]", "U(N:Foo,B:None)"},
+    {0, "pkg.mod", "Optional[Foo]", "U(N:pkg.mod.Foo,B:None)"},
+    {1, "pkg.mod", "Optional[Foo]", "U(N:Foo,B:None)"},
+    {0, "pkg.mod", "Optional [Foo]", "U(N:pkg.mod.Foo,B:None)"},
+    {1, "pkg.mod", "Optional [Foo]", "U(N:Foo,B:None)"},
+    {0, "pkg.mod", "Optional[]", "N:Optional"},
+    {1, "pkg.mod", "Optional[]", "N:Optional"},
+    {0, "pkg.mod", "Optional['Foo']", "U(N:pkg.mod.Foo,B:None)"},
+    {1, "pkg.mod", "Optional['Foo']", "U(N:Foo,B:None)"},
+    {0, "pkg.mod", "Optional[Union[A, B]]", "U(N:pkg.mod.A,N:pkg.mod.B,B:None)"},
+    {1, "pkg.mod", "Optional[Union[A, B]]", "U(N:A,N:B,B:None)"},
+    {0, "pkg.mod", "Union[A, B]", "U(N:pkg.mod.A,N:pkg.mod.B)"},
+    {1, "pkg.mod", "Union[A, B]", "U(N:A,N:B)"},
+    {0, "pkg.mod", "Union[A]", "N:pkg.mod.A"},
+    {1, "pkg.mod", "Union[A]", "N:A"},
+    {0, "pkg.mod", "Union[]", "N:Union"},
+    {1, "pkg.mod", "Union[]", "N:Union"},
+    {0, "pkg.mod", "Union[A, B, A]", "U(N:pkg.mod.A,N:pkg.mod.B)"},
+    {1, "pkg.mod", "Union[A, B, A]", "U(N:A,N:B)"},
+    {0, "pkg.mod", "Union[int, None]", "U(B:int,B:None)"},
+    {1, "pkg.mod", "Union[int, None]", "U(B:int,B:None)"},
+    {0, "pkg.mod", "A | B", "N:pkg.mod.A | B"},
+    {1, "pkg.mod", "A | B", "U(N:A,N:B)"},
+    {0, "pkg.mod", "A | None", "N:pkg.mod.A | None"},
+    {1, "pkg.mod", "A | None", "U(N:A,B:None)"},
+    {0, "pkg.mod", "A|B|C", "N:pkg.mod.A|B|C"},
+    {1, "pkg.mod", "A|B|C", "U(N:A,N:B,N:C)"},
+    {0, "pkg.mod", "int | 'Foo'", "N:pkg.mod.int | 'Foo'"},
+    {1, "pkg.mod", "int | 'Foo'", "U(B:int,N:Foo)"},
+    {0, "pkg.mod", "None | Known", "N:pkg.mod.None | Known"},
+    {1, "pkg.mod", "None | Known", "U(B:None,N:pkg.mod.Known)"},
+    {0, "pkg.mod", "list[Foo]", "T:list[N:pkg.mod.Foo]"},
+    {1, "pkg.mod", "list[Foo]", "T:list[N:Foo]"},
+    {0, "pkg.mod", "List[Foo]", "T:List[N:pkg.mod.Foo]"},
+    {1, "pkg.mod", "List[Foo]", "T:List[N:Foo]"},
+    {0, "pkg.mod", "list[]", "N:pkg.mod.list"},
+    {1, "pkg.mod", "list[]", "N:list"},
+    {0, "pkg.mod", "list[Known]", "T:list[N:pkg.mod.Known]"},
+    {1, "pkg.mod", "list[Known]", "T:list[N:pkg.mod.Known]"},
+    {0, "pkg.mod", "dict[str, Foo]", "T:dict[B:str,N:pkg.mod.Foo]"},
+    {1, "pkg.mod", "dict[str, Foo]", "T:dict[B:str,N:Foo]"},
+    {0, "pkg.mod", "Dict[str, List[Foo]]", "T:Dict[B:str,T:List[N:pkg.mod.Foo]]"},
+    {1, "pkg.mod", "Dict[str, List[Foo]]", "T:Dict[B:str,T:List[N:Foo]]"},
+    {0, "pkg.mod", "set[Optional['Foo']]", "T:set[U(N:pkg.mod.Foo,B:None)]"},
+    {1, "pkg.mod", "set[Optional['Foo']]", "T:set[U(N:Foo,B:None)]"},
+    {0, "pkg.mod", "tuple[int, ...]", "T:tuple[B:int,N:...]"},
+    {1, "pkg.mod", "tuple[int, ...]", "T:tuple[B:int,N:...]"},
+    {0, "pkg.mod", "Tuple[int, str]", "T:Tuple[B:int,B:str]"},
+    {1, "pkg.mod", "Tuple[int, str]", "T:Tuple[B:int,B:str]"},
+    {0, "pkg.mod", "Callable[[int], str]", "T:Callable[T:[B:int],B:str]"},
+    {1, "pkg.mod", "Callable[[int], str]", "T:Callable[T:[B:int],B:str]"},
+    {0, "pkg.mod", "Literal['a']", "T:Literal[N:pkg.mod.a]"},
+    {1, "pkg.mod", "Literal['a']", "T:Literal[N:a]"},
+    {0, "pkg.mod", "Annotated[Foo, 1]", "N:pkg.mod.Foo"},
+    {1, "pkg.mod", "Annotated[Foo, 1]", "N:Foo"},
+    {0, "pkg.mod", "type[Foo]", "N:pkg.mod.Foo"},
+    {1, "pkg.mod", "type[Foo]", "N:Foo"},
+    {0, "pkg.mod", "Type[Known]", "N:pkg.mod.Known"},
+    {1, "pkg.mod", "Type[Known]", "N:pkg.mod.Known"},
+    {0, "pkg.mod", "Awaitable[Foo]", "T:Awaitable[N:pkg.mod.Foo]"},
+    {1, "pkg.mod", "Awaitable[Foo]", "T:Awaitable[N:Foo]"},
+    {0, "pkg.mod", "Iterator[Imported]", "T:Iterator[N:pkg.mod.Imported]"},
+    {1, "pkg.mod", "Iterator[Imported]", "T:Iterator[N:ext.Imported]"},
+    {0, "pkg.mod", "Foo[", "N:pkg.mod.Foo["},
+    {1, "pkg.mod", "Foo[", "N:Foo["},
+    {0, "pkg.mod", "Foo]", "N:pkg.mod.Foo]"},
+    {1, "pkg.mod", "Foo]", "N:Foo]"},
+    {0, "pkg.mod", "Foo[]]", "N:pkg.mod.Foo"},
+    {1, "pkg.mod", "Foo[]]", "N:Foo"},
+    {0, "pkg.mod", "[Foo]", "T:[N:pkg.mod.Foo]"},
+    {1, "pkg.mod", "[Foo]", "T:[N:Foo]"},
+    {0, "pkg.mod", "Foo[Bar", "N:pkg.mod.Foo[Bar"},
+    {1, "pkg.mod", "Foo[Bar", "N:Foo[Bar"},
+    {0, "pkg.mod", "list[list[list[list[Foo]]]]", "T:list[T:list[T:list[T:list[N:pkg.mod.Foo]]]]"},
+    {1, "pkg.mod", "list[list[list[list[Foo]]]]", "T:list[T:list[T:list[T:list[N:Foo]]]]"},
+    {0, "pkg.mod", "Optional[list[A | B]]", "U(T:list[N:pkg.mod.A | B],B:None)"},
+    {1, "pkg.mod", "Optional[list[A | B]]", "U(T:list[U(N:A,N:B)],B:None)"},
+    {0, "pkg.mod", "Imported[int]", "T:Imported[B:int]"},
+    {1, "pkg.mod", "Imported[int]", "T:Imported[B:int]"},
+    {0, "pkg.mod", "Known | int", "N:pkg.mod.Known | int"},
+    {1, "pkg.mod", "Known | int", "U(N:pkg.mod.Known,B:int)"},
 };
 
-static int pyann_compare(PyLSPContext *ctx, const char *module_qn, CBMArena *a) {
-    int mismatches = 0;
-    for (size_t i = 0; i < sizeof(PYANN_CASES) / sizeof(PYANN_CASES[0]); i++) {
-        const char *ann = PYANN_CASES[i];
-        for (int scoped = 0; scoped < 2; scoped++) {
-            const CBMType *c_type = scoped ? cbm_py_annotation_test_resolve(ctx, ann, true)
-                                           : cbm_py_annotation_test_parse(a, ann, module_qn, true);
-            const CBMType *r_type = scoped ? cbm_py_annotation_test_resolve(ctx, ann, false)
-                                           : cbm_py_annotation_test_parse(a, ann, module_qn, false);
-            if (!cbm_type_equal(c_type, r_type)) {
-                char c_text[512] = "";
-                char r_text[512] = "";
-                pyann_render(c_text, sizeof(c_text), c_type);
-                pyann_render(r_text, sizeof(r_text), r_type);
-                printf("  %s(%s, module=%s): C=%s Rust=%s\n", scoped ? "resolve" : "parse",
-                       ann ? ann : "(null)", module_qn ? module_qn : "(null)", c_text, r_text);
-                mismatches++;
-            }
-        }
-    }
-    return mismatches;
-}
-
-TEST(pylsp_annotations_match_c_reference) {
+TEST(pylsp_annotation_cases) {
     CBMArena a;
     cbm_arena_init(&a);
     CBMTypeRegistry reg;
@@ -5638,20 +5786,25 @@ TEST(pylsp_annotations_match_c_reference) {
     known.short_name = "Known";
     cbm_registry_add_type(&reg, known);
     int mismatches = 0;
-    const char *modules[] = {NULL, "pkg.mod"};
-    for (int m = 0; m < 2; m++) {
+    for (size_t i = 0; i < sizeof(PYANN_CASES) / sizeof(PYANN_CASES[0]); i++) {
+        const PyAnnCase *want = &PYANN_CASES[i];
         PyLSPContext ctx;
         const char *locals[] = {"Imported"};
         const char *qns[] = {"ext.Imported"};
         bind_imports_into_ctx(&ctx, &a, &reg, locals, qns, 1);
-        ctx.module_qn = modules[m];
-        mismatches += pyann_compare(&ctx, modules[m], &a);
+        ctx.module_qn = want->module_qn;
+        const CBMType *type = want->scoped
+                                  ? cbm_py_annotation_test_resolve(&ctx, want->ann)
+                                  : cbm_py_annotation_test_parse(&a, want->ann, want->module_qn);
+        char text[512] = "";
+        pyann_render(text, sizeof(text), type);
+        if (strcmp(text, want->type) != 0) {
+            printf("  %s(%s, module=%s): %s, want %s\n", want->scoped ? "resolve" : "parse",
+                   want->ann ? want->ann : "(null)", want->module_qn ? want->module_qn : "(null)",
+                   text, want->type);
+            mismatches++;
+        }
     }
-    /* Spot-check shared answers, so a shared wrong answer still fails. */
-    char text[256] = "";
-    pyann_render(text, sizeof(text), cbm_py_annotation_test_parse(&a, "Optional[Foo]", "pkg.mod",
-                                                                  false));
-    ASSERT_TRUE(strstr(text, "Foo") != NULL);
     cbm_arena_destroy(&a);
     ASSERT_EQ(mismatches, 0);
     PASS();
@@ -5739,7 +5892,7 @@ SUITE(py_lsp) {
     RUN_TEST(pylsp_multi_inheritance_first_base);
     RUN_TEST(pylsp_c3_diamond_and_super_use_same_order);
     RUN_TEST(pylsp_inheritance_lookup_cases);
-    RUN_TEST(pylsp_annotations_match_c_reference);
+    RUN_TEST(pylsp_annotation_cases);
     RUN_TEST(pylsp_pep695_generic_class);
     /* Phase 9 — cross-file + batch */
     RUN_TEST(pylsp_crossfile_method_dispatch);
