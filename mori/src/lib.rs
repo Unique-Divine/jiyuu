@@ -28,11 +28,17 @@ mod complexity;
 #[path = "pipeline/csharp_doc_links/mod.rs"]
 mod csharp_doc_links;
 #[cfg(any(feature = "native-engine-abi", test))]
+#[path = "pipeline/decorator_tags/mod.rs"]
+mod decorator_tags;
+#[cfg(any(feature = "native-engine-abi", test))]
 #[path = "pipeline/definition_props.rs"]
 mod definition_props;
 #[cfg(feature = "native-engine-abi")]
 #[path = "mcp/detect_changes/mod.rs"]
 mod detect_changes;
+#[cfg(feature = "native-engine-abi")]
+#[path = "pipeline/diagrams.rs"]
+mod diagrams;
 #[cfg(feature = "native-engine-abi")]
 #[path = "pipeline/doc_file_links.rs"]
 mod doc_file_links;
