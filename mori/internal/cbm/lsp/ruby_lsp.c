@@ -78,6 +78,7 @@
  */
 
 #include "ruby_lsp.h"
+#include "ruby_lookup.h"
 #include "lsp_work.h"
 #include "../helpers.h"
 #include "../arena.h"
@@ -85,6 +86,15 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+/* Ancestry backend: the Rust exports in ruby_lookup.rs. Seam builds can switch
+ * one thread to the C reference below to compare whole-file results. */
+#ifdef CBM_ENABLE_TEST_SEAMS
+#define RUBY_ANCESTRY(fn) \
+    (cbm_ruby_lookup_c_reference ? cbm_ruby_ancestry_c_##fn : mori_ruby_ancestry_##fn)
+#else
+#define RUBY_ANCESTRY(fn) mori_ruby_ancestry_##fn
+#endif
 
 /* Recursion cap for ruby_eval_expr_type — mirrors perl/php (unknown past 8). */
 #define RUBY_EVAL_MAX_DEPTH 8
@@ -205,32 +215,10 @@ static const char *ruby_path_join(CBMArena *a, const char *left, const char *rig
     return cbm_arena_sprintf(a, "%s.%s", left, right);
 }
 
-/* Dotted form of a raw constant spelling: every "::" becomes ".". Used to
- * turn nesting frames (raw) into class-table paths (dotted). */
-static const char *ruby_dotted(CBMArena *a, const char *raw) {
-    if (!raw)
-        return NULL;
-    size_t n = strlen(raw);
-    char *out = (char *)cbm_arena_alloc(a, n + 1);
-    if (!out)
-        return raw;
-    size_t j = 0;
-    for (size_t i = 0; i < n; i++) {
-        if (raw[i] == ':' && i + 1 < n && raw[i + 1] == ':') {
-            out[j++] = '.';
-            i++;
-            continue;
-        }
-        out[j++] = raw[i];
-    }
-    out[j] = '\0';
-    return out;
-}
-
 /* Class-declaration frame shared by every pass, so PASS 1, PASS 1.5 and
  * PASS 2 compute identical nesting + class QNs. `raw_name` is the name
  * field's source text (the extractor's spelling, "Admin::User"); `qn` is
- * the extractor-shaped class QN; `path` is the dotted constant-table path. */
+ * the extractor-shaped class QN; `path` is the dotted name of this frame. */
 typedef struct {
     const char *raw_name;
     const char *path;
@@ -259,7 +247,7 @@ static bool ruby_class_enter(RubyLSPContext *ctx, TSNode node, RubyClassFrame *f
     fr->saved_self_unknown = ctx->self_unknown;
     fr->saved_block_depth = ctx->block_depth;
 
-    fr->path = ruby_path_join(ctx->arena, ruby_dotted(ctx->arena, fr->saved_nesting), cpath);
+    fr->path = cpath;
     if (fr->saved_class)
         fr->qn = cbm_arena_sprintf(ctx->arena, "%s.%s", fr->saved_class, fr->raw_name);
     else if (ctx->module_qn)
@@ -293,61 +281,6 @@ static bool ruby_is_project_qn(RubyLSPContext *ctx, const char *qn) {
     const char *dot = strchr(ctx->module_qn, '.');
     size_t plen = dot ? (size_t)(dot - ctx->module_qn) : strlen(ctx->module_qn);
     return strncmp(qn, ctx->module_qn, plen) == 0 && qn[plen] == '.';
-}
-
-/* ── table growth helpers ───────────────────────────────────────── */
-
-static RubyClassInfo *ruby_add_class(RubyLSPContext *ctx, const char *path, const char *qn,
-                                     bool is_module) {
-    if (!ctx || !path || !qn)
-        return NULL;
-    /* Reopened class/module: reuse the existing record. Keyed on the
-     * extractor QN, so `module A; class B` and `class A::B` in one file each
-     * keep their own spelling (constant lookup returns whichever was
-     * declared first; a miss on the other fails closed at the join). */
-    for (int i = 0; i < ctx->class_count; i++) {
-        if (strcmp(ctx->classes[i].qn, qn) == 0)
-            return &ctx->classes[i];
-    }
-    if (ctx->class_count >= ctx->class_cap) {
-        int newcap = ctx->class_cap ? ctx->class_cap * 2 : 8;
-        RubyClassInfo *nc =
-            (RubyClassInfo *)cbm_arena_alloc(ctx->arena, (size_t)newcap * sizeof(RubyClassInfo));
-        if (!nc)
-            return NULL;
-        for (int i = 0; i < ctx->class_count; i++)
-            nc[i] = ctx->classes[i];
-        ctx->classes = nc;
-        ctx->class_cap = newcap;
-    }
-    RubyClassInfo *ci = &ctx->classes[ctx->class_count++];
-    memset(ci, 0, sizeof(*ci));
-    ci->path = cbm_arena_strdup(ctx->arena, path);
-    ci->qn = cbm_arena_strdup(ctx->arena, qn);
-    ci->is_module = is_module;
-    return ci;
-}
-
-static void ruby_add_mixin(RubyLSPContext *ctx, const char *owner_qn, const char *module_ref,
-                           RubyMixinKind kind) {
-    if (!ctx || !owner_qn || !module_ref)
-        return;
-    if (ctx->mixin_count >= ctx->mixin_cap) {
-        int newcap = ctx->mixin_cap ? ctx->mixin_cap * 2 : 8;
-        RubyMixinInfo *nm =
-            (RubyMixinInfo *)cbm_arena_alloc(ctx->arena, (size_t)newcap * sizeof(RubyMixinInfo));
-        if (!nm)
-            return;
-        for (int i = 0; i < ctx->mixin_count; i++)
-            nm[i] = ctx->mixins[i];
-        ctx->mixins = nm;
-        ctx->mixin_cap = newcap;
-    }
-    RubyMixinInfo *mi = &ctx->mixins[ctx->mixin_count++];
-    memset(mi, 0, sizeof(*mi));
-    mi->owner_qn = cbm_arena_strdup(ctx->arena, owner_qn);
-    mi->module_ref = cbm_arena_strdup(ctx->arena, module_ref);
-    mi->kind = kind;
 }
 
 /* Find-or-create the (class, @ivar) record. `type_qn` may be NULL when the
@@ -417,20 +350,119 @@ static const char *ruby_ivar_type(RubyLSPContext *ctx, const char *class_qn,
     return NULL;
 }
 
-static RubyClassInfo *ruby_class_by_qn(RubyLSPContext *ctx, const char *qn) {
+#ifdef CBM_ENABLE_TEST_SEAMS
+/* C reference for the ancestry table that moved to ruby_lookup.rs. Seam
+ * builds keep it so tests can run both implementations on the same inputs,
+ * directly or through cbm_run_ruby_lsp with cbm_ruby_lookup_c_reference set;
+ * production calls only the Rust exports. */
+
+_Thread_local bool cbm_ruby_lookup_c_reference;
+
+typedef struct {
+    const char *path;
+    const char *qn;
+    const char *superclass_ref; /* raw dotted superclass spelling, or NULL */
+    const char *superclass_qn;  /* resolved QN (table/stdlib), or NULL */
+    unsigned int seen_instance;
+    unsigned int seen_singleton;
+} RubyRefClass;
+
+typedef struct {
+    const char *owner_qn;
+    const char *module_ref;
+    const char *module_qn;
+    RubyMixinKind kind;
+} RubyRefMixin;
+
+typedef struct {
+    CBMArena arena;
+    RubyRefClass *classes;
+    int class_count;
+    int class_cap;
+    RubyRefMixin *mixins;
+    int mixin_count;
+    int mixin_cap;
+    unsigned int lookup_stamp;
+} RubyRefAncestry;
+
+static const char *ruby_ref_dotted(CBMArena *a, const char *raw) {
+    if (!raw)
+        return NULL;
+    size_t n = strlen(raw);
+    char *out = (char *)cbm_arena_alloc(a, n + 1);
+    if (!out)
+        return raw;
+    size_t j = 0;
+    for (size_t i = 0; i < n; i++) {
+        if (raw[i] == ':' && i + 1 < n && raw[i + 1] == ':') {
+            out[j++] = '.';
+            i++;
+            continue;
+        }
+        out[j++] = raw[i];
+    }
+    out[j] = '\0';
+    return out;
+}
+
+static RubyRefClass *ruby_ref_add_class(RubyRefAncestry *a, const char *path, const char *qn) {
+    if (!path || !qn)
+        return NULL;
+    for (int i = 0; i < a->class_count; i++) {
+        if (strcmp(a->classes[i].qn, qn) == 0)
+            return &a->classes[i];
+    }
+    if (a->class_count >= a->class_cap) {
+        int newcap = a->class_cap ? a->class_cap * 2 : 8;
+        RubyRefClass *nc =
+            (RubyRefClass *)cbm_arena_alloc(&a->arena, (size_t)newcap * sizeof(RubyRefClass));
+        if (!nc)
+            return NULL;
+        for (int i = 0; i < a->class_count; i++)
+            nc[i] = a->classes[i];
+        a->classes = nc;
+        a->class_cap = newcap;
+    }
+    RubyRefClass *ci = &a->classes[a->class_count++];
+    memset(ci, 0, sizeof(*ci));
+    ci->path = cbm_arena_strdup(&a->arena, path);
+    ci->qn = cbm_arena_strdup(&a->arena, qn);
+    return ci;
+}
+
+static void ruby_ref_add_mixin(RubyRefAncestry *a, const char *owner_qn, const char *module_ref,
+                               RubyMixinKind kind) {
+    if (!owner_qn || !module_ref)
+        return;
+    if (a->mixin_count >= a->mixin_cap) {
+        int newcap = a->mixin_cap ? a->mixin_cap * 2 : 8;
+        RubyRefMixin *nm =
+            (RubyRefMixin *)cbm_arena_alloc(&a->arena, (size_t)newcap * sizeof(RubyRefMixin));
+        if (!nm)
+            return;
+        for (int i = 0; i < a->mixin_count; i++)
+            nm[i] = a->mixins[i];
+        a->mixins = nm;
+        a->mixin_cap = newcap;
+    }
+    RubyRefMixin *mi = &a->mixins[a->mixin_count++];
+    memset(mi, 0, sizeof(*mi));
+    mi->owner_qn = cbm_arena_strdup(&a->arena, owner_qn);
+    mi->module_ref = cbm_arena_strdup(&a->arena, module_ref);
+    mi->kind = kind;
+}
+
+static RubyRefClass *ruby_ref_class_by_qn(RubyRefAncestry *a, const char *qn) {
     if (!qn)
         return NULL;
-    for (int i = 0; i < ctx->class_count; i++) {
-        if (strcmp(ctx->classes[i].qn, qn) == 0)
-            return &ctx->classes[i];
+    for (int i = 0; i < a->class_count; i++) {
+        if (strcmp(a->classes[i].qn, qn) == 0)
+            return &a->classes[i];
     }
     return NULL;
 }
 
-/* Conventional Rails superclasses for stdlib-seeded types the class table
- * does not carry (per-file extraction cannot see app/models/
- * application_record.rb from another file; the convention is fixed). */
-static const char *ruby_stdlib_superclass(const char *qn) {
+static const char *ruby_ref_stdlib_superclass(const char *qn) {
     if (!qn)
         return NULL;
     if (strcmp(qn, "ApplicationRecord") == 0)
@@ -444,44 +476,33 @@ static const char *ruby_stdlib_superclass(const char *qn) {
     return NULL;
 }
 
-/* Superclass QN of a class: table entry first, then the conventional
- * stdlib chain above. */
-static const char *ruby_superclass_qn(RubyLSPContext *ctx, const char *class_qn) {
-    RubyClassInfo *ci = ruby_class_by_qn(ctx, class_qn);
+static const char *ruby_ref_superclass_qn(RubyRefAncestry *a, const char *class_qn) {
+    RubyRefClass *ci = ruby_ref_class_by_qn(a, class_qn);
     if (ci)
         return ci->superclass_qn;
-    return ruby_stdlib_superclass(class_qn);
+    return ruby_ref_stdlib_superclass(class_qn);
 }
 
-/* ── constant resolution ────────────────────────────────────────── */
-
-/* Class-table probe by dotted path. */
-static const char *ruby_class_qn_by_path(RubyLSPContext *ctx, const char *path) {
-    for (int i = 0; i < ctx->class_count; i++) {
-        if (strcmp(ctx->classes[i].path, path) == 0)
-            return ctx->classes[i].qn;
+static const char *ruby_ref_class_qn_by_path(RubyRefAncestry *a, const char *path) {
+    for (int i = 0; i < a->class_count; i++) {
+        if (strcmp(a->classes[i].path, path) == 0)
+            return a->classes[i].qn;
     }
     return NULL;
 }
 
-const char *ruby_resolve_constant(RubyLSPContext *ctx, const char *path) {
-    if (!ctx || !path || !path[0])
+static const char *ruby_ref_constant(RubyRefAncestry *a, const char *nesting, const char *path) {
+    if (!path || !path[0])
         return NULL;
-    /* Lexical nesting probe, innermost frame first — Ruby's constant lookup
-     * order. The nesting string holds one RAW frame per declaration joined
-     * by '.', so stripping at the last '.' drops exactly one frame: inside
-     * `module M; class A::B` (nesting "M.A::B") the probes are "M.A.B.path",
-     * "M.path", "path" — never "M.A.path", because `class A::B` does not
-     * open A's scope. */
-    const char *nest = ctx->nesting ? ctx->nesting : "";
+    const char *nest = nesting ? nesting : "";
     char prefix[512];
     size_t nlen = strlen(nest);
     if (nlen < sizeof(prefix)) {
         memcpy(prefix, nest, nlen + 1);
         while (prefix[0]) {
             const char *cand =
-                cbm_arena_sprintf(ctx->arena, "%s.%s", ruby_dotted(ctx->arena, prefix), path);
-            const char *qn = ruby_class_qn_by_path(ctx, cand);
+                cbm_arena_sprintf(&a->arena, "%s.%s", ruby_ref_dotted(&a->arena, prefix), path);
+            const char *qn = ruby_ref_class_qn_by_path(a, cand);
             if (qn)
                 return qn;
             char *last_dot = strrchr(prefix, '.');
@@ -491,75 +512,34 @@ const char *ruby_resolve_constant(RubyLSPContext *ctx, const char *path) {
                 prefix[0] = '\0';
         }
     }
-    const char *qn = ruby_class_qn_by_path(ctx, path);
-    if (qn)
-        return qn;
-    /* Stdlib types are keyed by their dotted bare path. */
-    const CBMRegisteredType *t = cbm_registry_lookup_type(ctx->registry, path);
-    if (t)
-        return t->qualified_name;
-    return NULL;
+    return ruby_ref_class_qn_by_path(a, path);
 }
 
-/* ── method lookup (Ruby MRO approximation) ─────────────────────── */
-
-/* Depth cap shared by the instance/singleton lookup walks. */
-#define RUBY_LOOKUP_MAX_DEPTH CBM_LSP_MAX_LOOKUP_DEPTH
-
-/* Own instance method of one exact class (no ancestry walk). */
-static const CBMRegisteredFunc *ruby_own_instance_method(RubyLSPContext *ctx, const char *class_qn,
-                                                         const char *method_name) {
-    return cbm_registry_lookup_method(ctx->registry, class_qn, method_name);
-}
-
-/* Own singleton method of one exact class ("<qn>.self" receiver key). */
-static const CBMRegisteredFunc *ruby_own_singleton_method(RubyLSPContext *ctx, const char *class_qn,
-                                                          const char *method_name) {
-    const char *key = cbm_arena_sprintf(ctx->arena, "%s.self", class_qn);
-    return cbm_registry_lookup_method(ctx->registry, key, method_name);
-}
-
-/* Fail-closed ancestry. Every lookup below carries a `blocked` flag that is
- * set the moment the walk meets an ancestor it cannot see: a mixin whose
- * module did not resolve, or a superclass reference that did not resolve.
- * An unseen ancestor may define (or, for a prepend, shadow) the method, so
- * from that point on no hit is trustworthy and callers must emit nothing —
- * including NOT falling through to a same-named top-level def or to the
- * Object typing fallback. Hits found BEFORE the unseen ancestor in Ruby's
- * lookup order are still returned.
- *
- * Each lookup is one walk: the `blocked` flag plus a visit stamp. Ruby
- * linearizes ancestors, so a module reached a second time in one walk
- * (`prepend M; include M`, two includes sharing a module) was already
- * searched and missed: a hit or a block would have ended the walk. Skipping
- * the repeat keeps a lookup linear in the ancestors it can see; without it
- * every module that both prepends and includes the next one doubles the
- * paths per level. */
 typedef struct {
     bool blocked;
     unsigned int stamp;
-} RubyLookupWalk;
+    uint64_t steps;
+    uint32_t max_depth;
+    const void *registry;
+    RubyMethodLookup lookup;
+} RubyRefWalk;
 
-static RubyLookupWalk ruby_walk_begin(RubyLSPContext *ctx) {
-    if (++ctx->lookup_stamp == 0) {
-        /* Wrapped: clear every mark so no class looks visited. */
-        for (int i = 0; i < ctx->class_count; i++) {
-            ctx->classes[i].seen_instance = 0;
-            ctx->classes[i].seen_singleton = 0;
+static RubyRefWalk ruby_ref_walk_begin(RubyRefAncestry *a, const void *registry,
+                                       RubyMethodLookup lookup, uint32_t max_depth) {
+    if (++a->lookup_stamp == 0) {
+        for (int i = 0; i < a->class_count; i++) {
+            a->classes[i].seen_instance = 0;
+            a->classes[i].seen_singleton = 0;
         }
-        ctx->lookup_stamp = 1;
+        a->lookup_stamp = 1;
     }
-    RubyLookupWalk w = {false, ctx->lookup_stamp};
+    RubyRefWalk w = {false, a->lookup_stamp, 0, max_depth, registry, lookup};
     return w;
 }
 
-/* Marks `class_qn` searched on one side (instance or singleton) in this walk;
- * true when it already was. Only the file's class table is marked: mixins
- * and superclass refs are recorded for those classes alone, so a type outside
- * the table (a stdlib type) has nothing to expand and is never a repeat. */
-static bool ruby_walk_seen(RubyLSPContext *ctx, RubyLookupWalk *w, const char *class_qn,
-                           bool singleton) {
-    RubyClassInfo *ci = ruby_class_by_qn(ctx, class_qn);
+static bool ruby_ref_walk_seen(RubyRefAncestry *a, RubyRefWalk *w, const char *class_qn,
+                               bool singleton) {
+    RubyRefClass *ci = ruby_ref_class_by_qn(a, class_qn);
     if (!ci)
         return false;
     unsigned int *mark = singleton ? &ci->seen_singleton : &ci->seen_instance;
@@ -569,150 +549,269 @@ static bool ruby_walk_seen(RubyLSPContext *ctx, RubyLookupWalk *w, const char *c
     return false;
 }
 
-static const CBMRegisteredFunc *ruby_lookup_instance_method_depth(RubyLSPContext *ctx,
-                                                                  const char *class_qn,
-                                                                  const char *method_name,
-                                                                  int depth, RubyLookupWalk *w);
-
-/* True when the class declares a superclass the finalize step could not
- * resolve (stdlib-seeded conventions like ApplicationRecord DO resolve). */
-static bool ruby_superclass_unresolved(RubyLSPContext *ctx, const char *class_qn) {
-    RubyClassInfo *ci = ruby_class_by_qn(ctx, class_qn);
+static bool ruby_ref_superclass_unresolved(RubyRefAncestry *a, const char *class_qn) {
+    RubyRefClass *ci = ruby_ref_class_by_qn(a, class_qn);
     return ci && ci->superclass_ref && !ci->superclass_qn;
 }
 
-/* Search a mixin kind on `owner_qn` (most recent first — later mixins win),
- * recursing into each module's own include chain. An UNRESOLVED mixin met
- * before any hit blocks the walk. */
-static const CBMRegisteredFunc *ruby_lookup_in_mixins(RubyLSPContext *ctx, const char *owner_qn,
-                                                      RubyMixinKind kind, const char *method_name,
-                                                      int depth, RubyLookupWalk *w) {
-    for (int i = ctx->mixin_count - 1; i >= 0; i--) {
-        RubyMixinInfo *mi = &ctx->mixins[i];
+static const CBMRegisteredFunc *ruby_ref_instance_depth(RubyRefAncestry *a, const char *class_qn,
+                                                        const char *name, uint32_t depth,
+                                                        RubyRefWalk *w);
+
+static const CBMRegisteredFunc *ruby_ref_in_mixins(RubyRefAncestry *a, const char *owner_qn,
+                                                   RubyMixinKind kind, const char *name,
+                                                   uint32_t depth, RubyRefWalk *w) {
+    for (int i = a->mixin_count - 1; i >= 0; i--) {
+        RubyRefMixin *mi = &a->mixins[i];
         if (mi->kind != kind || strcmp(mi->owner_qn, owner_qn) != 0)
             continue;
         if (!mi->module_qn) {
-            w->blocked = true; /* unseen module — it may define/shadow the method */
+            w->blocked = true;
             return NULL;
         }
-        const CBMRegisteredFunc *f =
-            ruby_lookup_instance_method_depth(ctx, mi->module_qn, method_name, depth + 1, w);
+        const CBMRegisteredFunc *f = ruby_ref_instance_depth(a, mi->module_qn, name, depth + 1, w);
         if (f || w->blocked)
             return f;
     }
     return NULL;
 }
 
-static const CBMRegisteredFunc *ruby_lookup_instance_method_depth(RubyLSPContext *ctx,
-                                                                  const char *class_qn,
-                                                                  const char *method_name,
-                                                                  int depth, RubyLookupWalk *w) {
-    if (!ctx || !class_qn || !method_name || depth > RUBY_LOOKUP_MAX_DEPTH)
+static const CBMRegisteredFunc *ruby_ref_instance_depth(RubyRefAncestry *a, const char *class_qn,
+                                                        const char *name, uint32_t depth,
+                                                        RubyRefWalk *w) {
+    if (!class_qn || !name || depth > w->max_depth)
         return NULL;
-    CBM_LSP_WORK(1);
-    if (ruby_walk_seen(ctx, w, class_qn, false))
-        return NULL; /* searched earlier in this walk: a repeat can only miss */
-    /* Prepended modules shadow the class's own methods — an unresolved
-     * prepend therefore blocks even an own-method hit. */
+    w->steps++;
+    if (ruby_ref_walk_seen(a, w, class_qn, false))
+        return NULL;
     const CBMRegisteredFunc *f =
-        ruby_lookup_in_mixins(ctx, class_qn, RUBY_MIXIN_PREPEND, method_name, depth, w);
+        ruby_ref_in_mixins(a, class_qn, RUBY_MIXIN_PREPEND, name, depth, w);
     if (f || w->blocked)
         return f;
-    f = ruby_own_instance_method(ctx, class_qn, method_name);
+    f = w->lookup(w->registry, class_qn, name);
     if (f)
         return f;
-    /* An unresolved include stops the walk before the superclass chain. */
-    f = ruby_lookup_in_mixins(ctx, class_qn, RUBY_MIXIN_INCLUDE, method_name, depth, w);
+    f = ruby_ref_in_mixins(a, class_qn, RUBY_MIXIN_INCLUDE, name, depth, w);
     if (f || w->blocked)
         return f;
-    if (ruby_superclass_unresolved(ctx, class_qn)) {
+    if (ruby_ref_superclass_unresolved(a, class_qn)) {
         w->blocked = true;
         return NULL;
     }
-    const char *sup = ruby_superclass_qn(ctx, class_qn);
+    const char *sup = ruby_ref_superclass_qn(a, class_qn);
     if (sup && strcmp(sup, class_qn) != 0)
-        return ruby_lookup_instance_method_depth(ctx, sup, method_name, depth + 1, w);
+        return ruby_ref_instance_depth(a, sup, name, depth + 1, w);
     return NULL;
 }
 
-/* Instance lookup with the universal-receiver typing fallback. Skipped when
- * the ancestry is blocked: nothing below the unseen ancestor is trustworthy. */
-static const CBMRegisteredFunc *ruby_lookup_instance_method_b(RubyLSPContext *ctx,
-                                                              const char *class_qn,
-                                                              const char *method_name,
-                                                              RubyLookupWalk *w) {
-    const CBMRegisteredFunc *f =
-        ruby_lookup_instance_method_depth(ctx, class_qn, method_name, 0, w);
-    if (f || w->blocked)
-        return f;
-    /* Universal receiver fallback (Object / ActiveSupport predicates) —
-     * typing only; Object methods are stdlib entries, never project defs. */
-    if (class_qn && strcmp(class_qn, "Object") != 0)
-        return cbm_registry_lookup_method(ctx->registry, "Object", method_name);
-    return NULL;
-}
-
-const CBMRegisteredFunc *ruby_lookup_instance_method(RubyLSPContext *ctx, const char *class_qn,
-                                                     const char *method_name) {
-    if (!ctx)
+static const CBMRegisteredFunc *ruby_ref_singleton_depth(RubyRefAncestry *a, const char *class_qn,
+                                                         const char *name, uint32_t depth,
+                                                         RubyRefWalk *w) {
+    if (!class_qn || !name || depth > w->max_depth)
         return NULL;
-    RubyLookupWalk w = ruby_walk_begin(ctx);
-    return ruby_lookup_instance_method_b(ctx, class_qn, method_name, &w);
-}
-
-static const CBMRegisteredFunc *ruby_lookup_singleton_method_depth(RubyLSPContext *ctx,
-                                                                   const char *class_qn,
-                                                                   const char *method_name,
-                                                                   int depth, RubyLookupWalk *w) {
-    if (!ctx || !class_qn || !method_name || depth > RUBY_LOOKUP_MAX_DEPTH)
+    w->steps++;
+    if (ruby_ref_walk_seen(a, w, class_qn, true))
         return NULL;
-    CBM_LSP_WORK(1);
-    if (ruby_walk_seen(ctx, w, class_qn, true))
-        return NULL; /* searched earlier in this walk: a repeat can only miss */
-    const CBMRegisteredFunc *f = ruby_own_singleton_method(ctx, class_qn, method_name);
+    const char *key = cbm_arena_sprintf(&a->arena, "%s.self", class_qn);
+    const CBMRegisteredFunc *f = w->lookup(w->registry, key, name);
     if (f)
         return f;
-    /* `extend Mod` adds Mod's instance methods class-side. */
-    f = ruby_lookup_in_mixins(ctx, class_qn, RUBY_MIXIN_EXTEND, method_name, depth, w);
+    f = ruby_ref_in_mixins(a, class_qn, RUBY_MIXIN_EXTEND, name, depth, w);
     if (f || w->blocked)
         return f;
-    if (ruby_superclass_unresolved(ctx, class_qn)) {
+    if (ruby_ref_superclass_unresolved(a, class_qn)) {
         w->blocked = true;
         return NULL;
     }
-    const char *sup = ruby_superclass_qn(ctx, class_qn);
+    const char *sup = ruby_ref_superclass_qn(a, class_qn);
     if (sup && strcmp(sup, class_qn) != 0)
-        return ruby_lookup_singleton_method_depth(ctx, sup, method_name, depth + 1, w);
+        return ruby_ref_singleton_depth(a, sup, name, depth + 1, w);
     return NULL;
 }
 
-const CBMRegisteredFunc *ruby_lookup_singleton_method(RubyLSPContext *ctx, const char *class_qn,
-                                                      const char *method_name) {
-    if (!ctx)
-        return NULL;
-    RubyLookupWalk w = ruby_walk_begin(ctx);
-    return ruby_lookup_singleton_method_depth(ctx, class_qn, method_name, 0, &w);
-}
-
-/* ── ActiveRecord model detection (typing special case) ─────────── */
-
-/* True when class_qn's superclass chain reaches ActiveRecord::Base (or the
- * conventional ApplicationRecord intermediary, which per-file extraction
- * usually cannot see through). */
-static bool ruby_is_ar_model(RubyLSPContext *ctx, const char *class_qn, int depth) {
-    if (!class_qn || depth > RUBY_LOOKUP_MAX_DEPTH)
+static bool ruby_ref_is_ar_model(RubyRefAncestry *a, const char *class_qn, uint32_t depth,
+                                 uint32_t max_depth) {
+    if (!class_qn || depth > max_depth)
         return false;
     if (strcmp(class_qn, "ActiveRecord.Base") == 0 || strcmp(class_qn, "ApplicationRecord") == 0)
         return true;
-    RubyClassInfo *ci = ruby_class_by_qn(ctx, class_qn);
+    RubyRefClass *ci = ruby_ref_class_by_qn(a, class_qn);
     if (ci && ci->superclass_ref &&
         (strcmp(ci->superclass_ref, "ApplicationRecord") == 0 ||
          strcmp(ci->superclass_ref, "ActiveRecord.Base") == 0))
         return true;
-    const char *sup = ruby_superclass_qn(ctx, class_qn);
+    const char *sup = ruby_ref_superclass_qn(a, class_qn);
     if (sup && strcmp(sup, class_qn) != 0)
-        return ruby_is_ar_model(ctx, sup, depth + 1);
+        return ruby_ref_is_ar_model(a, sup, depth + 1, max_depth);
     return false;
+}
+
+/* PASS-1 refs are packed as "<nesting>|<ref>" (bare "<ref>" at top level)
+ * and resolved once the class table is complete. */
+static const char *ruby_ref_pack(RubyRefAncestry *a, const char *nesting, const char *ref) {
+    const char *nest = nesting ? nesting : "";
+    if (!nest[0])
+        return ref;
+    return cbm_arena_sprintf(&a->arena, "%s|%s", nest, ref);
+}
+
+static const char *ruby_ref_resolve_packed(RubyRefAncestry *a, const void *registry,
+                                           RubyTypeLookup lookup, const char *packed) {
+    if (!packed)
+        return NULL;
+    const char *bar = strchr(packed, '|');
+    const char *nesting = "";
+    const char *ref = packed;
+    if (bar) {
+        nesting = cbm_arena_strndup(&a->arena, packed, (size_t)(bar - packed));
+        ref = bar + 1;
+    }
+    if (!ref[0])
+        return NULL;
+    const char *qn = ruby_ref_constant(a, nesting, ref);
+    return qn ? qn : lookup(registry, ref);
+}
+
+static const char *ruby_ref_packed_bare(const char *packed) {
+    if (!packed)
+        return NULL;
+    const char *bar = strchr(packed, '|');
+    return bar ? bar + 1 : packed;
+}
+
+RubyAncestry *cbm_ruby_ancestry_c_new(void) {
+    RubyRefAncestry *a = (RubyRefAncestry *)calloc(1, sizeof(RubyRefAncestry));
+    if (a)
+        cbm_arena_init(&a->arena);
+    return (RubyAncestry *)a;
+}
+
+void cbm_ruby_ancestry_c_free(RubyAncestry *ancestry) {
+    RubyRefAncestry *a = (RubyRefAncestry *)ancestry;
+    if (!a)
+        return;
+    cbm_arena_destroy(&a->arena);
+    free(a);
+}
+
+void cbm_ruby_ancestry_c_declare(RubyAncestry *ancestry, const char *qn, const char *nesting,
+                                 const char *path, const char *parent) {
+    RubyRefAncestry *a = (RubyRefAncestry *)ancestry;
+    if (!qn)
+        return;
+    const char *full = ruby_path_join(&a->arena, ruby_ref_dotted(&a->arena, nesting), path);
+    RubyRefClass *ci = ruby_ref_add_class(a, full, qn);
+    if (ci && parent && !ci->superclass_ref)
+        ci->superclass_ref = ruby_ref_pack(a, nesting, parent);
+}
+
+void cbm_ruby_ancestry_c_mixin(RubyAncestry *ancestry, const char *owner, const char *nesting,
+                               const char *path, int kind) {
+    RubyRefAncestry *a = (RubyRefAncestry *)ancestry;
+    if (kind < RUBY_MIXIN_INCLUDE || kind > RUBY_MIXIN_EXTEND)
+        return;
+    ruby_ref_add_mixin(a, owner, ruby_ref_pack(a, nesting, path), (RubyMixinKind)kind);
+}
+
+void cbm_ruby_ancestry_c_finalize(RubyAncestry *ancestry, const void *registry,
+                                  RubyTypeLookup lookup) {
+    RubyRefAncestry *a = (RubyRefAncestry *)ancestry;
+    for (int i = 0; i < a->class_count; i++) {
+        RubyRefClass *ci = &a->classes[i];
+        if (ci->superclass_ref) {
+            ci->superclass_qn = ruby_ref_resolve_packed(a, registry, lookup, ci->superclass_ref);
+            ci->superclass_ref = ruby_ref_packed_bare(ci->superclass_ref);
+        }
+    }
+    for (int i = 0; i < a->mixin_count; i++) {
+        RubyRefMixin *mi = &a->mixins[i];
+        mi->module_qn = ruby_ref_resolve_packed(a, registry, lookup, mi->module_ref);
+        mi->module_ref = ruby_ref_packed_bare(mi->module_ref);
+    }
+}
+
+const char *cbm_ruby_ancestry_c_constant(const RubyAncestry *ancestry, const char *nesting,
+                                         const char *path) {
+    return ruby_ref_constant((RubyRefAncestry *)ancestry, nesting, path);
+}
+
+RubyMethodResult cbm_ruby_ancestry_c_lookup(const RubyAncestry *ancestry, const void *registry,
+                                            RubyMethodLookup lookup, const char *qn,
+                                            const char *name, bool singleton, int search,
+                                            uint32_t max_depth) {
+    RubyRefAncestry *a = (RubyRefAncestry *)ancestry;
+    RubyMethodResult result = {NULL, false, 0};
+    if (!qn || !name || search < RUBY_LOOKUP_RECEIVER || search > RUBY_LOOKUP_SUPER)
+        return result;
+    RubyRefWalk w = ruby_ref_walk_begin(a, registry, lookup, max_depth);
+    const CBMRegisteredFunc *f = NULL;
+    if (search == RUBY_LOOKUP_SUPER) {
+        /* Includes (or extends) of the class, then the superclass chain: the
+         * class's own def is the caller and is skipped. */
+        f = ruby_ref_in_mixins(a, qn, singleton ? RUBY_MIXIN_EXTEND : RUBY_MIXIN_INCLUDE, name, 0,
+                               &w);
+        if (!f && !w.blocked && !ruby_ref_superclass_unresolved(a, qn)) {
+            const char *sup = ruby_ref_superclass_qn(a, qn);
+            if (sup) {
+                f = singleton ? ruby_ref_singleton_depth(a, sup, name, 0, &w)
+                              : ruby_ref_instance_depth(a, sup, name, 0, &w);
+            }
+        }
+        if (w.blocked)
+            f = NULL;
+    } else if (singleton) {
+        f = ruby_ref_singleton_depth(a, qn, name, 0, &w);
+    } else {
+        f = ruby_ref_instance_depth(a, qn, name, 0, &w);
+        /* Universal receiver typing fallback after a clean miss. */
+        if (!f && !w.blocked && search == RUBY_LOOKUP_RECEIVER && strcmp(qn, "Object") != 0)
+            f = lookup(registry, "Object", name);
+    }
+    result.target = f;
+    result.blocked = w.blocked;
+    result.steps = w.steps;
+    return result;
+}
+
+bool cbm_ruby_ancestry_c_is_ar_model(const RubyAncestry *ancestry, const char *qn,
+                                     uint32_t max_depth) {
+    return ruby_ref_is_ar_model((RubyRefAncestry *)ancestry, qn, 0, max_depth);
+}
+
+size_t cbm_ruby_ancestry_c_counts(const RubyAncestry *ancestry, size_t *mixins) {
+    const RubyRefAncestry *a = (const RubyRefAncestry *)ancestry;
+    *mixins = (size_t)a->mixin_count;
+    return (size_t)a->class_count;
+}
+#endif /* CBM_ENABLE_TEST_SEAMS */
+
+/* Native registry probes for the file-local Rust ancestry table. */
+static const char *ruby_builtin_type(const void *registry, const char *path) {
+    const CBMRegisteredType *t = cbm_registry_lookup_type(registry, path);
+    return t ? t->qualified_name : NULL;
+}
+
+static const CBMRegisteredFunc *ruby_registry_method(const void *registry, const char *receiver,
+                                                     const char *name) {
+    return cbm_registry_lookup_method(registry, receiver, name);
+}
+
+/* Local QNs are borrowed from ancestry. Callers that retain them in the file
+ * result must copy them into the file arena. */
+const char *ruby_resolve_constant(RubyLSPContext *ctx, const char *path) {
+    if (!ctx || !path || !path[0])
+        return NULL;
+    const char *qn = RUBY_ANCESTRY(constant)(ctx->ancestry, ctx->nesting ? ctx->nesting : "", path);
+    return qn ? qn : ruby_builtin_type(ctx->registry, path);
+}
+
+static RubyMethodResult ruby_find_method(RubyLSPContext *ctx, const char *qn, const char *name,
+                                         bool singleton, RubySearch search) {
+    RubyMethodResult result =
+        RUBY_ANCESTRY(lookup)(ctx->ancestry, ctx->registry, ruby_registry_method, qn, name,
+                              singleton, search, CBM_LSP_MAX_LOOKUP_DEPTH);
+    CBM_LSP_WORK(result.steps);
+    return result;
 }
 
 /* ActiveRecord class-side query methods that return the model (or a
@@ -913,7 +1012,8 @@ static bool ruby_is_body_macro(const char *m) {
  * special case (User.find -> User). */
 static const CBMType *ruby_dispatch_singleton(RubyLSPContext *ctx, const char *class_qn,
                                               const char *mname, bool emit, TSNode site) {
-    const CBMRegisteredFunc *f = ruby_lookup_singleton_method(ctx, class_qn, mname);
+    const CBMRegisteredFunc *f =
+        ruby_find_method(ctx, class_qn, mname, true, RUBY_LOOKUP_RECEIVER).target;
     if (f) {
         if (emit)
             ruby_emit_resolved(ctx, f->qualified_name, "ruby_class_method", RUBY_CONF_HIGH, site);
@@ -921,11 +1021,13 @@ static const CBMType *ruby_dispatch_singleton(RubyLSPContext *ctx, const char *c
         if (!cbm_type_is_unknown(rt))
             return rt;
         /* Stdlib AR query entries return unknown; substitute the model. */
-        if (ruby_is_ar_model(ctx, class_qn, 0) && ruby_ar_returns_model(mname))
+        if (RUBY_ANCESTRY(is_ar_model)(ctx->ancestry, class_qn, CBM_LSP_MAX_LOOKUP_DEPTH) &&
+            ruby_ar_returns_model(mname))
             return cbm_type_named(ctx->arena, class_qn);
         return rt;
     }
-    if (ruby_is_ar_model(ctx, class_qn, 0) && ruby_ar_returns_model(mname))
+    if (RUBY_ANCESTRY(is_ar_model)(ctx->ancestry, class_qn, CBM_LSP_MAX_LOOKUP_DEPTH) &&
+        ruby_ar_returns_model(mname))
         return cbm_type_named(ctx->arena, class_qn);
     return cbm_type_unknown();
 }
@@ -934,7 +1036,8 @@ static const CBMType *ruby_dispatch_singleton(RubyLSPContext *ctx, const char *c
 static const CBMType *ruby_dispatch_instance(RubyLSPContext *ctx, const char *class_qn,
                                              const char *mname, const char *strategy, bool emit,
                                              TSNode site) {
-    const CBMRegisteredFunc *f = ruby_lookup_instance_method(ctx, class_qn, mname);
+    const CBMRegisteredFunc *f =
+        ruby_find_method(ctx, class_qn, mname, false, RUBY_LOOKUP_RECEIVER).target;
     if (!f)
         return cbm_type_unknown();
     if (emit)
@@ -970,7 +1073,8 @@ static const CBMType *ruby_eval_call_type(RubyLSPContext *ctx, TSNode call, bool
             const char *cqn = ruby_resolve_constant(ctx, cpath);
             if (cqn) {
                 if (emit)
-                    ruby_emit_resolved(ctx, cqn, "ruby_constructor", RUBY_CONF_HIGH, call);
+                    ruby_emit_resolved(ctx, cbm_arena_strdup(ctx->arena, cqn), "ruby_constructor",
+                                       RUBY_CONF_HIGH, call);
                 return cbm_type_named(ctx->arena, cqn);
             }
             return cbm_type_unknown();
@@ -985,11 +1089,9 @@ static const CBMType *ruby_eval_call_type(RubyLSPContext *ctx, TSNode call, bool
         if (ctx->self_unknown)
             return cbm_type_unknown(); /* receiver is a rebound self — zero-edge */
         if (ctx->enclosing_class_qn) {
-            RubyLookupWalk w = ruby_walk_begin(ctx);
-            const CBMRegisteredFunc *f =
-                ctx->in_singleton_method
-                    ? ruby_lookup_singleton_method_depth(ctx, ctx->enclosing_class_qn, mname, 0, &w)
-                    : ruby_lookup_instance_method_depth(ctx, ctx->enclosing_class_qn, mname, 0, &w);
+            RubyMethodResult lookup = ruby_find_method(ctx, ctx->enclosing_class_qn, mname,
+                                                       ctx->in_singleton_method, RUBY_LOOKUP_SELF);
+            const CBMRegisteredFunc *f = lookup.target;
             if (f) {
                 if (emit)
                     ruby_emit_resolved(ctx, f->qualified_name, "ruby_self_dispatch", RUBY_CONF_HIGH,
@@ -998,7 +1100,7 @@ static const CBMType *ruby_eval_call_type(RubyLSPContext *ctx, TSNode call, bool
             }
             /* An unseen ancestor may define this method: do NOT fall through
              * to a same-named top-level def. */
-            if (w.blocked)
+            if (lookup.blocked)
                 return cbm_type_unknown();
         }
         const CBMRegisteredFunc *f =
@@ -1020,11 +1122,9 @@ static const CBMType *ruby_eval_call_type(RubyLSPContext *ctx, TSNode call, bool
     if (strcmp(rk, "self") == 0) {
         if (!ctx->enclosing_class_qn || ctx->self_unknown)
             return cbm_type_unknown();
-        RubyLookupWalk w = ruby_walk_begin(ctx);
-        const CBMRegisteredFunc *f =
-            ctx->in_singleton_method
-                ? ruby_lookup_singleton_method_depth(ctx, ctx->enclosing_class_qn, mname, 0, &w)
-                : ruby_lookup_instance_method_depth(ctx, ctx->enclosing_class_qn, mname, 0, &w);
+        const CBMRegisteredFunc *f = ruby_find_method(ctx, ctx->enclosing_class_qn, mname,
+                                                      ctx->in_singleton_method, RUBY_LOOKUP_SELF)
+                                         .target;
         if (f) {
             if (emit)
                 ruby_emit_resolved(ctx, f->qualified_name, "ruby_self_dispatch", RUBY_CONF_HIGH,
@@ -1057,7 +1157,9 @@ static const CBMType *ruby_eval_call_type(RubyLSPContext *ctx, TSNode call, bool
     if (!cbm_type_is_unknown(out))
         return out;
     /* AR relation approximation: chains on a model type keep the model. */
-    if (ruby_is_ar_model(ctx, rt->data.named.qualified_name, 0) && ruby_ar_returns_model(mname))
+    if (RUBY_ANCESTRY(is_ar_model)(ctx->ancestry, rt->data.named.qualified_name,
+                                   CBM_LSP_MAX_LOOKUP_DEPTH) &&
+        ruby_ar_returns_model(mname))
         return rt;
     return out;
 }
@@ -1070,23 +1172,10 @@ static void ruby_resolve_super(RubyLSPContext *ctx, TSNode site) {
     const char *fq = ctx->enclosing_func_qn;
     const char *mname = strrchr(fq, '.');
     mname = mname ? mname + 1 : fq;
-    const CBMRegisteredFunc *f = NULL;
-    RubyLookupWalk w = ruby_walk_begin(ctx);
-    /* Search order mirrors Ruby: includes of the class, then superclass
-     * chain — the class's OWN def is the caller and must be skipped. An
-     * unresolved mixin or superclass on the way blocks the walk. */
-    f = ruby_lookup_in_mixins(ctx, ctx->enclosing_class_qn,
-                              ctx->in_singleton_method ? RUBY_MIXIN_EXTEND : RUBY_MIXIN_INCLUDE,
-                              mname, 0, &w);
-    if (!f && !w.blocked && !ruby_superclass_unresolved(ctx, ctx->enclosing_class_qn)) {
-        const char *sup = ruby_superclass_qn(ctx, ctx->enclosing_class_qn);
-        if (sup) {
-            f = ctx->in_singleton_method
-                    ? ruby_lookup_singleton_method_depth(ctx, sup, mname, 0, &w)
-                    : ruby_lookup_instance_method_depth(ctx, sup, mname, 0, &w);
-        }
-    }
-    if (f && !w.blocked)
+    const CBMRegisteredFunc *f = ruby_find_method(ctx, ctx->enclosing_class_qn, mname,
+                                                  ctx->in_singleton_method, RUBY_LOOKUP_SUPER)
+                                     .target;
+    if (f)
         ruby_emit_resolved(ctx, f->qualified_name, "ruby_method_super", RUBY_CONF_HIGH, site);
     /* No known parent or unresolved — zero-edge guarantee. */
 }
@@ -1421,46 +1510,7 @@ static void ruby_register_method(RubyLSPContext *ctx, CBMTypeRegistry *reg, cons
     cbm_registry_add_func(reg, rf);
 }
 
-/* PASS-1 refs are nesting-scoped: the finalize step resolves superclass and
- * mixin references once the class table is complete, so PASS 1 records raw
- * dotted refs plus the nesting string active at the declaration site
- * (packed as "<nesting>|<ref>" when nesting is set). */
-static const char *ruby_pack_ref(RubyLSPContext *ctx, const char *ref) {
-    const char *nest = ctx->nesting ? ctx->nesting : "";
-    if (!nest[0])
-        return ref;
-    return cbm_arena_sprintf(ctx->arena, "%s|%s", nest, ref);
-}
-
-/* Resolve a packed "<nesting>|<ref>" (or bare "<ref>") against the class
- * table + stdlib, honoring the recorded lexical nesting. */
-static const char *ruby_resolve_packed_ref(RubyLSPContext *ctx, const char *packed) {
-    if (!packed)
-        return NULL;
-    const char *bar = strchr(packed, '|');
-    const char *saved_nesting = ctx->nesting;
-    const char *ref = packed;
-    if (bar) {
-        ctx->nesting = cbm_arena_strndup(ctx->arena, packed, (size_t)(bar - packed));
-        ref = bar + 1;
-    } else {
-        ctx->nesting = "";
-    }
-    const char *qn = ruby_resolve_constant(ctx, ref);
-    ctx->nesting = saved_nesting;
-    return qn;
-}
-
-/* Bare ref portion of a packed "<nesting>|<ref>" string. */
-static const char *ruby_packed_bare_ref(const char *packed) {
-    if (!packed)
-        return NULL;
-    const char *bar = strchr(packed, '|');
-    return bar ? bar + 1 : packed;
-}
-
-/* Interpret a class-body `include X` / `prepend X` / `extend X` call,
- * recording the mixin with the nesting packed for finalize-time resolve. */
+/* Collect each mixin reference in its declaring scope for finalization. */
 static void ruby_collect_mixin_call(RubyLSPContext *ctx, TSNode call) {
     if (!ctx->enclosing_class_qn)
         return;
@@ -1490,7 +1540,8 @@ static void ruby_collect_mixin_call(RubyLSPContext *ctx, TSNode call) {
         const char *mpath = ruby_const_path(ctx, ts_node_named_child(args, i));
         if (!mpath)
             continue; /* `extend self` etc. — not a constant */
-        ruby_add_mixin(ctx, ctx->enclosing_class_qn, ruby_pack_ref(ctx, mpath), kind);
+        RUBY_ANCESTRY(mixin)(ctx->ancestry, ctx->enclosing_class_qn,
+                             ctx->nesting ? ctx->nesting : "", mpath, kind);
     }
 }
 
@@ -1498,28 +1549,18 @@ static void ruby_pass1_class(RubyLSPContext *ctx, TSNode node, bool is_module) {
     RubyClassFrame fr;
     if (!ruby_class_enter(ctx, node, &fr))
         return;
-    RubyClassInfo *ci = ruby_add_class(ctx, fr.path, fr.qn, is_module);
-
-    /* Superclass: `class C < Base` — the `superclass` field wraps the
-     * expression after `<`. The ref is resolved from the DECLARING scope
-     * (the frame just pushed does not apply to its own superclass), so pack
-     * it with the outer nesting. */
-    if (ci && !is_module && !ci->superclass_ref) {
+    /* A superclass resolves in the declaring scope outside this frame. */
+    const char *parent = NULL;
+    if (!is_module) {
         TSNode sup = ts_node_child_by_field_name(node, "superclass", 10);
         if (!ts_node_is_null(sup)) {
             uint32_t sc = ts_node_named_child_count(sup);
-            for (uint32_t i = 0; i < sc; i++) {
-                const char *spath = ruby_const_path(ctx, ts_node_named_child(sup, i));
-                if (spath) {
-                    const char *inner = ctx->nesting;
-                    ctx->nesting = fr.saved_nesting;
-                    ci->superclass_ref = ruby_pack_ref(ctx, spath);
-                    ctx->nesting = inner;
-                    break;
-                }
-            }
+            for (uint32_t i = 0; i < sc && !parent; i++)
+                parent = ruby_const_path(ctx, ts_node_named_child(sup, i));
         }
     }
+    RUBY_ANCESTRY(declare)(ctx->ancestry, fr.qn, fr.saved_nesting ? fr.saved_nesting : "",
+                           fr.path, parent);
 
     TSNode body = ts_node_child_by_field_name(node, "body", 4);
     if (!ts_node_is_null(body))
@@ -1599,24 +1640,6 @@ static void ruby_pass1_scan_inner(RubyLSPContext *ctx, TSNode node) {
     }
     if (is_block)
         ctx->block_depth--;
-}
-
-/* Finalize PASS 1: resolve superclass + mixin references now that the class
- * table is complete. */
-static void ruby_finalize_refs(RubyLSPContext *ctx) {
-    for (int i = 0; i < ctx->class_count; i++) {
-        RubyClassInfo *ci = &ctx->classes[i];
-        if (ci->superclass_ref) {
-            ci->superclass_qn = ruby_resolve_packed_ref(ctx, ci->superclass_ref);
-            /* Keep the bare ref spelling for AR-model heuristics. */
-            ci->superclass_ref = ruby_packed_bare_ref(ci->superclass_ref);
-        }
-    }
-    for (int i = 0; i < ctx->mixin_count; i++) {
-        RubyMixinInfo *mi = &ctx->mixins[i];
-        mi->module_qn = ruby_resolve_packed_ref(ctx, mi->module_ref);
-        mi->module_ref = ruby_packed_bare_ref(mi->module_ref);
-    }
 }
 
 /* ── PASS 1.5: instance-variable type inference ─────────────────── */
@@ -1747,9 +1770,9 @@ static void ruby_ivar_scan_inner(RubyLSPContext *ctx, TSNode node) {
 
 /* ── public API ─────────────────────────────────────────────────── */
 
-void ruby_lsp_init(RubyLSPContext *ctx, CBMArena *arena, const char *source, int source_len,
-                   const CBMTypeRegistry *registry, const char *module_qn,
-                   CBMResolvedCallArray *out) {
+static void ruby_lsp_init(RubyLSPContext *ctx, CBMArena *arena, const char *source, int source_len,
+                          const CBMTypeRegistry *registry, const char *module_qn,
+                          CBMResolvedCallArray *out) {
     memset(ctx, 0, sizeof(*ctx));
     ctx->arena = arena;
     ctx->source = source;
@@ -1757,6 +1780,7 @@ void ruby_lsp_init(RubyLSPContext *ctx, CBMArena *arena, const char *source, int
     ctx->registry = registry;
     ctx->module_qn = module_qn;
     ctx->nesting = "";
+    ctx->ancestry = RUBY_ANCESTRY(new)();
     ctx->resolved_calls = out;
     ctx->current_scope = cbm_scope_push(arena, NULL);
 
@@ -1781,6 +1805,8 @@ void cbm_run_ruby_lsp(CBMArena *arena, CBMFileResult *result, const char *source
 
     RubyLSPContext ctx;
     ruby_lsp_init(&ctx, arena, source, source_len, &reg, module_qn, &result->resolved_calls);
+    if (!ctx.ancestry)
+        return;
 
     /* Phase B: PASS 1 — collect classes/modules, mixins, and methods from
      * the AST (methods register directly into `reg`; the AST is ground
@@ -1788,7 +1814,7 @@ void cbm_run_ruby_lsp(CBMArena *arena, CBMFileResult *result, const char *source
     ctx.build_reg = &reg;
     ruby_pass1_scan(&ctx, root);
     ctx.build_reg = NULL;
-    ruby_finalize_refs(&ctx);
+    RUBY_ANCESTRY(finalize)(ctx.ancestry, &reg, ruby_builtin_type);
 
     /* Finalize the registry for O(1) lookups — index allocations go to a
      * per-call scratch arena that dies with this call (see perl_lsp.c). */
@@ -1810,9 +1836,11 @@ void cbm_run_ruby_lsp(CBMArena *arena, CBMFileResult *result, const char *source
     ruby_resolve_calls_in_node(&ctx, root);
 
     if (ctx.debug) {
-        fprintf(stderr, "[ruby_lsp] module_qn=%s defs=%d resolved=%d classes=%d mixins=%d\n",
+        size_t mixins;
+        size_t classes = RUBY_ANCESTRY(counts)(ctx.ancestry, &mixins);
+        fprintf(stderr, "[ruby_lsp] module_qn=%s defs=%d resolved=%d classes=%zu mixins=%zu\n",
                 module_qn ? module_qn : "(null)", result->defs.count, result->resolved_calls.count,
-                ctx.class_count, ctx.mixin_count);
+                classes, mixins);
         for (int i = 0; i < result->resolved_calls.count; i++) {
             CBMResolvedCall *r = &result->resolved_calls.items[i];
             fprintf(stderr, "[ruby_lsp]   %s -> %s [%s %.2f]\n", r->caller_qn, r->callee_qn,
@@ -1821,4 +1849,5 @@ void cbm_run_ruby_lsp(CBMArena *arena, CBMFileResult *result, const char *source
     }
 
     cbm_arena_destroy(&idx_arena);
+    RUBY_ANCESTRY(free)(ctx.ancestry);
 }

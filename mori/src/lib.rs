@@ -319,6 +319,10 @@ mod native_tree;
 #[path = "../internal/cbm/lsp/php_resolver/mod.rs"]
 mod php_resolver;
 
+#[cfg(any(feature = "native-engine-abi", test))]
+#[path = "../internal/cbm/lsp/ruby_lookup.rs"]
+mod ruby_lookup;
+
 #[cfg(feature = "native-engine-abi")]
 #[path = "../internal/cbm/lsp/rust_path.rs"]
 mod rust_path;
