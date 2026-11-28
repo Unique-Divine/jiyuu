@@ -566,7 +566,7 @@ TEST(perllsp_repeated_inherited_method_calls_join_by_exact_site) {
                                            "$child->greet()");
 }
 
-/* ── Package lookup parity (C registry lookup vs Rust index) ───── */
+/* ── Package lookup (Rust package index) ───────────────────────── */
 
 static bool perl_str_eq(const char *a, const char *b) {
     return a == b || (a && b && strcmp(a, b) == 0);
@@ -581,55 +581,69 @@ static void perl_print_resolved(const char *side, const CBMFileResult *r) {
     }
 }
 
-/* Extract `source` with the C registry lookup and with the Rust package index
- * and require identical resolved calls, in order. */
-static int perl_assert_lookup_parity(const char *label, const char *source) {
-    cbm_perl_lsp_test_set_c_package_lookup(true);
-    CBMFileResult *c = extract_perl(source);
-    cbm_perl_lsp_test_set_c_package_lookup(false);
-    CBMFileResult *rust = extract_perl(source);
-    ASSERT_NOT_NULL(c);
-    ASSERT_NOT_NULL(rust);
+/* Drop the fixture module prefix so expectations stay short. */
+static const char *perl_short_qn(const char *qn) {
+    static const char prefix[] = "test.main.";
+    if (!qn)
+        return "(null)";
+    return strncmp(qn, prefix, sizeof(prefix) - 1) == 0 ? qn + sizeof(prefix) - 1 : qn;
+}
 
-    bool same = c->resolved_calls.count == rust->resolved_calls.count;
-    for (int i = 0; same && i < c->resolved_calls.count; i++) {
-        const CBMResolvedCall *a = &c->resolved_calls.items[i];
-        const CBMResolvedCall *b = &rust->resolved_calls.items[i];
-        same = perl_str_eq(a->caller_qn, b->caller_qn) && perl_str_eq(a->callee_qn, b->callee_qn) &&
-               perl_str_eq(a->strategy, b->strategy) && perl_str_eq(a->reason, b->reason) &&
-               perl_str_eq(a->callee_sig, b->callee_sig) && a->confidence == b->confidence &&
-               a->kind == b->kind && a->site_start_byte == b->site_start_byte &&
-               a->site_end_byte == b->site_end_byte && a->source_origin == b->source_origin;
+/* Require the resolved calls of `source`, one "caller -> callee strategy
+ * confidence start:end" line each, in order. These expectations were the
+ * output of the C registry lookup, which matched the Rust package index on
+ * every case before the C lookup was deleted. */
+static int perl_assert_resolved_lines(const char *label, const char *source, const char *expected) {
+    CBMFileResult *r = extract_perl(source);
+    ASSERT_NOT_NULL(r);
+    char actual[4096];
+    size_t used = 0;
+    actual[0] = '\0';
+    for (int i = 0; i < r->resolved_calls.count && used < sizeof(actual); i++) {
+        const CBMResolvedCall *rc = &r->resolved_calls.items[i];
+        ASSERT_EQ(rc->kind, CBM_RESOLVED_INVOCATION);
+        ASSERT_TRUE(rc->reason == NULL && rc->callee_sig == NULL);
+        used += (size_t)snprintf(actual + used, sizeof(actual) - used, "%s -> %s %s %.2f %u:%u\n",
+                                 perl_short_qn(rc->caller_qn), perl_short_qn(rc->callee_qn),
+                                 rc->strategy ? rc->strategy : "(null)", rc->confidence,
+                                 rc->site_start_byte, rc->site_end_byte);
     }
-    if (!same) {
-        printf("  Perl lookup parity differs for %s\n", label);
-        perl_print_resolved("c   ", c);
-        perl_print_resolved("rust", rust);
+    cbm_free_result(r);
+    ASSERT_TRUE(used < sizeof(actual));
+    if (strcmp(actual, expected) != 0) {
+        printf("  Perl resolved calls differ for %s; got:\n", label);
+        for (const char *line = actual; *line;) {
+            const char *end = strchr(line, '\n');
+            printf("         \"%.*s\\n\"\n", (int)(end - line), line);
+            line = end + 1;
+        }
     }
-    cbm_free_result(c);
-    cbm_free_result(rust);
-    ASSERT_TRUE(same);
+    ASSERT_STR_EQ(actual, expected);
     return 0;
 }
 
 /* Each source exercises one branch of the package lookup: own subs, @ISA
- * order, SUPER, cycles, the 32-package visit cap and the frontier cap. */
-TEST(perllsp_package_lookup_parity) {
+ * order, SUPER, cycles and block or reopened packages. */
+TEST(perllsp_package_lookup_cases) {
     static const struct {
         const char *label;
         const char *source;
+        const char *expected;
     } cases[] = {
-        {"empty file", ""},
-        {"main only", "package main;\n"},
+        {"empty file", "", ""},
+        {"main only", "package main;\n", ""},
         {"subs before any package",
          "sub helper { return 1; }\n"
-         "sub run { main->helper(); __PACKAGE__->helper(); main->missing(); }\n"},
+         "sub run { main->helper(); __PACKAGE__->helper(); main->missing(); }\n",
+         "run -> helper perl_method_inherited 0.95 35:49\n"},
         {"own sub and constructor",
          "package Acme::Widget;\n"
          "sub new { my $class = shift; return bless {}, $class; }\n"
          "sub render { return 1; }\n"
          "package main;\n"
-         "sub run { my $w = Acme::Widget->new; $w->render; Widget->render; }\n"},
+         "sub run { my $w = Acme::Widget->new; $w->render; Widget->render; }\n",
+         "run -> new perl_method_inherited 0.95 135:152\n"
+         "run -> render perl_method_inherited 0.95 154:164\n"},
         {"parent without subs",
          "package Base;\n"
          "sub speak { return 1; }\n"
@@ -639,7 +653,10 @@ TEST(perllsp_package_lookup_parity) {
          "use parent -norequire, 'Intermediate';\n"
          "sub new { return bless {}, shift; }\n"
          "package main;\n"
-         "sub run { my $d = Derived->new; $d->speak; Derived->speak; Derived->absent; }\n"},
+         "sub run { my $d = Derived->new; $d->speak; Derived->speak; Derived->absent; }\n",
+         "run -> new perl_method_inherited 0.95 205:217\n"
+         "run -> speak perl_method_inherited 0.95 219:228\n"
+         "run -> speak perl_method_inherited 0.95 230:244\n"},
         {"several parents and SUPER",
          "package First;\n"
          "sub greet { return 1; }\n"
@@ -653,62 +670,80 @@ TEST(perllsp_package_lookup_parity) {
          "sub last { my $self = shift; return $self->SUPER::only_last(); }\n"
          "sub none { my $self = shift; return $self->SUPER::missing(); }\n"
          "package main;\n"
-         "sub run { my $c = Child->new; $c->greet; $c->only_last; Child->greet; }\n"},
-        {"SUPER without a parent", "package Orphan;\n"
-                                   "sub greet { my $self = shift; return $self->SUPER::greet(); }\n"
-                                   "sub empty { my $self = shift; return $self->SUPER::(); }\n"},
-        {"block packages", "package Base { sub greet { return 1; } }\n"
-                           "package Child {\n"
-                           "    our @ISA = ('Base');\n"
-                           "    sub new { return bless {}, shift; }\n"
-                           "    sub greet { my $self = shift; return $self->SUPER::greet(); }\n"
-                           "}\n"
-                           "sub after_block { my $self = shift; return $self->SUPER::greet(); }\n"
-                           "package main;\n"
-                           "sub run { my $c = Child->new; $c->greet; }\n"},
-        {"reopened package", "package Base;\n"
-                             "sub greet { return 1; }\n"
-                             "package Child;\n"
-                             "sub new { return bless {}, shift; }\n"
-                             "package Other;\n"
-                             "sub other { return 1; }\n"
-                             "package Child;\n"
-                             "our @ISA = ('Base');\n"
-                             "sub again { my $self = shift; return $self->SUPER::greet(); }\n"
-                             "package main;\n"
-                             "sub run { Child->greet; Child->other; }\n"},
-        {"qualified @ISA and duplicate subs", "package Base;\n"
-                                              "sub greet { return 1; }\n"
-                                              "sub greet { return 2; }\n"
-                                              "package Child;\n"
-                                              "@Child::ISA = ('Base', 'Base');\n"
-                                              "package main;\n"
-                                              "sub run { Child->greet; }\n"},
-        {"inheritance cycle", "package A;\n"
-                              "our @ISA = ('B');\n"
-                              "sub from_a { return 1; }\n"
-                              "package B;\n"
-                              "our @ISA = ('A');\n"
-                              "package main;\n"
-                              "sub run { B->from_a; A->missing; B->missing; }\n"},
+         "sub run { my $c = Child->new; $c->greet; $c->only_last; Child->greet; }\n",
+         "run -> new perl_method_inherited 0.95 403:413\n"
+         "run -> greet perl_method_inherited 0.95 415:424\n"
+         "run -> greet perl_method_inherited 0.95 441:453\n"},
+        {"SUPER without a parent",
+         "package Orphan;\n"
+         "sub greet { my $self = shift; return $self->SUPER::greet(); }\n"
+         "sub empty { my $self = shift; return $self->SUPER::(); }\n",
+         ""},
+        {"block packages",
+         "package Base { sub greet { return 1; } }\n"
+         "package Child {\n"
+         "    our @ISA = ('Base');\n"
+         "    sub new { return bless {}, shift; }\n"
+         "    sub greet { my $self = shift; return $self->SUPER::greet(); }\n"
+         "}\n"
+         "sub after_block { my $self = shift; return $self->SUPER::greet(); }\n"
+         "package main;\n"
+         "sub run { my $c = Child->new; $c->greet; }\n",
+         ""},
+        {"reopened package",
+         "package Base;\n"
+         "sub greet { return 1; }\n"
+         "package Child;\n"
+         "sub new { return bless {}, shift; }\n"
+         "package Other;\n"
+         "sub other { return 1; }\n"
+         "package Child;\n"
+         "our @ISA = ('Base');\n"
+         "sub again { my $self = shift; return $self->SUPER::greet(); }\n"
+         "package main;\n"
+         "sub run { Child->greet; Child->other; }\n",
+         "again -> greet perl_method_super 0.95 201:222\n"
+         "run -> greet perl_method_inherited 0.95 250:262\n"},
+        {"qualified @ISA and duplicate subs",
+         "package Base;\n"
+         "sub greet { return 1; }\n"
+         "sub greet { return 2; }\n"
+         "package Child;\n"
+         "@Child::ISA = ('Base', 'Base');\n"
+         "package main;\n"
+         "sub run { Child->greet; }\n",
+         "run -> greet perl_method_inherited 0.95 133:145\n"},
+        {"inheritance cycle",
+         "package A;\n"
+         "our @ISA = ('B');\n"
+         "sub from_a { return 1; }\n"
+         "package B;\n"
+         "our @ISA = ('A');\n"
+         "package main;\n"
+         "sub run { B->from_a; A->missing; B->missing; }\n",
+         "run -> from_a perl_method_inherited 0.95 107:116\n"},
         {"exported and static calls",
          "package Helper;\n"
          "sub func { return 1; }\n"
          "package main;\n"
          "use Helper qw(func);\n"
          "use Scalar::Util qw(blessed);\n"
-         "sub run { func(); Helper::func(); blessed(1); Helper->func; }\n"},
+         "sub run { func(); Helper::func(); blessed(1); Helper->func; }\n",
+         "run -> func perl_function_local 0.95 114:120\n"
+         "run -> func perl_static_call 0.95 122:136\n"
+         "run -> Scalar.Util.blessed perl_imported_function 0.95 138:148\n"
+         "run -> func perl_method_inherited 0.95 150:162\n"},
     };
-    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
-        if (perl_assert_lookup_parity(cases[i].label, cases[i].source) != 0)
-            return 1;
-    }
+    int failures = 0;
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++)
+        failures += perl_assert_resolved_lines(cases[i].label, cases[i].source, cases[i].expected);
+    ASSERT_EQ(failures, 0);
     PASS();
 }
 
 /* An @ISA chain one package longer than the 32-package visit cap, and a
  * package with more parents than the 32-entry frontier holds. */
-TEST(perllsp_package_lookup_parity_at_caps) {
+TEST(perllsp_package_lookup_at_caps) {
     enum { LINKS = 34, PARENTS = 40 };
     char chain[8192];
     size_t used = 0;
@@ -722,8 +757,8 @@ TEST(perllsp_package_lookup_parity_at_caps) {
                              "sub run { P0->deep; P1->deep; P2->deep; P3->deep; }\n",
                              LINKS);
     ASSERT_TRUE(used < sizeof(chain));
-    if (perl_assert_lookup_parity("chain past the visit cap", chain) != 0)
-        return 1;
+    int failures = perl_assert_resolved_lines("chain past the visit cap", chain,
+                                              "run -> deep perl_method_inherited 0.95 1193:1201\n");
 
     char fan[8192];
     used = (size_t)snprintf(fan, sizeof(fan), "package Wide;\nour @ISA = (");
@@ -737,15 +772,18 @@ TEST(perllsp_package_lookup_parity_at_caps) {
                              "package main;\nsub run { Wide->q0; Wide->q8; Wide->q31; "
                              "Wide->q32; Wide->q39; }\n");
     ASSERT_TRUE(used < sizeof(fan));
-    return perl_assert_lookup_parity("parents past the frontier cap", fan);
+    failures += perl_assert_resolved_lines("parents past the frontier cap", fan,
+                                           "run -> q8 perl_method_inherited 0.95 1711:1719\n"
+                                           "run -> q31 perl_method_inherited 0.95 1721:1730\n");
+    ASSERT_EQ(failures, 0);
+    PASS();
 }
 
-/* The one known difference. Code before the first `package` statement has
- * no enclosing package, but the C lookup kept the SUPER parent that its
- * second pre-pass left for the last package statement (here Last, whose
- * parent Base was already recorded when Last was reopened). The C lookup
- * therefore resolved early's SUPER::greet to Base::greet; the Rust index
- * finds no parent for the implicit main package and emits nothing. */
+/* SUPER in code before the first `package` statement has no enclosing
+ * package, and the implicit main package has no @ISA, so it resolves to
+ * nothing. The old C lookup emitted a stale perl_method_super edge here
+ * (early -> greet): its resolve walk kept the SUPER parent that the second
+ * pre-pass left for the reopened `package Last;`. */
 TEST(perllsp_package_lookup_super_before_first_package) {
     static const char source[] = "sub early { my $self = shift; return $self->SUPER::greet(); }\n"
                                  "package Base;\n"
@@ -754,27 +792,7 @@ TEST(perllsp_package_lookup_super_before_first_package) {
                                  "our @ISA = ('Base');\n"
                                  "package Other;\n"
                                  "package Last;\n";
-    cbm_perl_lsp_test_set_c_package_lookup(true);
-    CBMFileResult *c = extract_perl(source);
-    cbm_perl_lsp_test_set_c_package_lookup(false);
-    CBMFileResult *rust = extract_perl(source);
-    ASSERT_NOT_NULL(c);
-    ASSERT_NOT_NULL(rust);
-    const CBMResolvedCall *c_super =
-        find_resolved_with_strategy(c, "main.early", "main.greet", "perl_method_super");
-    const CBMResolvedCall *rust_super =
-        find_resolved_with_strategy(rust, "main.early", "main.greet", "perl_method_super");
-    bool c_resolved = c_super != NULL;
-    int c_count = c->resolved_calls.count;
-    int rust_count = rust->resolved_calls.count;
-    bool rust_resolved = rust_super != NULL;
-    cbm_free_result(c);
-    cbm_free_result(rust);
-    ASSERT_TRUE(c_resolved);
-    ASSERT_EQ(c_count, 1);
-    ASSERT_TRUE(!rust_resolved);
-    ASSERT_EQ(rust_count, 0);
-    PASS();
+    return perl_assert_resolved_lines("SUPER before the first package", source, "");
 }
 
 /* Read a resolver fixture relative to the mori/ directory the runner uses. */
@@ -872,10 +890,6 @@ static int perl_assert_fixture_occurrences(void) {
 }
 
 TEST(perllsp_fixture_occurrences_resolve_by_site) {
-    cbm_perl_lsp_test_set_c_package_lookup(true);
-    int c = perl_assert_fixture_occurrences();
-    cbm_perl_lsp_test_set_c_package_lookup(false);
-    ASSERT_EQ(c, 0);
     return perl_assert_fixture_occurrences();
 }
 
@@ -899,8 +913,8 @@ SUITE(perl_lsp) {
     RUN_TEST(perllsp_repeated_target_calls_join_by_exact_site);
     RUN_TEST(perllsp_repeated_static_function_calls_join_by_exact_site);
     RUN_TEST(perllsp_repeated_inherited_method_calls_join_by_exact_site);
-    RUN_TEST(perllsp_package_lookup_parity);
-    RUN_TEST(perllsp_package_lookup_parity_at_caps);
+    RUN_TEST(perllsp_package_lookup_cases);
+    RUN_TEST(perllsp_package_lookup_at_caps);
     RUN_TEST(perllsp_package_lookup_super_before_first_package);
     RUN_TEST(perllsp_fixture_occurrences_resolve_by_site);
 }
