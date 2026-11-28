@@ -89,6 +89,10 @@ static inline int ts_import_next(const TSLSPContext *ctx, const char *name, int 
 }
 
 #ifdef CBM_ENABLE_TEST_SEAMS
+// Exercise the Rust type-text parser through the resolver's budget wrapper.
+const CBMType *cbm_ts_lsp_test_parse_type_text(CBMArena *arena, const char *text,
+                                              const char *module_qn);
+void cbm_ts_lsp_test_set_type_budget(long budget);
 // Complexity-regression seam: remaining expression-eval budget / warned flag
 // for the calling thread, valid after a cbm_run_ts_lsp on the same thread.
 long cbm_ts_lsp_test_budget_remaining(void);

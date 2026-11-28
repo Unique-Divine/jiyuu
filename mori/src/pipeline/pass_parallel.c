@@ -942,10 +942,10 @@ static void pp_extract_file(extract_ctx_t *ec, int worker_id, int file_idx, int 
             ? cbm_pipeline_extract_objectscript_export(source, source_len, ec->project_name,
                                                        fi->rel_path, ec->macro_table,
                                                        ec->return_type_table)
-            : cbm_extract_file_ex_with_tests(source, source_len, fi->language, ec->project_name,
-                                             fi->rel_path, CBM_EXTRACT_BUDGET, NULL, NULL,
-                                             ec->macro_table, ec->return_type_table,
-                                             ec->pctx->test_declarations);
+            : cbm_extract_file_ex_with_tests_cancellable(
+                  source, source_len, fi->language, ec->project_name, fi->rel_path,
+                  CBM_EXTRACT_BUDGET, NULL, NULL, ec->macro_table, ec->return_type_table,
+                  ec->pctx->test_declarations, ec->cancelled);
 
     uint64_t file_elapsed_ms = (extract_now_ns() - file_t0) / PP_USEC_PER_MS;
 
@@ -4186,13 +4186,14 @@ static void resolve_worker(int worker_id, void *ctx_ptr) {
                     rc->module_def_index, rc->all_defs, rc->def_count,
                     own_lsp_map ? lsp_keys : imp_keys, own_lsp_map ? lsp_vals : imp_vals,
                     own_lsp_map ? lsp_count : imp_count, pp_rust_shared_registry_get, rc,
-                    &php_vendor);
+                    &php_vendor, rc->cancelled);
                 if (own_lsp_map) {
                     cbm_pxc_free_import_map(lsp_keys, lsp_vals, lsp_count);
                 }
                 cbm_index_mark_done(rel);
                 if (!had_error && result->has_error && result->error_msg &&
-                    (strcmp(result->error_msg, CBM_C_LSP_MEMO_ERROR) == 0 ||
+                    (strcmp(result->error_msg, CBM_GO_RESOLVE_ERROR) == 0 ||
+                     strcmp(result->error_msg, CBM_C_LSP_MEMO_ERROR) == 0 ||
                      strcmp(result->error_msg, CBM_PY_LSP_MEMO_ERROR) == 0 ||
                      strcmp(result->error_msg, CBM_C_LSP_DEPTH_ERROR) == 0 ||
                      strcmp(result->error_msg, CBM_PY_LSP_DEPTH_ERROR) == 0 ||

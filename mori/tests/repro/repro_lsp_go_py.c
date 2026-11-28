@@ -522,7 +522,7 @@ TEST(repro_lsp_go_interface_dispatch) {
 
 TEST(repro_lsp_go_strategy_cross_file) {
     /* PARKED for release: lsp_strategy_cross_file is emitted only by the parallel
-     * cross-file pass (cbm_go_fast_resolve_qualified_calls), which runs only when
+     * cross-file pass (cbm_go_resolve_cross_metadata), which runs only when
      * a prebuilt cross-registry exists. That registry is not built for the small
      * single-package test fixture, so the strategy is structurally unreachable
      * here — the method call still resolves (callable>=1) via the per-file

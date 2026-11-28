@@ -1,6 +1,8 @@
 //! Node access to Mori's pinned Tree-sitter runtime.
 
 use std::ffi::{CStr, c_char, c_void};
+use std::marker::PhantomData;
+use std::ops::Range;
 
 /// Matches the pinned Tree-sitter header. A node borrows its source tree.
 #[repr(C)]
@@ -24,8 +26,9 @@ unsafe extern "C" {
     fn cbm_ffi_ts_node_type(node: *const RawNode) -> *const c_char;
     fn cbm_ffi_ts_node_start_byte(node: *const RawNode) -> u32;
     fn cbm_ffi_ts_node_end_byte(node: *const RawNode) -> u32;
-    #[cfg(feature = "c-backend")]
     fn cbm_ffi_ts_node_is_named(node: *const RawNode) -> bool;
+    fn cbm_ffi_ts_node_parent(node: *const RawNode) -> RawNode;
+    fn cbm_ffi_ts_node_eq(left: *const RawNode, right: *const RawNode) -> bool;
     fn cbm_ffi_ts_node_child_by_field_name(
         node: *const RawNode,
         name: *const c_char,
@@ -38,6 +41,9 @@ unsafe extern "C" {
     );
     fn cbm_ffi_ts_tree_cursor_delete(cursor: *mut RawCursor);
     fn cbm_ffi_ts_tree_cursor_current_node(cursor: *const RawCursor) -> RawNode;
+    fn cbm_ffi_ts_tree_cursor_current_field_name(
+        cursor: *const RawCursor,
+    ) -> *const c_char;
     fn cbm_ffi_ts_tree_cursor_goto_first_child(cursor: *mut RawCursor) -> bool;
     fn cbm_ffi_ts_tree_cursor_goto_next_sibling(cursor: *mut RawCursor) -> bool;
     fn cbm_ffi_ts_tree_cursor_goto_parent(cursor: *mut RawCursor) -> bool;
@@ -67,6 +73,12 @@ impl TreeCursor {
     pub(crate) fn node(&self) -> RawNode {
         // SAFETY: A live cursor has a current node in its borrowed tree.
         unsafe { cbm_ffi_ts_tree_cursor_current_node(&self.0) }
+    }
+
+    fn field_name(&self) -> Option<&'static CStr> {
+        // SAFETY: The cursor points into its live grammar tree.
+        let name = unsafe { cbm_ffi_ts_tree_cursor_current_field_name(&self.0) };
+        (!name.is_null()).then(|| unsafe { CStr::from_ptr(name) })
     }
 
     pub(crate) fn first_child(&mut self) -> bool {
@@ -126,7 +138,6 @@ impl RawNode {
         })
     }
 
-    #[cfg(feature = "c-backend")]
     pub(crate) unsafe fn named_children(self) -> impl Iterator<Item = Self> {
         // SAFETY: Namedness is checked while each yielded node's tree is live.
         unsafe {
@@ -156,5 +167,95 @@ impl RawNode {
             cbm_ffi_ts_node_start_byte(&self) as usize
                 ..cbm_ffi_ts_node_end_byte(&self) as usize
         }
+    }
+}
+
+/// A node that cannot outlive the borrowed tree handle supplied by the
+/// parser bridge. Child nodes and child iterators carry the same lifetime.
+#[derive(Clone, Copy)]
+pub(crate) struct BorrowedNode<'tree> {
+    raw: RawNode,
+    tree: PhantomData<&'tree RawNode>,
+}
+
+impl<'tree> BorrowedNode<'tree> {
+    /// # Safety
+    ///
+    /// The native tree behind `raw` must stay live during the borrow.
+    pub(crate) unsafe fn from_root(raw: &'tree RawNode) -> Self {
+        Self {
+            raw: *raw,
+            tree: PhantomData,
+        }
+    }
+
+    fn with_raw(self, raw: RawNode) -> Self {
+        Self { raw, ..self }
+    }
+
+    pub(crate) fn kind(self) -> &'static CStr {
+        // SAFETY: The borrow guarantees the tree remains live.
+        unsafe { self.raw.kind() }
+    }
+
+    pub(crate) fn range(self) -> Range<usize> {
+        // SAFETY: The borrow guarantees the tree remains live.
+        unsafe { self.raw.range() }
+    }
+
+    pub(crate) fn field(self, name: &CStr) -> Option<Self> {
+        // SAFETY: The child field belongs to the same borrowed tree.
+        unsafe { self.raw.field(name) }.map(|child| self.with_raw(child))
+    }
+
+    pub(crate) fn children(self) -> impl Iterator<Item = Self> {
+        // SAFETY: The iterator owns a copy of this borrow.
+        unsafe { self.raw.children() }.map(move |child| self.with_raw(child))
+    }
+
+    pub(crate) fn parent(self) -> Option<Self> {
+        // SAFETY: The parent belongs to the same live tree.
+        let parent = unsafe { cbm_ffi_ts_node_parent(self.as_raw()) };
+        (!parent.id.is_null()).then(|| self.with_raw(parent))
+    }
+
+    pub(crate) fn same_as(self, other: Self) -> bool {
+        // SAFETY: Both arguments carry live tree borrows.
+        unsafe { cbm_ffi_ts_node_eq(self.as_raw(), other.as_raw()) }
+    }
+
+    pub(crate) fn child_fields(
+        self,
+    ) -> impl Iterator<Item = (Self, Option<&'static CStr>)> {
+        // SAFETY: The iterator retains this borrow as long as its cursor lives.
+        let mut cursor = unsafe { TreeCursor::new(self.raw) };
+        let mut has_child = cursor.first_child();
+        std::iter::from_fn(move || {
+            if !has_child {
+                return None;
+            }
+            let field = (self.with_raw(cursor.node()), cursor.field_name());
+            has_child = cursor.next_sibling();
+            Some(field)
+        })
+    }
+
+    pub(crate) fn as_raw(&self) -> &RawNode {
+        &self.raw
+    }
+
+    pub(crate) fn is_named(self) -> bool {
+        // SAFETY: This node belongs to the live tree borrow.
+        unsafe { cbm_ffi_ts_node_is_named(self.as_raw()) }
+    }
+
+    pub(crate) fn unnamed_children(self) -> impl Iterator<Item = Self> {
+        self.children().filter(|child| !child.is_named())
+    }
+
+    pub(crate) fn named_children(self) -> impl Iterator<Item = Self> {
+        // SAFETY: The iterator owns a copy of this borrow.
+        unsafe { self.raw.named_children() }
+            .map(move |child| self.with_raw(child))
     }
 }
