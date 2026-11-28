@@ -150,6 +150,51 @@ Before finalizing, fact-check each reported issue. For every non-obvious claim,
 re-read the relevant code or ask a sub-agent to verify it as **valid**,
 **invalid**, or **needs rewording**. Drop invalid issues and reword unclear ones.
 
+## Severity
+
+Give every finding a level. The level measures how hard the harm is to undo,
+not how sure you are of the finding.
+
+| Level | Meaning | Merge effect |
+|---|---|---|
+| **P0** | One-way harm or exposure: lost or wrong funds or balances, deleted data, an upgrade that breaks with no migration path, credentials that left the machine | Blocks. Notify the owner at once. |
+| **P1** | Breaks the project's core behavior in a change that reaches users before it can be reverted, or a one-way change with no rollout or recovery plan | Blocks. |
+| **P2** | A real defect or gap in a reversible change that tests and real use didn't cover | Doesn't block. Fix it in a follow-up. |
+| **P3** | Nice to have: a regression test for behavior already proven in use, naming, docs, refactors | Doesn't block. Batch it later. |
+
+These inputs move a finding's level:
+
+| Input | Effect on the level |
+|---|---|
+| One-way (can't be reverted) | Raises it |
+| Validated by tests and real use | Lowers it |
+| Larger blast radius (users, funds, shared state) | Raises it |
+| Outside the change's goal | Not a severity: a ticket, never a blocker |
+
+Four rules cover common cases:
+
+- A failing required CI check is not a finding severity. Required checks
+  already block the merge.
+- A path reachable only through allocation failure or fault injection is P3.
+  Link one shared policy issue for the whole class.
+- A secret shown in local output is P1. It is P0 once it leaves the machine:
+  committed, published, or sent to an outside service.
+- Behavior that existed before the PR is a ticket, not a blocker on that PR.
+
+Examples:
+
+- **P0:** a payout uses the wrong terms; a migration drops a column with no
+  backup.
+- **P1:** a valid order is refused; a shipped command fails on ordinary
+  input; a report prints a password to the terminal.
+- **P2:** a diagnostic command misses one install layout; an error path
+  returns a generic message.
+- **P3:** help text and usage line disagree; a test has no lower bound; an
+  abort that happens only when an allocation fails.
+
+A project may add its own examples per level. Its repository instructions
+override the examples here, not the merge effect.
+
 ## Review Workflow
 
 ### Step 1: Understand Context
@@ -213,13 +258,16 @@ selective findings.
 ### Step 5: Final Recommendation
 
 Recommend one of:
-- **Approve** - No blocking issues.
-- **Request Changes** - Correctness, security, compatibility, data-loss,
-  production, or missing-test risks block merge.
+- **Approve** - No unresolved P0 or P1 finding. Record P2 and P3 findings
+  in the review and name them as follow-up tickets.
+- **Request Changes** - At least one unresolved finding is P0 or P1 under
+  [Severity](#severity).
 - **Needs Discussion** - The core issue is design, product intent, migration
   strategy, or ownership and needs agreement before implementation changes.
 
-Missing tests for new behavior or bug fixes normally means **Request Changes**.
+Rate a missing test like any other finding. A missing test for behavior
+already proven in real use is P3. A missing test on a one-way path, or one
+that moves funds, is P1.
 
 ## Review Checklist
 
