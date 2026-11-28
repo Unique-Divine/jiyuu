@@ -254,8 +254,8 @@ unsafe extern "C" fn mori_trace_cursor(
             state.node_id = cursor.watermark.node_id;
             state.hop = cursor.watermark.hop;
             state.leg = match cursor.leg {
-                Leg::Outbound => c_char::from_ne_bytes([b'o']),
-                Leg::Inbound => c_char::from_ne_bytes([b'i']),
+                Leg::Outbound => c_char::from_ne_bytes(*b"o"),
+                Leg::Inbound => c_char::from_ne_bytes(*b"i"),
             };
             std::ptr::null()
         }
