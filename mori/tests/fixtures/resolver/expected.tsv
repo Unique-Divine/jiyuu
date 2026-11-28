@@ -42,3 +42,10 @@ ruby_shadow/main.rb	Worker.run	Foo.bar	Method	231:236	a.bar	a.bar
 # clsp_c_nested_function_pointer_shadow_restores_outer_target
 shadowed/main.c	occurrence_probe	bravo_target	Function	234:238	fp()	fp
 shadowed/main.c	occurrence_probe	alpha_target	Function	265:269	fp()	fp
+# Python inheritance: C3 order, super() and the depth-first fallback (no C3 order)
+python_inheritance/main.py	Bad.probe	Third.work	Method	579:593	super().work()	super().work
+python_inheritance/main.py	Broken.call	P.run	Method	801:811	self.run()	self.run
+python_inheritance/main.py	Broken.up	P.run	Method	846:859	super().run()	super().run
+python_inheritance/main.py	Child.__init__	Root.__init__	Method	247:265	super().__init__()	super().__init__
+python_inheritance/main.py	Child.direct	Right.work	Method	304:315	self.work()	self.work
+python_inheritance/main.py	Child.via_super	Right.work	Method	357:371	super().work()	super().work
