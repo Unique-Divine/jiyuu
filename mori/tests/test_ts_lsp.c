@@ -5215,6 +5215,474 @@ TEST(tslsp_tsx_ordinary_same_leaf_calls_join_by_exact_site) {
     PASS();
 }
 
+/* ── Type text parity: C reference vs ts_type_text.rs ──────────────── */
+
+typedef struct {
+    char *buf;
+    size_t cap;
+    size_t len;
+} TsTypeDump;
+
+static void tstype_put(TsTypeDump *d, const char *s) {
+    for (; s && *s && d->len + 1 < d->cap; s++)
+        d->buf[d->len++] = *s;
+    d->buf[d->len] = '\0';
+}
+
+/* Quote string fields byte by byte so whitespace and non-ASCII stay visible. */
+static void tstype_str(TsTypeDump *d, const char *s) {
+    if (!s) {
+        tstype_put(d, "(null)");
+        return;
+    }
+    tstype_put(d, "\"");
+    char hex[8];
+    for (const unsigned char *p = (const unsigned char *)s; *p; p++) {
+        if (*p >= 0x20 && *p < 0x7f && *p != '"' && *p != '\\') {
+            hex[0] = (char)*p;
+            hex[1] = '\0';
+        } else {
+            snprintf(hex, sizeof(hex), "\\x%02x", *p);
+        }
+        tstype_put(d, hex);
+    }
+    tstype_put(d, "\"");
+}
+
+/* A strict rendering of every field the type-text parser sets, in stored order.
+ * cbm_type_equal treats union members as a set and skips FUNC parameter names. */
+static void tstype_dump(TsTypeDump *d, const CBMType *t, int depth) {
+    char num[32];
+    if (depth > 1024) {
+        tstype_put(d, "...");
+        return;
+    }
+    if (!t) {
+        tstype_put(d, "NULL");
+        return;
+    }
+    if (t == cbm_type_unknown()) {
+        tstype_put(d, "?");
+        return;
+    }
+    snprintf(num, sizeof(num), "k%d", (int)t->kind);
+    tstype_put(d, num);
+    switch (t->kind) {
+    case CBM_TYPE_NAMED:
+        tstype_str(d, t->data.named.qualified_name);
+        return;
+    case CBM_TYPE_BUILTIN:
+        tstype_str(d, t->data.builtin.name);
+        return;
+    case CBM_TYPE_TYPE_PARAM:
+        tstype_str(d, t->data.type_param.name);
+        return;
+    case CBM_TYPE_INFER:
+        tstype_str(d, t->data.infer.name);
+        return;
+    case CBM_TYPE_TYPEOF_QUERY:
+        tstype_str(d, t->data.typeof_query.expr);
+        return;
+    case CBM_TYPE_KEYOF:
+        tstype_put(d, "(");
+        tstype_dump(d, t->data.keyof.operand, depth + 1);
+        tstype_put(d, ")");
+        return;
+    case CBM_TYPE_CONDITIONAL:
+        tstype_put(d, "(");
+        tstype_dump(d, t->data.conditional.check, depth + 1);
+        tstype_put(d, ",");
+        tstype_dump(d, t->data.conditional.extends, depth + 1);
+        tstype_put(d, ",");
+        tstype_dump(d, t->data.conditional.true_branch, depth + 1);
+        tstype_put(d, ",");
+        tstype_dump(d, t->data.conditional.false_branch, depth + 1);
+        tstype_put(d, ")");
+        return;
+    case CBM_TYPE_FUNC:
+        tstype_put(d, "(");
+        for (int i = 0; t->data.func.param_types && t->data.func.param_types[i]; i++) {
+            tstype_put(d, i ? "," : "");
+            tstype_str(d, t->data.func.param_names ? t->data.func.param_names[i] : NULL);
+            tstype_put(d, ":");
+            tstype_dump(d, t->data.func.param_types[i], depth + 1);
+        }
+        tstype_put(d, ")->(");
+        for (int i = 0; t->data.func.return_types && t->data.func.return_types[i]; i++) {
+            tstype_put(d, i ? "," : "");
+            tstype_dump(d, t->data.func.return_types[i], depth + 1);
+        }
+        tstype_put(d, ")");
+        return;
+    case CBM_TYPE_TUPLE:
+        snprintf(num, sizeof(num), "#%d[", t->data.tuple.count);
+        tstype_put(d, num);
+        for (int i = 0; i < t->data.tuple.count; i++) {
+            tstype_put(d, i ? "," : "");
+            tstype_dump(d, t->data.tuple.elems[i], depth + 1);
+        }
+        tstype_put(d, "]");
+        return;
+    case CBM_TYPE_UNION:
+    case CBM_TYPE_INTERSECTION:
+        snprintf(num, sizeof(num), "#%d[", t->data.union_type.count);
+        tstype_put(d, num);
+        for (int i = 0; t->data.union_type.members && i < t->data.union_type.count; i++) {
+            tstype_put(d, i ? "," : "");
+            tstype_dump(d, t->data.union_type.members[i], depth + 1);
+        }
+        tstype_put(d, "]");
+        return;
+    case CBM_TYPE_TEMPLATE:
+        tstype_str(d, t->data.template_type.template_name);
+        snprintf(num, sizeof(num), "#%d<", t->data.template_type.arg_count);
+        tstype_put(d, num);
+        for (int i = 0; t->data.template_type.template_args && i < t->data.template_type.arg_count;
+             i++) {
+            tstype_put(d, i ? "," : "");
+            tstype_dump(d, t->data.template_type.template_args[i], depth + 1);
+        }
+        tstype_put(d, ">");
+        return;
+    default:
+        tstype_put(d, "<unexpected kind>");
+        return;
+    }
+}
+
+/* Inputs for every branch of the parser: trimming, budget-free empties,
+ * function types (named, optional, positional, empty and nested parameters,
+ * missing arrows, unbalanced parens), object literals, `this`, conditional
+ * types (complete, partial, nested), infer/keyof/typeof with raw tails,
+ * tuples, unions, intersections, member caps, builtins, arrays, generics
+ * (stdlib, utility, qualified, empty, nested), names (stdlib, DOM, dotted,
+ * lowercase, non-ASCII) and malformed brackets. */
+static const char *const TSTYPE_TEXTS[] = {
+    NULL,
+    "",
+    " ",
+    " \t\r\n",
+    ":",
+    ": ",
+    ";",
+    ",;, ",
+    "\r\n: Client ; ",
+    "Client",
+    "  Client,",
+    ":Client",
+    "::Client",
+    "exports.Client",
+    "a.b.Client",
+    "Document",
+    "JSX",
+    "Pick",
+    "Promise",
+    "lower",
+    "_Under",
+    "Child\xff",
+    "\xc3\x89"
+    "cole",
+    "string",
+    "number",
+    "boolean",
+    "bigint",
+    "any",
+    "unknown",
+    "void",
+    "never",
+    "null",
+    "undefined",
+    "object",
+    "symbol",
+    "String",
+    "strings",
+    "this",
+    "this;",
+    "  this  ",
+    "This",
+    "{ child: Client }",
+    "{",
+    "}",
+    "(",
+    ")",
+    "(a",
+    "(Client)",
+    "(a) b",
+    "()",
+    "() =>",
+    "() => ",
+    "()=>void",
+    "() => void",
+    "() =>void;",
+    "(a: A) => R",
+    "(a: A, b?: B) => R",
+    "(handler?: Promise<Session>, number, , flag\t?: boolean) => Result[];",
+    "(cb: (x: number) => void, y: string) => void",
+    "(cb: (x: number) => Foo) => Bar",
+    "(m: Map<K, V>, t: [A, B]) => Promise<R>",
+    "( a : A ) =>  R ;",
+    "(: A) => R",
+    "(a:) => R",
+    "(...args: Arg[]) => Out",
+    "(a: A) => (b: B) => C",
+    "((a: A) => B)",
+    "(a: A) =>\tR",
+    "(a: A)\t=> R",
+    "(a: A)\n=> R",
+    "(a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p, q, r) => Z",
+    "(a,b) => (c) => d",
+    "T extends U ? X : Y",
+    "T extends U ? X : Y;",
+    "T extends Box<infer R> ? keyof R : typeof value;",
+    "T extends (infer U)[] ? U : never",
+    "T extends [infer H, ...infer Rest] ? H : never",
+    "T extends U ? X",
+    "T extends U : X ? Y",
+    "T extends U ? X : Y extends Z ? A : B",
+    "Box<T extends U ? X : Y>",
+    " extends U ? X : Y",
+    "T  extends U ? X : Y",
+    "T extends U ?X : Y",
+    "A | B extends C ? D : E",
+    "(T extends U ? X : Y)",
+    "infer R",
+    "infer R;",
+    "infer  R extra",
+    "infer \tR",
+    "infer ",
+    "infer",
+    "inferR",
+    "keyof Widget",
+    "keyof  Widget ;",
+    "keyof typeof obj",
+    "keyof ",
+    "keyof",
+    "typeof exported",
+    ": typeof exported;  ",
+    "typeof \tvalue.inner",
+    "typeof ",
+    "typeof",
+    "typeofx",
+    "[]",
+    "[",
+    "]",
+    "[A]",
+    "[A, B]",
+    "[A, , B]",
+    "[A, B,]",
+    "[Map<K, V>, [C, D]]",
+    "[A, B] | C",
+    "[A][]",
+    "[T0,T1,T2,T3,T4,T5,T6,T7,T8,T9,T10,T11,T12,T13,T14,T15,T16,T17,T18,T19]",
+    "A | B",
+    "A & B",
+    "A & B | C",
+    "A | B & C",
+    "A|B",
+    "A |B",
+    "A| B",
+    "A\t| B",
+    "| A",
+    " | A",
+    "A | ",
+    "A |",
+    "A | | B",
+    "Box<A | B> | C",
+    "(A | B)",
+    "A | B[]",
+    "string | null",
+    "Promise<A> & Map<K, V>",
+    "T0 | T1 | T2 | T3 | T4 | T5 | T6 | T7 | T8 | T9 | T10 | T11 | T12 | T13 | T14 | T15 | T16",
+    "T0 & T1 & T2 & T3 & T4 & T5 & T6 & T7 & T8 & T9 & T10 & T11 & T12 & T13 & T14 & T15",
+    "T0 | T1 | T2 | T3 | T4 | T5 | T6 | T7 | T8 | T9 | T10 | T11 | T12 | T13 | T14",
+    "T0 | T1 | T2 | T3 | T4 | T5 | T6 | T7 | T8 | T9 | T10 | T11 | T12 | T13 | T14 | T15",
+    "T[]",
+    "T[][]",
+    "string[]",
+    "Provider<A, B>[]",
+    "[]]",
+    "[][]",
+    "Map<>",
+    "Map<K, V>",
+    "Foo<A, B<C>>",
+    "Foo<A,B<C,D>,E>",
+    "Foo<(a: A) => B>",
+    "Foo<[A, B]>",
+    "Foo< A , B >",
+    "Foo<A>>",
+    "Foo<<A>",
+    "<T>",
+    "<>",
+    "x<T>",
+    "a.b.Foo<T>",
+    "Partial<Widget>",
+    "Readonly<Widget>",
+    "Array<Widget>",
+    "NodeList<T>",
+    "Math<T>",
+    "Record<string, Widget>",
+    "Box<T0,T1,T2,T3,T4,T5,T6,T7,T8,T9,T10,T11,T12,T13,T14,T15,T16,T17>",
+    "Box<,>",
+    "Foo<A>.Bar",
+    "Foo<A>[]",
+    "Foo[]<A>",
+    "\"literal\"",
+    "42",
+    "`tmpl${T}`",
+    "A extends B",
+    "readonly Widget[]",
+    "new () => Widget",
+    "asserts x is Widget",
+    "x is Widget",
+    "unique symbol",
+    "Widget[\"key\"]",
+    "{ [K in keyof T]: T[K] }",
+};
+
+static const char *const TSTYPE_MODULES[] = {"pkg.api", NULL, "", "a.b.c"};
+
+static int tstype_compare(CBMArena *arena, const char *text, const char *module, long budget,
+                          bool show_budget) {
+    static char c_buf[65536];
+    static char rust_buf[65536];
+    TsTypeDump c_dump = {c_buf, sizeof(c_buf), 0};
+    TsTypeDump rust_dump = {rust_buf, sizeof(rust_buf), 0};
+    c_buf[0] = rust_buf[0] = '\0';
+
+    cbm_ts_lsp_test_set_type_budget(budget);
+    tstype_dump(&c_dump, cbm_ts_lsp_test_parse_type_text(arena, text, module, true), 0);
+    long c_budget = cbm_ts_lsp_test_budget_remaining();
+    bool c_warned = cbm_ts_lsp_test_budget_warned();
+
+    cbm_ts_lsp_test_set_type_budget(budget);
+    tstype_dump(&rust_dump, cbm_ts_lsp_test_parse_type_text(arena, text, module, false), 0);
+    long rust_budget = cbm_ts_lsp_test_budget_remaining();
+    bool rust_warned = cbm_ts_lsp_test_budget_warned();
+    cbm_ts_lsp_test_set_type_budget(-1);
+
+    if (strcmp(c_buf, rust_buf) == 0 && c_budget == rust_budget && c_warned == rust_warned) {
+        return 0;
+    }
+    char shown[512];
+    TsTypeDump quoted = {shown, sizeof(shown), 0};
+    tstype_str(&quoted, text);
+    printf("  text=");
+    printf("%s module=%s budget=%ld\n", shown, module ? module : "(null)", budget);
+    printf("    C:    %s", c_buf);
+    if (show_budget)
+        printf(" budget=%ld warned=%d", c_budget, c_warned);
+    printf("\n    Rust: %s", rust_buf);
+    if (show_budget)
+        printf(" budget=%ld warned=%d", rust_budget, rust_warned);
+    printf("\n");
+    return 1;
+}
+
+TEST(tslsp_type_text_matches_c_reference) {
+    CBMArena arena;
+    cbm_arena_init(&arena);
+    int mismatches = 0;
+    size_t text_count = sizeof(TSTYPE_TEXTS) / sizeof(TSTYPE_TEXTS[0]);
+    size_t module_count = sizeof(TSTYPE_MODULES) / sizeof(TSTYPE_MODULES[0]);
+    for (size_t m = 0; m < module_count; m++) {
+        for (size_t i = 0; i < text_count; i++) {
+            mismatches += tstype_compare(&arena, TSTYPE_TEXTS[i], TSTYPE_MODULES[m], -1, false);
+        }
+    }
+    cbm_arena_destroy(&arena);
+    ASSERT_EQ(mismatches, 0);
+    PASS();
+}
+
+/* Every budget from unarmed through exhaustion at each nested slice: the
+ * result, the remaining budget and the warned flag must all match, including
+ * the C rule that a negative budget stops charging for the rest of the run. */
+TEST(tslsp_type_text_budget_matches_c_reference) {
+    static const char *const texts[] = {
+        "A | B",
+        "Client",
+        "(handler?: Promise<Session>, number, , flag\t?: boolean) => Result[];",
+        "T extends Box<infer R> ? keyof R : typeof value;",
+        "[Map<K, V>, [C, D]] | Foo<A, B<C>>[]",
+        "T0 | T1 | T2 | T3 | T4 | T5 | T6 | T7 | T8 | T9 | T10 | T11 | T12 | T13 | T14 | T15 | T16",
+        "a_very_long_identifier_name_that_spans_more_than_sixteen_bytes_twice<A, B>",
+        "",
+        "   ",
+    };
+    CBMArena arena;
+    cbm_arena_init(&arena);
+    int mismatches = 0;
+    for (size_t i = 0; i < sizeof(texts) / sizeof(texts[0]); i++) {
+        for (long budget = -1; budget <= 40; budget++) {
+            mismatches += tstype_compare(&arena, texts[i], "pkg.api", budget, true);
+        }
+    }
+    cbm_arena_destroy(&arena);
+    ASSERT_EQ(mismatches, 0);
+    PASS();
+}
+
+/* A closed arena fails every allocation. The C reference then falls back to
+ * UNKNOWN (the named-type strndup check, or a constructor that cannot allocate);
+ * Rust must do the same. Generic bases and function parameters are left out:
+ * the C reference dereferences their failed strndup results. */
+TEST(tslsp_type_text_allocation_failure_matches_c_reference) {
+    static const char *const texts[] = {
+        "Client",   "lower",   "exports.Client",
+        "Document", "string",  "this",
+        "T[]",      "[A, B]",  "A | B",
+        "A & B",    "keyof W", "typeof value",
+        "infer R",  "() => R", "T extends U ? X : Y",
+        "{ a: A }", "(a) b",   "",
+        NULL,
+    };
+    CBMArena closed;
+    memset(&closed, 0, sizeof(closed));
+    int mismatches = 0;
+    for (size_t i = 0; i < sizeof(texts) / sizeof(texts[0]); i++) {
+        for (size_t m = 0; m < sizeof(TSTYPE_MODULES) / sizeof(TSTYPE_MODULES[0]); m++) {
+            mismatches += tstype_compare(&closed, texts[i], TSTYPE_MODULES[m], -1, false);
+        }
+    }
+    ASSERT_EQ(mismatches, 0);
+    PASS();
+}
+
+/* Long and deeply nested inputs: the Rust parser walks children on a heap
+ * stack, so it must match the recursive C reference at every depth tested. */
+TEST(tslsp_type_text_nesting_matches_c_reference) {
+    CBMArena arena;
+    cbm_arena_init(&arena);
+    int mismatches = 0;
+    static char text[8192];
+    for (int depth = 1; depth <= 256; depth *= 2) {
+        size_t n = 0;
+        for (int i = 0; i < depth; i++)
+            n += (size_t)snprintf(text + n, sizeof(text) - n, "Box<");
+        n += (size_t)snprintf(text + n, sizeof(text) - n, "Leaf");
+        for (int i = 0; i < depth; i++)
+            n += (size_t)snprintf(text + n, sizeof(text) - n, ">");
+        mismatches += tstype_compare(&arena, text, "pkg.api", -1, false);
+        mismatches += tstype_compare(&arena, text, "pkg.api", 200, true);
+
+        n = (size_t)snprintf(text, sizeof(text), "number");
+        for (int i = 0; i < depth; i++)
+            n += (size_t)snprintf(text + n, sizeof(text) - n, "[]");
+        mismatches += tstype_compare(&arena, text, NULL, -1, false);
+
+        n = 0;
+        for (int i = 0; i < depth; i++)
+            n += (size_t)snprintf(text + n, sizeof(text) - n, "(a: ");
+        n += (size_t)snprintf(text + n, sizeof(text) - n, "X");
+        for (int i = 0; i < depth; i++)
+            n += (size_t)snprintf(text + n, sizeof(text) - n, ") => R%d", i);
+        mismatches += tstype_compare(&arena, text, "pkg.api", -1, false);
+    }
+    cbm_arena_destroy(&arena);
+    ASSERT_EQ(mismatches, 0);
+    PASS();
+}
+
 /* ── Suite registration ────────────────────────────────────────────────────── */
 
 SUITE(ts_lsp) {
@@ -5704,4 +6172,10 @@ SUITE(ts_lsp) {
     RUN_TEST(tslsp_js_ordinary_same_leaf_calls_join_by_exact_site);
     RUN_TEST(tslsp_ts_ordinary_same_leaf_calls_join_by_exact_site);
     RUN_TEST(tslsp_tsx_ordinary_same_leaf_calls_join_by_exact_site);
+
+    /* Type text parity with the C reference */
+    RUN_TEST(tslsp_type_text_matches_c_reference);
+    RUN_TEST(tslsp_type_text_budget_matches_c_reference);
+    RUN_TEST(tslsp_type_text_allocation_failure_matches_c_reference);
+    RUN_TEST(tslsp_type_text_nesting_matches_c_reference);
 }
