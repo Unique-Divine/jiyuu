@@ -1,11 +1,18 @@
-//! Rust's one declaration of the native type registry lookups.
+//! Rust's one declaration of the native arena allocator and type registry
+//! lookups.
 //!
 //! Several Rust modules call these C functions. Declaring each symbol once,
 //! over one set of opaque handles, keeps their signatures from drifting apart
 //! and avoids `clashing_extern_declarations`. Callers that read fields of a
 //! registry row cast the returned pointer to their own `#[repr(C)]` view.
 
-use std::ffi::c_char;
+use std::ffi::{c_char, c_void};
+
+/// A native `CBMArena`.
+#[repr(C)]
+pub(crate) struct Arena {
+    _opaque: [u8; 0],
+}
 
 /// A native `CBMTypeRegistry`.
 #[repr(C)]
@@ -26,6 +33,10 @@ pub(crate) struct RegisteredFunc {
 }
 
 unsafe extern "C" {
+    /// Returns `n` bytes from `arena`, or NULL for a NULL arena, a zero size,
+    /// or a failed allocation.
+    pub(crate) fn cbm_arena_alloc(arena: *mut Arena, n: usize) -> *mut c_void;
+
     // The registry owns the returned rows; callers keep it alive while they
     // borrow them.
     pub(crate) fn cbm_registry_lookup_type(
