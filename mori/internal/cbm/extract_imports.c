@@ -1571,7 +1571,7 @@ static bool process_import_clause(CBMExtractCtx *ctx, TSNode clause, const char 
     return found;
 }
 
-/* Process a single ES import_statement node. Returns true if fully handled. */
+/* Static imports for JavaScript, ArkTS, and embedded scripts. */
 static bool process_es_import_statement(CBMExtractCtx *ctx, TSNode node) {
     CBMArena *a = ctx->arena;
     TSNode source_node = find_es_source_node(node);
@@ -1610,13 +1610,7 @@ static bool process_es_import_statement(CBMExtractCtx *ctx, TSNode node) {
 /* The sink receives nodes borrowed from the live tree. C keeps ownership
  * of import rows and their strings. */
 typedef bool (*ts_static_import_emit_t)(void *, TSNode, const TSNode *, const TSNode *, bool);
-typedef bool (*ts_static_import_extractor_t)(TSNode, void *, ts_static_import_emit_t);
-static ts_static_import_extractor_t ts_static_import_extractor;
-
-void cbm_ts_set_static_import_extractor(ts_static_import_extractor_t extract);
-void cbm_ts_set_static_import_extractor(ts_static_import_extractor_t extract) {
-    ts_static_import_extractor = extract;
-}
+extern bool mori_ts_extract_static_import(TSNode node, void *context, ts_static_import_emit_t emit);
 
 typedef struct {
     CBMExtractCtx *ctx;
@@ -1631,8 +1625,8 @@ static bool emit_ts_static_import(void *context, TSNode source, const TSNode *lo
     if (!output->path) {
         cbm_ffi_ts_node_written(&source);
         output->path = strip_quotes(arena, cbm_node_text(arena, source, ctx->source));
-        /* The source is shared by every binding. Decline before writing any
-         * row so the statement can fall back to native extraction. */
+        /* The source is shared by every binding. Reject an empty path before
+         * writing any rows. */
         if (!output->path || !output->path[0]) {
             return false;
         }
@@ -1658,7 +1652,7 @@ static bool emit_ts_static_import(void *context, TSNode source, const TSNode *lo
 
 static bool process_ts_static_import(CBMExtractCtx *ctx, TSNode node) {
     TSStaticImportOutput output = {.ctx = ctx};
-    if (!ts_static_import_extractor(node, &output, emit_ts_static_import)) {
+    if (!mori_ts_extract_static_import(node, &output, emit_ts_static_import)) {
         return false;
     }
     cbm_log_debug("extract.ts_static_import", "implementation", "rust", "file",
@@ -1775,10 +1769,8 @@ static void walk_es_imports(CBMExtractCtx *ctx, TSNode root, bool rust_static) {
         bool push_children = true;
 
         if (strcmp(kind, "import_statement") == 0) {
-            if ((rust_static && process_ts_static_import(ctx, node)) ||
-                process_es_import_statement(ctx, node)) {
-                push_children = false;
-            }
+            push_children = rust_static ? !process_ts_static_import(ctx, node)
+                                        : !process_es_import_statement(ctx, node);
         } else if (strcmp(kind, "export_statement") == 0) {
             /* Re-export: `export { x } from './mod'` / `export * from './mod'`.
              * It carries a `source` string just like an import and creates the
@@ -1810,7 +1802,7 @@ static void walk_es_imports(CBMExtractCtx *ctx, TSNode root, bool rust_static) {
 
 static void parse_es_imports(CBMExtractCtx *ctx) {
     bool typescript = ctx->language == CBM_LANG_TYPESCRIPT || ctx->language == CBM_LANG_TSX;
-    walk_es_imports(ctx, ctx->root, typescript && ts_static_import_extractor != NULL);
+    walk_es_imports(ctx, ctx->root, typescript);
 }
 
 // --- Java imports ---

@@ -45,7 +45,7 @@
  * ---------  --------------------  ------------------------------------------
  * Go         GREEN (all)           dedicated parse_go_imports; stress test passes
  * Python     GREEN (all)           mori_python_extract_imports (Rust); tests pass
- * TypeScript GREEN (all)           process_es_import_statement; existing tests pass
+ * TypeScript GREEN (all)           mori_ts_extract_static_import handles static imports
  * JavaScript GREEN (all)           walk_es_imports + CommonJS; existing tests pass
  * Rust       GREEN                 mori_rust_extract_use_imports walks use trees
  * Java       GREEN (basic)         parse_java_imports scoped_identifier; existing
