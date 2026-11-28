@@ -46,28 +46,4 @@ bool mori_ruby_ancestry_is_ar_model(const RubyAncestry *ancestry, const char *qn
                                     uint32_t max_depth);
 size_t mori_ruby_ancestry_counts(const RubyAncestry *ancestry, size_t *mixins);
 
-#ifdef CBM_ENABLE_TEST_SEAMS
-/* C reference for the Rust ancestry table (ruby_lsp.c). Setting
- * cbm_ruby_lookup_c_reference routes this thread's cbm_run_ruby_lsp calls to
- * it, so tests can compare whole-file results. */
-extern _Thread_local bool cbm_ruby_lookup_c_reference;
-RubyAncestry *cbm_ruby_ancestry_c_new(void);
-void cbm_ruby_ancestry_c_free(RubyAncestry *ancestry);
-void cbm_ruby_ancestry_c_declare(RubyAncestry *ancestry, const char *qn, const char *nesting,
-                                 const char *path, const char *parent);
-void cbm_ruby_ancestry_c_mixin(RubyAncestry *ancestry, const char *owner, const char *nesting,
-                               const char *path, int kind);
-void cbm_ruby_ancestry_c_finalize(RubyAncestry *ancestry, const void *registry,
-                                  RubyTypeLookup lookup);
-const char *cbm_ruby_ancestry_c_constant(const RubyAncestry *ancestry, const char *nesting,
-                                         const char *path);
-RubyMethodResult cbm_ruby_ancestry_c_lookup(const RubyAncestry *ancestry, const void *registry,
-                                            RubyMethodLookup lookup, const char *qn,
-                                            const char *name, bool singleton, int search,
-                                            uint32_t max_depth);
-bool cbm_ruby_ancestry_c_is_ar_model(const RubyAncestry *ancestry, const char *qn,
-                                     uint32_t max_depth);
-size_t cbm_ruby_ancestry_c_counts(const RubyAncestry *ancestry, size_t *mixins);
-#endif
-
 #endif

@@ -87,15 +87,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* Ancestry backend: the Rust exports in ruby_lookup.rs. Seam builds can switch
- * one thread to the C reference below to compare whole-file results. */
-#ifdef CBM_ENABLE_TEST_SEAMS
-#define RUBY_ANCESTRY(fn) \
-    (cbm_ruby_lookup_c_reference ? cbm_ruby_ancestry_c_##fn : mori_ruby_ancestry_##fn)
-#else
-#define RUBY_ANCESTRY(fn) mori_ruby_ancestry_##fn
-#endif
-
 /* Recursion cap for ruby_eval_expr_type — mirrors perl/php (unknown past 8). */
 #define RUBY_EVAL_MAX_DEPTH 8
 
@@ -350,441 +341,6 @@ static const char *ruby_ivar_type(RubyLSPContext *ctx, const char *class_qn,
     return NULL;
 }
 
-#ifdef CBM_ENABLE_TEST_SEAMS
-/* C reference for the ancestry table that moved to ruby_lookup.rs. Seam
- * builds keep it so tests can run both implementations on the same inputs,
- * directly or through cbm_run_ruby_lsp with cbm_ruby_lookup_c_reference set;
- * production calls only the Rust exports. */
-
-_Thread_local bool cbm_ruby_lookup_c_reference;
-
-typedef struct {
-    const char *path;
-    const char *qn;
-    const char *superclass_ref; /* raw dotted superclass spelling, or NULL */
-    const char *superclass_qn;  /* resolved QN (table/stdlib), or NULL */
-    unsigned int seen_instance;
-    unsigned int seen_singleton;
-} RubyRefClass;
-
-typedef struct {
-    const char *owner_qn;
-    const char *module_ref;
-    const char *module_qn;
-    RubyMixinKind kind;
-} RubyRefMixin;
-
-typedef struct {
-    CBMArena arena;
-    RubyRefClass *classes;
-    int class_count;
-    int class_cap;
-    RubyRefMixin *mixins;
-    int mixin_count;
-    int mixin_cap;
-    unsigned int lookup_stamp;
-} RubyRefAncestry;
-
-static const char *ruby_ref_dotted(CBMArena *a, const char *raw) {
-    if (!raw)
-        return NULL;
-    size_t n = strlen(raw);
-    char *out = (char *)cbm_arena_alloc(a, n + 1);
-    if (!out)
-        return raw;
-    size_t j = 0;
-    for (size_t i = 0; i < n; i++) {
-        if (raw[i] == ':' && i + 1 < n && raw[i + 1] == ':') {
-            out[j++] = '.';
-            i++;
-            continue;
-        }
-        out[j++] = raw[i];
-    }
-    out[j] = '\0';
-    return out;
-}
-
-static RubyRefClass *ruby_ref_add_class(RubyRefAncestry *a, const char *path, const char *qn) {
-    if (!path || !qn)
-        return NULL;
-    for (int i = 0; i < a->class_count; i++) {
-        if (strcmp(a->classes[i].qn, qn) == 0)
-            return &a->classes[i];
-    }
-    if (a->class_count >= a->class_cap) {
-        int newcap = a->class_cap ? a->class_cap * 2 : 8;
-        RubyRefClass *nc =
-            (RubyRefClass *)cbm_arena_alloc(&a->arena, (size_t)newcap * sizeof(RubyRefClass));
-        if (!nc)
-            return NULL;
-        for (int i = 0; i < a->class_count; i++)
-            nc[i] = a->classes[i];
-        a->classes = nc;
-        a->class_cap = newcap;
-    }
-    RubyRefClass *ci = &a->classes[a->class_count++];
-    memset(ci, 0, sizeof(*ci));
-    ci->path = cbm_arena_strdup(&a->arena, path);
-    ci->qn = cbm_arena_strdup(&a->arena, qn);
-    return ci;
-}
-
-static void ruby_ref_add_mixin(RubyRefAncestry *a, const char *owner_qn, const char *module_ref,
-                               RubyMixinKind kind) {
-    if (!owner_qn || !module_ref)
-        return;
-    if (a->mixin_count >= a->mixin_cap) {
-        int newcap = a->mixin_cap ? a->mixin_cap * 2 : 8;
-        RubyRefMixin *nm =
-            (RubyRefMixin *)cbm_arena_alloc(&a->arena, (size_t)newcap * sizeof(RubyRefMixin));
-        if (!nm)
-            return;
-        for (int i = 0; i < a->mixin_count; i++)
-            nm[i] = a->mixins[i];
-        a->mixins = nm;
-        a->mixin_cap = newcap;
-    }
-    RubyRefMixin *mi = &a->mixins[a->mixin_count++];
-    memset(mi, 0, sizeof(*mi));
-    mi->owner_qn = cbm_arena_strdup(&a->arena, owner_qn);
-    mi->module_ref = cbm_arena_strdup(&a->arena, module_ref);
-    mi->kind = kind;
-}
-
-static RubyRefClass *ruby_ref_class_by_qn(RubyRefAncestry *a, const char *qn) {
-    if (!qn)
-        return NULL;
-    for (int i = 0; i < a->class_count; i++) {
-        if (strcmp(a->classes[i].qn, qn) == 0)
-            return &a->classes[i];
-    }
-    return NULL;
-}
-
-static const char *ruby_ref_stdlib_superclass(const char *qn) {
-    if (!qn)
-        return NULL;
-    if (strcmp(qn, "ApplicationRecord") == 0)
-        return "ActiveRecord.Base";
-    if (strcmp(qn, "ApplicationController") == 0)
-        return "ActionController.Base";
-    if (strcmp(qn, "ApplicationJob") == 0)
-        return "ActiveJob.Base";
-    if (strcmp(qn, "ApplicationMailer") == 0)
-        return "ActionMailer.Base";
-    return NULL;
-}
-
-static const char *ruby_ref_superclass_qn(RubyRefAncestry *a, const char *class_qn) {
-    RubyRefClass *ci = ruby_ref_class_by_qn(a, class_qn);
-    if (ci)
-        return ci->superclass_qn;
-    return ruby_ref_stdlib_superclass(class_qn);
-}
-
-static const char *ruby_ref_class_qn_by_path(RubyRefAncestry *a, const char *path) {
-    for (int i = 0; i < a->class_count; i++) {
-        if (strcmp(a->classes[i].path, path) == 0)
-            return a->classes[i].qn;
-    }
-    return NULL;
-}
-
-static const char *ruby_ref_constant(RubyRefAncestry *a, const char *nesting, const char *path) {
-    if (!path || !path[0])
-        return NULL;
-    const char *nest = nesting ? nesting : "";
-    char prefix[512];
-    size_t nlen = strlen(nest);
-    if (nlen < sizeof(prefix)) {
-        memcpy(prefix, nest, nlen + 1);
-        while (prefix[0]) {
-            const char *cand =
-                cbm_arena_sprintf(&a->arena, "%s.%s", ruby_ref_dotted(&a->arena, prefix), path);
-            const char *qn = ruby_ref_class_qn_by_path(a, cand);
-            if (qn)
-                return qn;
-            char *last_dot = strrchr(prefix, '.');
-            if (last_dot)
-                *last_dot = '\0';
-            else
-                prefix[0] = '\0';
-        }
-    }
-    return ruby_ref_class_qn_by_path(a, path);
-}
-
-typedef struct {
-    bool blocked;
-    unsigned int stamp;
-    uint64_t steps;
-    uint32_t max_depth;
-    const void *registry;
-    RubyMethodLookup lookup;
-} RubyRefWalk;
-
-static RubyRefWalk ruby_ref_walk_begin(RubyRefAncestry *a, const void *registry,
-                                       RubyMethodLookup lookup, uint32_t max_depth) {
-    if (++a->lookup_stamp == 0) {
-        for (int i = 0; i < a->class_count; i++) {
-            a->classes[i].seen_instance = 0;
-            a->classes[i].seen_singleton = 0;
-        }
-        a->lookup_stamp = 1;
-    }
-    RubyRefWalk w = {false, a->lookup_stamp, 0, max_depth, registry, lookup};
-    return w;
-}
-
-static bool ruby_ref_walk_seen(RubyRefAncestry *a, RubyRefWalk *w, const char *class_qn,
-                               bool singleton) {
-    RubyRefClass *ci = ruby_ref_class_by_qn(a, class_qn);
-    if (!ci)
-        return false;
-    unsigned int *mark = singleton ? &ci->seen_singleton : &ci->seen_instance;
-    if (*mark == w->stamp)
-        return true;
-    *mark = w->stamp;
-    return false;
-}
-
-static bool ruby_ref_superclass_unresolved(RubyRefAncestry *a, const char *class_qn) {
-    RubyRefClass *ci = ruby_ref_class_by_qn(a, class_qn);
-    return ci && ci->superclass_ref && !ci->superclass_qn;
-}
-
-static const CBMRegisteredFunc *ruby_ref_instance_depth(RubyRefAncestry *a, const char *class_qn,
-                                                        const char *name, uint32_t depth,
-                                                        RubyRefWalk *w);
-
-static const CBMRegisteredFunc *ruby_ref_in_mixins(RubyRefAncestry *a, const char *owner_qn,
-                                                   RubyMixinKind kind, const char *name,
-                                                   uint32_t depth, RubyRefWalk *w) {
-    for (int i = a->mixin_count - 1; i >= 0; i--) {
-        RubyRefMixin *mi = &a->mixins[i];
-        if (mi->kind != kind || strcmp(mi->owner_qn, owner_qn) != 0)
-            continue;
-        if (!mi->module_qn) {
-            w->blocked = true;
-            return NULL;
-        }
-        const CBMRegisteredFunc *f = ruby_ref_instance_depth(a, mi->module_qn, name, depth + 1, w);
-        if (f || w->blocked)
-            return f;
-    }
-    return NULL;
-}
-
-static const CBMRegisteredFunc *ruby_ref_instance_depth(RubyRefAncestry *a, const char *class_qn,
-                                                        const char *name, uint32_t depth,
-                                                        RubyRefWalk *w) {
-    if (!class_qn || !name || depth > w->max_depth)
-        return NULL;
-    w->steps++;
-    if (ruby_ref_walk_seen(a, w, class_qn, false))
-        return NULL;
-    const CBMRegisteredFunc *f =
-        ruby_ref_in_mixins(a, class_qn, RUBY_MIXIN_PREPEND, name, depth, w);
-    if (f || w->blocked)
-        return f;
-    f = w->lookup(w->registry, class_qn, name);
-    if (f)
-        return f;
-    f = ruby_ref_in_mixins(a, class_qn, RUBY_MIXIN_INCLUDE, name, depth, w);
-    if (f || w->blocked)
-        return f;
-    if (ruby_ref_superclass_unresolved(a, class_qn)) {
-        w->blocked = true;
-        return NULL;
-    }
-    const char *sup = ruby_ref_superclass_qn(a, class_qn);
-    if (sup && strcmp(sup, class_qn) != 0)
-        return ruby_ref_instance_depth(a, sup, name, depth + 1, w);
-    return NULL;
-}
-
-static const CBMRegisteredFunc *ruby_ref_singleton_depth(RubyRefAncestry *a, const char *class_qn,
-                                                         const char *name, uint32_t depth,
-                                                         RubyRefWalk *w) {
-    if (!class_qn || !name || depth > w->max_depth)
-        return NULL;
-    w->steps++;
-    if (ruby_ref_walk_seen(a, w, class_qn, true))
-        return NULL;
-    const char *key = cbm_arena_sprintf(&a->arena, "%s.self", class_qn);
-    const CBMRegisteredFunc *f = w->lookup(w->registry, key, name);
-    if (f)
-        return f;
-    f = ruby_ref_in_mixins(a, class_qn, RUBY_MIXIN_EXTEND, name, depth, w);
-    if (f || w->blocked)
-        return f;
-    if (ruby_ref_superclass_unresolved(a, class_qn)) {
-        w->blocked = true;
-        return NULL;
-    }
-    const char *sup = ruby_ref_superclass_qn(a, class_qn);
-    if (sup && strcmp(sup, class_qn) != 0)
-        return ruby_ref_singleton_depth(a, sup, name, depth + 1, w);
-    return NULL;
-}
-
-static bool ruby_ref_is_ar_model(RubyRefAncestry *a, const char *class_qn, uint32_t depth,
-                                 uint32_t max_depth) {
-    if (!class_qn || depth > max_depth)
-        return false;
-    if (strcmp(class_qn, "ActiveRecord.Base") == 0 || strcmp(class_qn, "ApplicationRecord") == 0)
-        return true;
-    RubyRefClass *ci = ruby_ref_class_by_qn(a, class_qn);
-    if (ci && ci->superclass_ref &&
-        (strcmp(ci->superclass_ref, "ApplicationRecord") == 0 ||
-         strcmp(ci->superclass_ref, "ActiveRecord.Base") == 0))
-        return true;
-    const char *sup = ruby_ref_superclass_qn(a, class_qn);
-    if (sup && strcmp(sup, class_qn) != 0)
-        return ruby_ref_is_ar_model(a, sup, depth + 1, max_depth);
-    return false;
-}
-
-/* PASS-1 refs are packed as "<nesting>|<ref>" (bare "<ref>" at top level)
- * and resolved once the class table is complete. */
-static const char *ruby_ref_pack(RubyRefAncestry *a, const char *nesting, const char *ref) {
-    const char *nest = nesting ? nesting : "";
-    if (!nest[0])
-        return ref;
-    return cbm_arena_sprintf(&a->arena, "%s|%s", nest, ref);
-}
-
-static const char *ruby_ref_resolve_packed(RubyRefAncestry *a, const void *registry,
-                                           RubyTypeLookup lookup, const char *packed) {
-    if (!packed)
-        return NULL;
-    const char *bar = strchr(packed, '|');
-    const char *nesting = "";
-    const char *ref = packed;
-    if (bar) {
-        nesting = cbm_arena_strndup(&a->arena, packed, (size_t)(bar - packed));
-        ref = bar + 1;
-    }
-    if (!ref[0])
-        return NULL;
-    const char *qn = ruby_ref_constant(a, nesting, ref);
-    return qn ? qn : lookup(registry, ref);
-}
-
-static const char *ruby_ref_packed_bare(const char *packed) {
-    if (!packed)
-        return NULL;
-    const char *bar = strchr(packed, '|');
-    return bar ? bar + 1 : packed;
-}
-
-RubyAncestry *cbm_ruby_ancestry_c_new(void) {
-    RubyRefAncestry *a = (RubyRefAncestry *)calloc(1, sizeof(RubyRefAncestry));
-    if (a)
-        cbm_arena_init(&a->arena);
-    return (RubyAncestry *)a;
-}
-
-void cbm_ruby_ancestry_c_free(RubyAncestry *ancestry) {
-    RubyRefAncestry *a = (RubyRefAncestry *)ancestry;
-    if (!a)
-        return;
-    cbm_arena_destroy(&a->arena);
-    free(a);
-}
-
-void cbm_ruby_ancestry_c_declare(RubyAncestry *ancestry, const char *qn, const char *nesting,
-                                 const char *path, const char *parent) {
-    RubyRefAncestry *a = (RubyRefAncestry *)ancestry;
-    if (!qn)
-        return;
-    const char *full = ruby_path_join(&a->arena, ruby_ref_dotted(&a->arena, nesting), path);
-    RubyRefClass *ci = ruby_ref_add_class(a, full, qn);
-    if (ci && parent && !ci->superclass_ref)
-        ci->superclass_ref = ruby_ref_pack(a, nesting, parent);
-}
-
-void cbm_ruby_ancestry_c_mixin(RubyAncestry *ancestry, const char *owner, const char *nesting,
-                               const char *path, int kind) {
-    RubyRefAncestry *a = (RubyRefAncestry *)ancestry;
-    if (kind < RUBY_MIXIN_INCLUDE || kind > RUBY_MIXIN_EXTEND)
-        return;
-    ruby_ref_add_mixin(a, owner, ruby_ref_pack(a, nesting, path), (RubyMixinKind)kind);
-}
-
-void cbm_ruby_ancestry_c_finalize(RubyAncestry *ancestry, const void *registry,
-                                  RubyTypeLookup lookup) {
-    RubyRefAncestry *a = (RubyRefAncestry *)ancestry;
-    for (int i = 0; i < a->class_count; i++) {
-        RubyRefClass *ci = &a->classes[i];
-        if (ci->superclass_ref) {
-            ci->superclass_qn = ruby_ref_resolve_packed(a, registry, lookup, ci->superclass_ref);
-            ci->superclass_ref = ruby_ref_packed_bare(ci->superclass_ref);
-        }
-    }
-    for (int i = 0; i < a->mixin_count; i++) {
-        RubyRefMixin *mi = &a->mixins[i];
-        mi->module_qn = ruby_ref_resolve_packed(a, registry, lookup, mi->module_ref);
-        mi->module_ref = ruby_ref_packed_bare(mi->module_ref);
-    }
-}
-
-const char *cbm_ruby_ancestry_c_constant(const RubyAncestry *ancestry, const char *nesting,
-                                         const char *path) {
-    return ruby_ref_constant((RubyRefAncestry *)ancestry, nesting, path);
-}
-
-RubyMethodResult cbm_ruby_ancestry_c_lookup(const RubyAncestry *ancestry, const void *registry,
-                                            RubyMethodLookup lookup, const char *qn,
-                                            const char *name, bool singleton, int search,
-                                            uint32_t max_depth) {
-    RubyRefAncestry *a = (RubyRefAncestry *)ancestry;
-    RubyMethodResult result = {NULL, false, 0};
-    if (!qn || !name || search < RUBY_LOOKUP_RECEIVER || search > RUBY_LOOKUP_SUPER)
-        return result;
-    RubyRefWalk w = ruby_ref_walk_begin(a, registry, lookup, max_depth);
-    const CBMRegisteredFunc *f = NULL;
-    if (search == RUBY_LOOKUP_SUPER) {
-        /* Includes (or extends) of the class, then the superclass chain: the
-         * class's own def is the caller and is skipped. */
-        f = ruby_ref_in_mixins(a, qn, singleton ? RUBY_MIXIN_EXTEND : RUBY_MIXIN_INCLUDE, name, 0,
-                               &w);
-        if (!f && !w.blocked && !ruby_ref_superclass_unresolved(a, qn)) {
-            const char *sup = ruby_ref_superclass_qn(a, qn);
-            if (sup) {
-                f = singleton ? ruby_ref_singleton_depth(a, sup, name, 0, &w)
-                              : ruby_ref_instance_depth(a, sup, name, 0, &w);
-            }
-        }
-        if (w.blocked)
-            f = NULL;
-    } else if (singleton) {
-        f = ruby_ref_singleton_depth(a, qn, name, 0, &w);
-    } else {
-        f = ruby_ref_instance_depth(a, qn, name, 0, &w);
-        /* Universal receiver typing fallback after a clean miss. */
-        if (!f && !w.blocked && search == RUBY_LOOKUP_RECEIVER && strcmp(qn, "Object") != 0)
-            f = lookup(registry, "Object", name);
-    }
-    result.target = f;
-    result.blocked = w.blocked;
-    result.steps = w.steps;
-    return result;
-}
-
-bool cbm_ruby_ancestry_c_is_ar_model(const RubyAncestry *ancestry, const char *qn,
-                                     uint32_t max_depth) {
-    return ruby_ref_is_ar_model((RubyRefAncestry *)ancestry, qn, 0, max_depth);
-}
-
-size_t cbm_ruby_ancestry_c_counts(const RubyAncestry *ancestry, size_t *mixins) {
-    const RubyRefAncestry *a = (const RubyRefAncestry *)ancestry;
-    *mixins = (size_t)a->mixin_count;
-    return (size_t)a->class_count;
-}
-#endif /* CBM_ENABLE_TEST_SEAMS */
-
 /* Native registry probes for the file-local Rust ancestry table. */
 static const char *ruby_builtin_type(const void *registry, const char *path) {
     const CBMRegisteredType *t = cbm_registry_lookup_type(registry, path);
@@ -801,15 +357,16 @@ static const CBMRegisteredFunc *ruby_registry_method(const void *registry, const
 const char *ruby_resolve_constant(RubyLSPContext *ctx, const char *path) {
     if (!ctx || !path || !path[0])
         return NULL;
-    const char *qn = RUBY_ANCESTRY(constant)(ctx->ancestry, ctx->nesting ? ctx->nesting : "", path);
+    const char *qn =
+        mori_ruby_ancestry_constant(ctx->ancestry, ctx->nesting ? ctx->nesting : "", path);
     return qn ? qn : ruby_builtin_type(ctx->registry, path);
 }
 
 static RubyMethodResult ruby_find_method(RubyLSPContext *ctx, const char *qn, const char *name,
                                          bool singleton, RubySearch search) {
     RubyMethodResult result =
-        RUBY_ANCESTRY(lookup)(ctx->ancestry, ctx->registry, ruby_registry_method, qn, name,
-                              singleton, search, CBM_LSP_MAX_LOOKUP_DEPTH);
+        mori_ruby_ancestry_lookup(ctx->ancestry, ctx->registry, ruby_registry_method, qn, name,
+                                 singleton, search, CBM_LSP_MAX_LOOKUP_DEPTH);
     CBM_LSP_WORK(result.steps);
     return result;
 }
@@ -1021,12 +578,12 @@ static const CBMType *ruby_dispatch_singleton(RubyLSPContext *ctx, const char *c
         if (!cbm_type_is_unknown(rt))
             return rt;
         /* Stdlib AR query entries return unknown; substitute the model. */
-        if (RUBY_ANCESTRY(is_ar_model)(ctx->ancestry, class_qn, CBM_LSP_MAX_LOOKUP_DEPTH) &&
+        if (mori_ruby_ancestry_is_ar_model(ctx->ancestry, class_qn, CBM_LSP_MAX_LOOKUP_DEPTH) &&
             ruby_ar_returns_model(mname))
             return cbm_type_named(ctx->arena, class_qn);
         return rt;
     }
-    if (RUBY_ANCESTRY(is_ar_model)(ctx->ancestry, class_qn, CBM_LSP_MAX_LOOKUP_DEPTH) &&
+    if (mori_ruby_ancestry_is_ar_model(ctx->ancestry, class_qn, CBM_LSP_MAX_LOOKUP_DEPTH) &&
         ruby_ar_returns_model(mname))
         return cbm_type_named(ctx->arena, class_qn);
     return cbm_type_unknown();
@@ -1157,8 +714,8 @@ static const CBMType *ruby_eval_call_type(RubyLSPContext *ctx, TSNode call, bool
     if (!cbm_type_is_unknown(out))
         return out;
     /* AR relation approximation: chains on a model type keep the model. */
-    if (RUBY_ANCESTRY(is_ar_model)(ctx->ancestry, rt->data.named.qualified_name,
-                                   CBM_LSP_MAX_LOOKUP_DEPTH) &&
+    if (mori_ruby_ancestry_is_ar_model(ctx->ancestry, rt->data.named.qualified_name,
+                                      CBM_LSP_MAX_LOOKUP_DEPTH) &&
         ruby_ar_returns_model(mname))
         return rt;
     return out;
@@ -1540,8 +1097,8 @@ static void ruby_collect_mixin_call(RubyLSPContext *ctx, TSNode call) {
         const char *mpath = ruby_const_path(ctx, ts_node_named_child(args, i));
         if (!mpath)
             continue; /* `extend self` etc. — not a constant */
-        RUBY_ANCESTRY(mixin)(ctx->ancestry, ctx->enclosing_class_qn,
-                             ctx->nesting ? ctx->nesting : "", mpath, kind);
+        mori_ruby_ancestry_mixin(ctx->ancestry, ctx->enclosing_class_qn,
+                                ctx->nesting ? ctx->nesting : "", mpath, kind);
     }
 }
 
@@ -1559,8 +1116,8 @@ static void ruby_pass1_class(RubyLSPContext *ctx, TSNode node, bool is_module) {
                 parent = ruby_const_path(ctx, ts_node_named_child(sup, i));
         }
     }
-    RUBY_ANCESTRY(declare)(ctx->ancestry, fr.qn, fr.saved_nesting ? fr.saved_nesting : "",
-                           fr.path, parent);
+    mori_ruby_ancestry_declare(ctx->ancestry, fr.qn, fr.saved_nesting ? fr.saved_nesting : "",
+                              fr.path, parent);
 
     TSNode body = ts_node_child_by_field_name(node, "body", 4);
     if (!ts_node_is_null(body))
@@ -1780,7 +1337,7 @@ static void ruby_lsp_init(RubyLSPContext *ctx, CBMArena *arena, const char *sour
     ctx->registry = registry;
     ctx->module_qn = module_qn;
     ctx->nesting = "";
-    ctx->ancestry = RUBY_ANCESTRY(new)();
+    ctx->ancestry = mori_ruby_ancestry_new();
     ctx->resolved_calls = out;
     ctx->current_scope = cbm_scope_push(arena, NULL);
 
@@ -1805,8 +1362,6 @@ void cbm_run_ruby_lsp(CBMArena *arena, CBMFileResult *result, const char *source
 
     RubyLSPContext ctx;
     ruby_lsp_init(&ctx, arena, source, source_len, &reg, module_qn, &result->resolved_calls);
-    if (!ctx.ancestry)
-        return;
 
     /* Phase B: PASS 1 — collect classes/modules, mixins, and methods from
      * the AST (methods register directly into `reg`; the AST is ground
@@ -1814,7 +1369,7 @@ void cbm_run_ruby_lsp(CBMArena *arena, CBMFileResult *result, const char *source
     ctx.build_reg = &reg;
     ruby_pass1_scan(&ctx, root);
     ctx.build_reg = NULL;
-    RUBY_ANCESTRY(finalize)(ctx.ancestry, &reg, ruby_builtin_type);
+    mori_ruby_ancestry_finalize(ctx.ancestry, &reg, ruby_builtin_type);
 
     /* Finalize the registry for O(1) lookups — index allocations go to a
      * per-call scratch arena that dies with this call (see perl_lsp.c). */
@@ -1837,7 +1392,7 @@ void cbm_run_ruby_lsp(CBMArena *arena, CBMFileResult *result, const char *source
 
     if (ctx.debug) {
         size_t mixins;
-        size_t classes = RUBY_ANCESTRY(counts)(ctx.ancestry, &mixins);
+        size_t classes = mori_ruby_ancestry_counts(ctx.ancestry, &mixins);
         fprintf(stderr, "[ruby_lsp] module_qn=%s defs=%d resolved=%d classes=%zu mixins=%zu\n",
                 module_qn ? module_qn : "(null)", result->defs.count, result->resolved_calls.count,
                 classes, mixins);
@@ -1849,5 +1404,5 @@ void cbm_run_ruby_lsp(CBMArena *arena, CBMFileResult *result, const char *source
     }
 
     cbm_arena_destroy(&idx_arena);
-    RUBY_ANCESTRY(free)(ctx.ancestry);
+    mori_ruby_ancestry_free(ctx.ancestry);
 }

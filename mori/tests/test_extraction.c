@@ -1214,17 +1214,11 @@ TEST(ruby_ancestry_resolved_occurrences) {
     const char *sites[] = {"Child.new", "self.helper", "self.greet", "self.greet"};
     const char *occurrence = source;
 
-    CBMFileResult *rust = extract(source, CBM_LANG_RUBY, "t", "main.rb");
-    cbm_ruby_lookup_c_reference = true;
-    CBMFileResult *reference = extract(source, CBM_LANG_RUBY, "t", "main.rb");
-    cbm_ruby_lookup_c_reference = false;
-    ASSERT_NOT_NULL(rust);
-    ASSERT_NOT_NULL(reference);
-    ASSERT_EQ(rust->resolved_calls.count, 4);
-    ASSERT_EQ(reference->resolved_calls.count, rust->resolved_calls.count);
-    for (int i = 0; i < rust->resolved_calls.count; i++) {
-        const CBMResolvedCall *row = &rust->resolved_calls.items[i];
-        const CBMResolvedCall *old = &reference->resolved_calls.items[i];
+    CBMFileResult *result = extract(source, CBM_LANG_RUBY, "t", "main.rb");
+    ASSERT_NOT_NULL(result);
+    ASSERT_EQ(result->resolved_calls.count, 4);
+    for (int i = 0; i < result->resolved_calls.count; i++) {
+        const CBMResolvedCall *row = &result->resolved_calls.items[i];
         ASSERT_STR_EQ(row->caller_qn, "t.main.Admin.Child.probe");
         ASSERT_STR_EQ(row->callee_qn, targets[i]);
         occurrence = strstr(occurrence, sites[i]);
@@ -1232,17 +1226,12 @@ TEST(ruby_ancestry_resolved_occurrences) {
         ASSERT_EQ(row->site_start_byte, (uint32_t)(occurrence - source));
         occurrence += strlen(sites[i]);
         ASSERT_EQ(row->site_end_byte, (uint32_t)(occurrence - source));
-        ASSERT_STR_EQ(row->caller_qn, old->caller_qn);
-        ASSERT_STR_EQ(row->callee_qn, old->callee_qn);
-        ASSERT_STR_EQ(row->strategy, old->strategy);
-        ASSERT(row->confidence == old->confidence);
-        ASSERT_EQ(row->kind, old->kind);
-        ASSERT_EQ(row->site_start_byte, old->site_start_byte);
-        ASSERT_EQ(row->site_end_byte, old->site_end_byte);
-        ASSERT_EQ(row->source_origin, old->source_origin);
+        ASSERT_STR_EQ(row->strategy, i == 0 ? "ruby_constructor" : "ruby_self_dispatch");
+        ASSERT(row->confidence == 0.95f);
+        ASSERT_EQ(row->kind, CBM_RESOLVED_INVOCATION);
+        ASSERT_EQ(row->source_origin, CBM_SOURCE_ORIGIN_RAW);
     }
-    cbm_free_result(reference);
-    cbm_free_result(rust);
+    cbm_free_result(result);
     PASS();
 }
 
@@ -1257,20 +1246,6 @@ static const CBMRegisteredFunc *ruby_ancestry_test_method(const void *registry, 
 }
 
 TEST(ruby_ancestry_lookup_boundaries) {
-    const struct {
-        RubyAncestry *(*create)(void);
-        void (*destroy)(RubyAncestry *);
-        void (*declare)(RubyAncestry *, const char *, const char *, const char *, const char *);
-        void (*finalize)(RubyAncestry *, const void *, RubyTypeLookup);
-        const char *(*constant)(const RubyAncestry *, const char *, const char *);
-        RubyMethodResult (*lookup)(const RubyAncestry *, const void *, RubyMethodLookup,
-                                   const char *, const char *, bool, int, uint32_t);
-    } implementations[] = {
-        {mori_ruby_ancestry_new, mori_ruby_ancestry_free, mori_ruby_ancestry_declare,
-         mori_ruby_ancestry_finalize, mori_ruby_ancestry_constant, mori_ruby_ancestry_lookup},
-        {cbm_ruby_ancestry_c_new, cbm_ruby_ancestry_c_free, cbm_ruby_ancestry_c_declare,
-         cbm_ruby_ancestry_c_finalize, cbm_ruby_ancestry_c_constant, cbm_ruby_ancestry_c_lookup},
-    };
     char nesting[513];
     memset(nesting, 'A', 512);
     nesting[511] = '\0';
@@ -1288,53 +1263,53 @@ TEST(ruby_ancestry_lookup_boundaries) {
     cbm_registry_add_func(&registry, (CBMRegisteredFunc){
         .qualified_name = "Base.helper", .receiver_type = "Base", .short_name = "helper"});
 
-    for (size_t i = 0; i < sizeof(implementations) / sizeof(implementations[0]); i++) {
-        RubyAncestry *ancestry = implementations[i].create();
-        ASSERT_NOT_NULL(ancestry);
-        ASSERT_NULL(implementations[i].constant(ancestry, "", "Leaf"));
-        implementations[i].declare(ancestry, "Leaf", "", "Leaf", NULL);
-        implementations[i].declare(ancestry, "NestedLeaf", nesting, "Leaf", NULL);
-        nesting[511] = 'A';
-        implementations[i].declare(ancestry, "BeyondLimitLeaf", nesting, "Leaf", NULL);
-        nesting[511] = '\0';
-        implementations[i].declare(ancestry, "Base", "", "Base", NULL);
-        implementations[i].declare(ancestry, "Child", "", "Child", "Base");
-        implementations[i].declare(ancestry, "Model", "", "Model", "ApplicationRecord");
-        implementations[i].declare(ancestry, "UnseenParent", "", "UnseenParent", "Unavailable");
-        implementations[i].finalize(ancestry, &registry, ruby_ancestry_test_type);
-        ASSERT_NULL(implementations[i].constant(ancestry, "", ""));
-        ASSERT_STR_EQ(implementations[i].constant(ancestry, nesting, "Leaf"), "NestedLeaf");
-        nesting[511] = 'A';
-        ASSERT_STR_EQ(implementations[i].constant(ancestry, nesting, "Leaf"), "Leaf");
-        nesting[511] = '\0';
+    RubyAncestry *ancestry = mori_ruby_ancestry_new();
+    ASSERT_NOT_NULL(ancestry);
+    ASSERT_NULL(mori_ruby_ancestry_constant(ancestry, "", "Leaf"));
+    mori_ruby_ancestry_declare(ancestry, "Leaf", "", "Leaf", NULL);
+    mori_ruby_ancestry_declare(ancestry, "NestedLeaf", nesting, "Leaf", NULL);
+    nesting[511] = 'A';
+    mori_ruby_ancestry_declare(ancestry, "BeyondLimitLeaf", nesting, "Leaf", NULL);
+    mori_ruby_ancestry_declare(ancestry, "Base", "", "Base", NULL);
+    mori_ruby_ancestry_declare(ancestry, "Child", "", "Child", "Base");
+    mori_ruby_ancestry_declare(ancestry, "Model", "", "Model", "ApplicationRecord");
+    mori_ruby_ancestry_declare(ancestry, "UnseenParent", "", "UnseenParent", "Unavailable");
+    mori_ruby_ancestry_finalize(ancestry, &registry, ruby_ancestry_test_type);
+    ASSERT_NULL(mori_ruby_ancestry_constant(ancestry, "", ""));
+    ASSERT_STR_EQ(mori_ruby_ancestry_constant(ancestry, nesting, "Leaf"), "Leaf");
+    nesting[511] = '\0';
+    ASSERT_STR_EQ(mori_ruby_ancestry_constant(ancestry, nesting, "Leaf"), "NestedLeaf");
 
-        RubyMethodResult capped = implementations[i].lookup(
-            ancestry, &registry, ruby_ancestry_test_method, "Child", "helper", false,
-            RUBY_LOOKUP_RECEIVER, 0);
-        ASSERT_NULL(capped.target);
-        ASSERT_FALSE(capped.blocked);
-        ASSERT_EQ(capped.steps, 1);
-        RubyMethodResult reached = implementations[i].lookup(
-            ancestry, &registry, ruby_ancestry_test_method, "Child", "helper", false,
-            RUBY_LOOKUP_RECEIVER, 1);
-        ASSERT_NOT_NULL(reached.target);
-        ASSERT_STR_EQ(reached.target->qualified_name, "Base.helper");
-        ASSERT_FALSE(reached.blocked);
-        ASSERT_EQ(reached.steps, 2);
-        RubyMethodResult no_seed = implementations[i].lookup(
-            ancestry, &registry, ruby_ancestry_test_method, "Model", "find", true,
-            RUBY_LOOKUP_RECEIVER, 2);
-        ASSERT_NULL(no_seed.target);
-        ASSERT_FALSE(no_seed.blocked);
-        ASSERT_EQ(no_seed.steps, 3);
-        RubyMethodResult super = implementations[i].lookup(
-            ancestry, &registry, ruby_ancestry_test_method, "UnseenParent", "helper", false,
-            RUBY_LOOKUP_SUPER, 2);
-        ASSERT_NULL(super.target);
-        ASSERT_FALSE(super.blocked);
-        ASSERT_EQ(super.steps, 0);
-        implementations[i].destroy(ancestry);
-    }
+    RubyMethodResult capped = mori_ruby_ancestry_lookup(
+        ancestry, &registry, ruby_ancestry_test_method, "Child", "helper", false,
+        RUBY_LOOKUP_RECEIVER, 0);
+    ASSERT_NULL(capped.target);
+    ASSERT_FALSE(capped.blocked);
+    ASSERT_EQ(capped.steps, 1);
+
+    RubyMethodResult reached = mori_ruby_ancestry_lookup(
+        ancestry, &registry, ruby_ancestry_test_method, "Child", "helper", false,
+        RUBY_LOOKUP_RECEIVER, 1);
+    ASSERT_NOT_NULL(reached.target);
+    ASSERT_STR_EQ(reached.target->qualified_name, "Base.helper");
+    ASSERT_FALSE(reached.blocked);
+    ASSERT_EQ(reached.steps, 2);
+
+    RubyMethodResult no_seed = mori_ruby_ancestry_lookup(
+        ancestry, &registry, ruby_ancestry_test_method, "Model", "find", true,
+        RUBY_LOOKUP_RECEIVER, 2);
+    ASSERT_NULL(no_seed.target);
+    ASSERT_FALSE(no_seed.blocked);
+    ASSERT_EQ(no_seed.steps, 3);
+
+    RubyMethodResult no_parent = mori_ruby_ancestry_lookup(
+        ancestry, &registry, ruby_ancestry_test_method, "UnseenParent", "helper", false,
+        RUBY_LOOKUP_SUPER, 2);
+    ASSERT_NULL(no_parent.target);
+    ASSERT_FALSE(no_parent.blocked);
+    ASSERT_EQ(no_parent.steps, 0);
+
+    mori_ruby_ancestry_free(ancestry);
     cbm_arena_destroy(&arena);
     PASS();
 }
