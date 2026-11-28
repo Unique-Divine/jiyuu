@@ -20,6 +20,7 @@
 #include "../src/pipeline/lsp_resolve.h"
 #include "lsp/php_lsp.h"
 #include "lsp/lsp_work.h"
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -5889,6 +5890,245 @@ TEST(phplsp_project_function_binding_keeps_its_exact_target) {
     PASS();
 }
 
+/* ── Type and method lookup parity: C reference vs php_resolver ─── */
+
+static int phplookup_report(const char *scene, const char *what, const char *a, const char *b,
+                            const void *c_out, const void *rust_out) {
+    printf("  [%s] %s(%s, %s): C=%p Rust=%p\n", scene, what, a ? a : "(null)", b ? b : "(null)",
+           c_out, rust_out);
+    return 1;
+}
+
+static void phplookup_type(CBMTypeRegistry *reg, const char *qn, const char *short_name,
+                           const char **parents, const char **names, const char **qns) {
+    CBMRegisteredType t;
+    memset(&t, 0, sizeof(t));
+    t.qualified_name = qn;
+    t.short_name = short_name;
+    t.embedded_types = parents;
+    t.method_names = names;
+    t.method_qns = qns;
+    cbm_registry_add_type(reg, t);
+}
+
+static void phplookup_method(CBMTypeRegistry *reg, const char *receiver, const char *name) {
+    CBMRegisteredFunc f;
+    memset(&f, 0, sizeof(f));
+    f.receiver_type = receiver;
+    f.short_name = name;
+    f.qualified_name = receiver ? cbm_arena_sprintf(reg->arena, "%s.%s", receiver, name) : name;
+    f.min_params = -1;
+    cbm_registry_add_func(reg, f);
+}
+
+/* Chain of DEPTH single parents: Deep0 -> Deep1 -> ... The visited bound
+ * stops the walk before the method on the last link. */
+#define PHPLOOKUP_DEPTH 40
+
+typedef struct {
+    const char *name;
+    const char *module_qn;
+    bool external;
+    bool finalize;
+    bool fallback;
+    bool no_registry;
+    bool closed_arena;
+} PHPLookupScene;
+
+static const PHPLookupScene PHPLOOKUP_SCENES[] = {
+    {"module+vendor", "p.app.Main", true, true, false, false, false},
+    {"module", "p.app.Main", false, true, false, false, false},
+    {"unfinalized", "p.app.Main", true, false, false, false, false},
+    {"no module", NULL, true, true, false, false, false},
+    {"empty module", "", false, true, false, false, false},
+    {"other module", "p.lib.Two.Sub", false, true, false, false, false},
+    {"leading dot", ".p.app", false, true, false, false, false},
+    {"fallback", "p.app.Main", true, true, true, false, false},
+    {"no registry", "p.app.Main", true, true, false, true, false},
+    {"closed arena", "p.app.Main", true, true, false, false, true},
+    {"closed arena, no module", NULL, false, true, false, false, true},
+};
+
+static const char *const PHPLOOKUP_TYPES[] = {
+    NULL,
+    "",
+    ".",
+    "Unknown.",
+    "Request",
+    "Unknown.Request",
+    "Lib.Models.Request",
+    "p.lib.Two.Request",
+    "Two.Request",
+    "Vendor.Http.Request",
+    "Vendor.Http.Request.Seeded",
+    "Vendor.Http.Request.Child",
+    "Vendor.Http.RequestOther",
+    "Vendor.Http",
+    "Labeled",
+    "app.Labeled",
+    "Main.Base",
+    "Base",
+    "p.app.Main.Base",
+    "Child",
+    "Deep0",
+    "Absent",
+    "x.y.Absent",
+};
+
+static const char *const PHPLOOKUP_METHODS[][2] = {
+    {NULL, "greet"},
+    {"Child", NULL},
+    {"p.app.Main.Base", "greet"},
+    {"Base", "greet"},
+    {"Child", "greet"},
+    {"Child", "tag"},
+    {"Child", "label"},
+    {"Child", "wave"},
+    {"Child", "orphan"},
+    {"Child", "absent"},
+    {"Middle", "greet"},
+    {"CycA", "missing"},
+    {"CycA", "cyc"},
+    {"Deep0", "mid"},
+    {"Deep0", "bottom"},
+    {"Wide", "w0"},
+    {"Wide", "w31"},
+    {"Wide", "w33"},
+    {"Vendor.Http.Request", "validated"},
+    {"Unknown.Request", "validated"},
+    {"Request", "validated"},
+    {"Absent", "greet"},
+    {"", "greet"},
+};
+
+static int phplookup_compare_scene(const PHPLookupScene *scene) {
+    CBMArena arena;
+    cbm_arena_init(&arena);
+    CBMArena closed;
+    memset(&closed, 0, sizeof(closed));
+
+    CBMTypeRegistry base;
+    cbm_registry_init(&base, &arena);
+    CBMTypeRegistry reg;
+    cbm_registry_init(&reg, &arena);
+    CBMTypeRegistry *outer = scene->fallback ? &base : &reg;
+
+    static const char *middle_parents[] = {"Base", NULL};
+    static const char *child_parents[] = {"Greets", "Named", "Middle", NULL};
+    static const char *named_parents[] = {"Labeled", NULL};
+    static const char *greets_names[] = {"wave", "orphan", "gone", NULL};
+    static const char *greets_qns[] = {"lib.Provenance.wave", "lib.Missing.orphan", NULL, NULL};
+    static const char *cyc_a[] = {"CycB", NULL};
+    static const char *cyc_b[] = {"p.app.Main.CycA", "CycA", NULL};
+
+    phplookup_type(&reg, "p.app.Main.Base", "Base", NULL, NULL, NULL);
+    phplookup_type(&reg, "p.app.Main.Middle", "Middle", middle_parents, NULL, NULL);
+    phplookup_type(&reg, "p.app.Main.Child", "Child", child_parents, NULL, NULL);
+    phplookup_type(&reg, "p.app.Main.Named", "Named", named_parents, NULL, NULL);
+    phplookup_type(outer, "p.app.Labeled", "Labeled", NULL, NULL, NULL);
+    phplookup_type(&reg, "p.app.Main.Greets", "Greets", NULL, greets_names, greets_qns);
+    phplookup_type(&reg, "p.lib.One.Request", "Request", NULL, NULL, NULL);
+    phplookup_type(&reg, "p.lib.Two.Request", "Request", NULL, NULL, NULL);
+    phplookup_type(&reg, "p.app.Near.Request", "Request", NULL, NULL, NULL);
+    phplookup_type(&reg, "p.app.Main.Deep.Request", "Request", NULL, NULL, NULL);
+    phplookup_type(&reg, "p.Lib.Models.Request", "Request", NULL, NULL, NULL);
+    phplookup_type(&reg, "p.lib.Request.Request", "Request", NULL, NULL, NULL);
+    phplookup_type(&reg, "Vendor.Http.Request.Seeded", "Seeded", NULL, NULL, NULL);
+    phplookup_type(&reg, "p.lib.RequestOther", "RequestOther", NULL, NULL, NULL);
+    phplookup_type(&reg, "p.app.Main.CycA", "CycA", cyc_a, NULL, NULL);
+    phplookup_type(&reg, "p.app.Main.CycB", "CycB", cyc_b, NULL, NULL);
+
+    phplookup_method(outer, "p.app.Main.Base", "greet");
+    phplookup_method(&reg, "p.app.Main.Child", "label");
+    phplookup_method(outer, "p.app.Labeled", "tag");
+    phplookup_method(&reg, "lib.Provenance", "wave");
+    phplookup_method(&reg, "p.lib.Request.Request", "validated");
+    phplookup_method(&reg, "p.app.Main.CycB", "cyc");
+
+    /* Deep0 -> Deep1 -> ... -> Deep39; "mid" on Deep10, "bottom" on Deep39. */
+    for (int i = 0; i < PHPLOOKUP_DEPTH; i++) {
+        const char **parents = NULL;
+        if (i + 1 < PHPLOOKUP_DEPTH) {
+            parents = (const char **)cbm_arena_alloc(&arena, 2 * sizeof(char *));
+            parents[0] = cbm_arena_sprintf(&arena, "Deep%d", i + 1);
+            parents[1] = NULL;
+        }
+        const char *qn = cbm_arena_sprintf(&arena, "p.app.Main.Deep%d", i);
+        phplookup_type(&reg, qn, cbm_arena_sprintf(&arena, "Deep%d", i), parents, NULL, NULL);
+        if (i == 10)
+            phplookup_method(&reg, qn, "mid");
+        if (i == PHPLOOKUP_DEPTH - 1)
+            phplookup_method(&reg, qn, "bottom");
+    }
+    /* Wide has more parents than the 32-slot frontier holds. */
+    const char **wide = (const char **)cbm_arena_alloc(&arena, 41 * sizeof(char *));
+    for (int i = 0; i < 40; i++) {
+        wide[i] = cbm_arena_sprintf(&arena, "W%d", i);
+        const char *qn = cbm_arena_sprintf(&arena, "p.app.Main.W%d", i);
+        phplookup_type(&reg, qn, wide[i], NULL, NULL, NULL);
+        phplookup_method(&reg, qn, cbm_arena_sprintf(&arena, "w%d", i));
+    }
+    wide[40] = NULL;
+    phplookup_type(&reg, "p.app.Main.Wide", "Wide", wide, NULL, NULL);
+
+    if (scene->fallback)
+        reg.fallback = &base;
+    if (scene->finalize) {
+        if (scene->fallback)
+            cbm_registry_finalize(&base);
+        cbm_registry_finalize(&reg);
+    }
+
+    PHPLSPContext ctx;
+    php_lsp_init(&ctx, &arena, "", 0, scene->no_registry ? NULL : &reg, scene->module_qn, NULL);
+    static const char *vendor[] = {"Vendor.Http.Request", "Other.Lib"};
+    if (scene->external) {
+        ctx.external_use_qns = vendor;
+        ctx.external_use_count = 2;
+    }
+    if (scene->closed_arena)
+        ctx.arena = &closed;
+
+    bool dump = getenv("PHPLOOKUP_DUMP") != NULL;
+    int mismatches = 0;
+    for (size_t i = 0; i < sizeof(PHPLOOKUP_TYPES) / sizeof(PHPLOOKUP_TYPES[0]); i++) {
+        const char *qn = PHPLOOKUP_TYPES[i];
+        const CBMRegisteredType *c_type = cbm_php_c_lookup_type(&ctx, qn);
+        const CBMRegisteredType *rust_type = cbm_php_lookup_type(&ctx, qn);
+        if (dump)
+            printf("PHPLOOKUP\t%s\ttype\t%s\t\t%s\n", scene->name, qn ? qn : "(null)",
+                   rust_type ? rust_type->qualified_name : "(null)");
+        if (c_type != rust_type)
+            mismatches += phplookup_report(scene->name, "type", qn, NULL, c_type, rust_type);
+        bool c_ext = cbm_php_c_external_qn(&ctx, qn);
+        bool rust_ext = cbm_php_external_qn(&ctx, qn);
+        if (c_ext != rust_ext)
+            mismatches += phplookup_report(scene->name, "external", qn, NULL,
+                                           (void *)(intptr_t)c_ext, (void *)(intptr_t)rust_ext);
+    }
+    for (size_t i = 0; i < sizeof(PHPLOOKUP_METHODS) / sizeof(PHPLOOKUP_METHODS[0]); i++) {
+        const char *cls = PHPLOOKUP_METHODS[i][0];
+        const char *name = PHPLOOKUP_METHODS[i][1];
+        const CBMRegisteredFunc *c_func = cbm_php_c_lookup_method(&ctx, cls, name);
+        const CBMRegisteredFunc *rust_func = php_lookup_method(&ctx, cls, name);
+        if (dump)
+            printf("PHPLOOKUP\t%s\tmethod\t%s\t%s\t%s\n", scene->name, cls ? cls : "(null)",
+                   name ? name : "(null)", rust_func ? rust_func->qualified_name : "(null)");
+        if (c_func != rust_func)
+            mismatches += phplookup_report(scene->name, "method", cls, name, c_func, rust_func);
+    }
+    cbm_arena_destroy(&arena);
+    return mismatches;
+}
+
+TEST(phplsp_type_and_method_lookup_matches_c_reference) {
+    int mismatches = 0;
+    for (size_t i = 0; i < sizeof(PHPLOOKUP_SCENES) / sizeof(PHPLOOKUP_SCENES[0]); i++)
+        mismatches += phplookup_compare_scene(&PHPLOOKUP_SCENES[i]);
+    ASSERT_EQ(0, mismatches);
+    PASS();
+}
+
 SUITE(php_lsp) {
     RUN_TEST(phplsp_project_function_binding_keeps_its_exact_target);
     RUN_TEST(phplsp_vendor_function_and_const_do_not_veto_project_class_alias);
@@ -6192,4 +6432,7 @@ SUITE(php_lsp) {
     RUN_TEST(phplsp_realistic_carbon_chain_in_method);
     RUN_TEST(phplsp_realistic_eloquent_model);
     RUN_TEST(phplsp_ordinary_same_leaf_calls_join_by_exact_site);
+
+    /* Type and method lookup: php_resolver/ */
+    RUN_TEST(phplsp_type_and_method_lookup_matches_c_reference);
 }
