@@ -5,6 +5,10 @@ use std::ffi::{CStr, c_char, c_int, c_void};
 use std::ptr;
 
 use crate::native_tree::{BorrowedNode, RawNode};
+use crate::native_type_registry::{
+    cbm_registry_lookup_func, cbm_registry_lookup_method,
+    cbm_registry_lookup_symbol, cbm_registry_lookup_type,
+};
 use crate::resolver::{ResolveStatus, SourceSite};
 
 type Arena = c_void;
@@ -279,15 +283,6 @@ unsafe extern "C" {
     pub(crate) fn cbm_type_pointer(arena: *mut Arena, element: Type) -> Type;
     pub(crate) fn cbm_type_slice(arena: *mut Arena, element: Type) -> Type;
     fn cbm_type_deref(ty: Type) -> Type;
-    fn cbm_registry_lookup_type(
-        registry: *const Registry,
-        name: *const c_char,
-    ) -> *const RawRegisteredType;
-    fn cbm_registry_lookup_method(
-        registry: *const Registry,
-        ty: *const c_char,
-        name: *const c_char,
-    ) -> *const Function;
     fn cbm_go_eval_visit_types(
         registry: *const Registry,
         context: *mut c_void,
@@ -296,15 +291,6 @@ unsafe extern "C" {
             *const RawRegisteredType,
         ) -> bool,
     );
-    fn cbm_registry_lookup_func(
-        registry: *const Registry,
-        name: *const c_char,
-    ) -> *const Function;
-    fn cbm_registry_lookup_symbol(
-        registry: *const Registry,
-        package: *const c_char,
-        name: *const c_char,
-    ) -> *const Function;
 
     // Bridge Rust-owned lists and strings through C with explicit sizes for MSan.
     pub(crate) fn cbm_go_eval_copy_name(
@@ -419,7 +405,7 @@ impl<'file> File<'file> {
 
     pub(super) fn function(&self, name: &CStr) -> Option<Callable<'file>> {
         self.callable(unsafe {
-            cbm_registry_lookup_func(self.registry, name.as_ptr())
+            cbm_registry_lookup_func(self.registry.cast(), name.as_ptr()).cast()
         })
     }
 
@@ -430,10 +416,11 @@ impl<'file> File<'file> {
     ) -> Option<Callable<'file>> {
         self.callable(unsafe {
             cbm_registry_lookup_symbol(
-                self.registry,
+                self.registry.cast(),
                 package.as_ptr(),
                 name.as_ptr(),
             )
+            .cast()
         })
     }
 
@@ -441,8 +428,10 @@ impl<'file> File<'file> {
         &self,
         name: &CStr,
     ) -> Option<RegisteredType<'file>> {
-        let ty =
-            unsafe { cbm_registry_lookup_type(self.registry, name.as_ptr()) };
+        let ty = unsafe {
+            cbm_registry_lookup_type(self.registry.cast(), name.as_ptr())
+                .cast::<RawRegisteredType>()
+        };
         (!ty.is_null()).then(|| RegisteredType(unsafe { &*ty }))
     }
 
@@ -456,7 +445,12 @@ impl<'file> File<'file> {
         name: &CStr,
     ) -> Option<Callable<'file>> {
         self.callable(unsafe {
-            cbm_registry_lookup_method(self.registry, ty.as_ptr(), name.as_ptr())
+            cbm_registry_lookup_method(
+                self.registry.cast(),
+                ty.as_ptr(),
+                name.as_ptr(),
+            )
+            .cast()
         })
     }
 
