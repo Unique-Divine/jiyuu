@@ -4239,96 +4239,29 @@ static const char *node_keys_list(const cbm_node_t *n, char *buf, size_t buf_sz)
     return buf;
 }
 
-/* Resolve a function argument to its string value (literal or var.prop). */
-static const char *eval_func_arg(binding_t *b, const cbm_func_arg_t *a) {
-    if (a->literal) {
-        return a->literal;
-    }
-    return binding_get_virtual(b, a->variable, a->property);
+/* The native parser and binding lookup own these strings. Rust computes the
+ * scalar into the caller's scratch buffer or returns a resolved argument. */
+extern const char *mori_cypher_eval_scalar(const char *name, size_t count,
+                                         const char *(*read)(void *, size_t), void *context,
+                                         char *output, size_t size);
+
+typedef struct {
+    binding_t *binding;
+    const cbm_func_arg_t *args;
+} scalar_args_t;
+
+static const char *read_scalar_arg(void *context, size_t index) {
+    const scalar_args_t *call = context;
+    const cbm_func_arg_t *arg = &call->args[index];
+    return arg->literal ? arg->literal
+                        : binding_get_virtual(call->binding, arg->variable, arg->property);
 }
 
-/* Evaluate a multi-argument scalar function into func_buf (or a direct value). */
 static const char *eval_multiarg_func(binding_t *b, const cbm_return_item_t *item, char *buf,
                                       size_t bufsz) {
-    const char *f = item->func;
-    int n = item->arg_count;
-    if (strcmp(f, "coalesce") == 0) {
-        for (int i = 0; i < n; i++) {
-            const char *v = eval_func_arg(b, &item->args[i]);
-            if (v && v[0]) {
-                return v;
-            }
-        }
-        return "";
-    }
-    if (strcmp(f, "substring") == 0 && n >= 2) {
-        const char *s = eval_func_arg(b, &item->args[0]);
-        long start = strtol(eval_func_arg(b, &item->args[1]), NULL, CBM_DECIMAL_BASE);
-        size_t slen = strlen(s);
-        if (start < 0 || (size_t)start >= slen) {
-            return "";
-        }
-        size_t take = slen - (size_t)start;
-        if (n >= 3) {
-            long len = strtol(eval_func_arg(b, &item->args[2]), NULL, CBM_DECIMAL_BASE);
-            if (len < 0) {
-                len = 0;
-            }
-            if ((size_t)len < take) {
-                take = (size_t)len;
-            }
-        }
-        if (take >= bufsz) {
-            take = bufsz - SKIP_ONE;
-        }
-        memcpy(buf, s + start, take);
-        buf[take] = '\0';
-        return buf;
-    }
-    if ((strcmp(f, "left") == 0 || strcmp(f, "right") == 0) && n >= 2) {
-        const char *s = eval_func_arg(b, &item->args[0]);
-        long k = strtol(eval_func_arg(b, &item->args[1]), NULL, CBM_DECIMAL_BASE);
-        if (k < 0) {
-            k = 0;
-        }
-        size_t slen = strlen(s);
-        size_t take = (size_t)k < slen ? (size_t)k : slen;
-        if (take >= bufsz) {
-            take = bufsz - SKIP_ONE;
-        }
-        memcpy(buf, (strcmp(f, "left") == 0) ? s : s + (slen - take), take);
-        buf[take] = '\0';
-        return buf;
-    }
-    if (strcmp(f, "replace") == 0 && n >= 3) {
-        const char *s = eval_func_arg(b, &item->args[0]);
-        const char *from = eval_func_arg(b, &item->args[1]);
-        const char *to = eval_func_arg(b, &item->args[2]);
-        size_t fromlen = strlen(from);
-        size_t tolen = strlen(to);
-        size_t pos = 0;
-        const char *pp = s;
-        if (fromlen == 0) {
-            snprintf(buf, bufsz, "%s", s);
-            return buf;
-        }
-        while (*pp && pos < bufsz - SKIP_ONE) {
-            if (strncmp(pp, from, fromlen) == 0) {
-                size_t cpy = tolen;
-                if (pos + cpy >= bufsz) {
-                    cpy = bufsz - SKIP_ONE - pos;
-                }
-                memcpy(buf + pos, to, cpy);
-                pos += cpy;
-                pp += fromlen;
-            } else {
-                buf[pos++] = *pp++;
-            }
-        }
-        buf[pos] = '\0';
-        return buf;
-    }
-    return ""; /* wrong arity → null */
+    scalar_args_t args = {.binding = b, .args = item->args};
+    return mori_cypher_eval_scalar(item->func, (size_t)item->arg_count, read_scalar_arg, &args, buf,
+                                  bufsz);
 }
 
 static const char *project_item(binding_t *b, cbm_return_item_t *item, char *func_buf,
