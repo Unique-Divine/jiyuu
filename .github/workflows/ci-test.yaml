@@ -609,13 +609,14 @@ jobs:
         working-directory: mori
         run: scripts/test.sh --suites "doc_mentions_rs doc_mentions_jvm doc_mentions"
       # The Rust port's C-vs-Rust parity and regression cases for resolver
-      # lookups live in the per-language LSP suites.
+      # lookups live in the per-language LSP suites. c_lsp and ts_lsp run with
+      # the candidate suites above.
       - name: Run LSP resolver suites
         if: needs.changes.outputs.mori == 'true'
         working-directory: mori
         run: >-
           scripts/test.sh --suites
-          "c_lsp go_lsp php_lsp perl_lsp py_lsp ruby_lsp rust_lsp ts_lsp"
+          "go_lsp php_lsp perl_lsp py_lsp ruby_lsp rust_lsp"
       # Mori PRs run the same gate against the linked candidate below.
       - name: Smoke-test the candidate standalone executable
         id: standalone-smoke
