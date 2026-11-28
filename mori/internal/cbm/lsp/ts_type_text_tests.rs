@@ -1,3 +1,5 @@
+use std::ffi::c_long;
+
 use super::{MAX_MEMBERS, Name, Param, Shape, charge_budget, parse};
 
 fn render_name(label: &str, name: Name<'_>) -> String {
@@ -223,4 +225,256 @@ fn nested_arrays_do_not_recurse_on_the_native_stack() {
         },
     );
     assert_eq!(count, depth);
+}
+
+// Inputs from the C/Rust comparison. The transcript records the rendered type
+// and remaining budget for each case. The linked TS LSP suite covers null
+// input, the warning flag, and allocation failure through the resolver wrapper.
+const TEXTS: &[&[u8]] = &[
+    b"",
+    b" ",
+    b" \t\r\n",
+    b":",
+    b": ",
+    b";",
+    b",;, ",
+    b"\r\n: Client ; ",
+    b"Client",
+    b"  Client,",
+    b":Client",
+    b"::Client",
+    b"exports.Client",
+    b"a.b.Client",
+    b"Document",
+    b"JSX",
+    b"Pick",
+    b"Promise",
+    b"lower",
+    b"_Under",
+    b"Child\xff",
+    b"\xc3\x89cole",
+    b"string",
+    b"number",
+    b"boolean",
+    b"bigint",
+    b"any",
+    b"unknown",
+    b"void",
+    b"never",
+    b"null",
+    b"undefined",
+    b"object",
+    b"symbol",
+    b"String",
+    b"strings",
+    b"this",
+    b"this;",
+    b"  this  ",
+    b"This",
+    b"{ child: Client }",
+    b"{",
+    b"}",
+    b"(",
+    b")",
+    b"(a",
+    b"(Client)",
+    b"(a) b",
+    b"()",
+    b"() =>",
+    b"() => ",
+    b"()=>void",
+    b"() => void",
+    b"() =>void;",
+    b"(a: A) => R",
+    b"(a: A, b?: B) => R",
+    b"(handler?: Promise<Session>, number, , flag\t?: boolean) => Result[];",
+    b"(cb: (x: number) => void, y: string) => void",
+    b"(cb: (x: number) => Foo) => Bar",
+    b"(m: Map<K, V>, t: [A, B]) => Promise<R>",
+    b"( a : A ) =>  R ;",
+    b"(: A) => R",
+    b"(a:) => R",
+    b"(...args: Arg[]) => Out",
+    b"(a: A) => (b: B) => C",
+    b"((a: A) => B)",
+    b"(a: A) =>\tR",
+    b"(a: A)\t=> R",
+    b"(a: A)\n=> R",
+    b"(a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p, q, r) => Z",
+    b"(a,b) => (c) => d",
+    b"T extends U ? X : Y",
+    b"T extends U ? X : Y;",
+    b"T extends Box<infer R> ? keyof R : typeof value;",
+    b"T extends (infer U)[] ? U : never",
+    b"T extends [infer H, ...infer Rest] ? H : never",
+    b"T extends U ? X",
+    b"T extends U : X ? Y",
+    b"T extends U ? X : Y extends Z ? A : B",
+    b"Box<T extends U ? X : Y>",
+    b" extends U ? X : Y",
+    b"T  extends U ? X : Y",
+    b"T extends U ?X : Y",
+    b"A | B extends C ? D : E",
+    b"(T extends U ? X : Y)",
+    b"infer R",
+    b"infer R;",
+    b"infer  R extra",
+    b"infer \tR",
+    b"infer ",
+    b"infer",
+    b"inferR",
+    b"keyof Widget",
+    b"keyof  Widget ;",
+    b"keyof typeof obj",
+    b"keyof ",
+    b"keyof",
+    b"typeof exported",
+    b": typeof exported;  ",
+    b"typeof \tvalue.inner",
+    b"typeof ",
+    b"typeof",
+    b"typeofx",
+    b"[]",
+    b"[",
+    b"]",
+    b"[A]",
+    b"[A, B]",
+    b"[A, , B]",
+    b"[A, B,]",
+    b"[Map<K, V>, [C, D]]",
+    b"[A, B] | C",
+    b"[A][]",
+    b"[T0,T1,T2,T3,T4,T5,T6,T7,T8,T9,T10,T11,T12,T13,T14,T15,T16,T17,T18,T19]",
+    b"A | B",
+    b"A & B",
+    b"A & B | C",
+    b"A | B & C",
+    b"A|B",
+    b"A |B",
+    b"A| B",
+    b"A\t| B",
+    b"| A",
+    b" | A",
+    b"A | ",
+    b"A |",
+    b"A | | B",
+    b"Box<A | B> | C",
+    b"(A | B)",
+    b"A | B[]",
+    b"string | null",
+    b"Promise<A> & Map<K, V>",
+    b"T0 | T1 | T2 | T3 | T4 | T5 | T6 | T7 | T8 | T9 | T10 | T11 | T12 | T13 | T14 | T15 | T16",
+    b"T0 & T1 & T2 & T3 & T4 & T5 & T6 & T7 & T8 & T9 & T10 & T11 & T12 & T13 & T14 & T15",
+    b"T0 | T1 | T2 | T3 | T4 | T5 | T6 | T7 | T8 | T9 | T10 | T11 | T12 | T13 | T14",
+    b"T0 | T1 | T2 | T3 | T4 | T5 | T6 | T7 | T8 | T9 | T10 | T11 | T12 | T13 | T14 | T15",
+    b"T[]",
+    b"T[][]",
+    b"string[]",
+    b"Provider<A, B>[]",
+    b"[]]",
+    b"[][]",
+    b"Map<>",
+    b"Map<K, V>",
+    b"Foo<A, B<C>>",
+    b"Foo<A,B<C,D>,E>",
+    b"Foo<(a: A) => B>",
+    b"Foo<[A, B]>",
+    b"Foo< A , B >",
+    b"Foo<A>>",
+    b"Foo<<A>",
+    b"<T>",
+    b"<>",
+    b"x<T>",
+    b"a.b.Foo<T>",
+    b"Partial<Widget>",
+    b"Readonly<Widget>",
+    b"Array<Widget>",
+    b"NodeList<T>",
+    b"Math<T>",
+    b"Record<string, Widget>",
+    b"Box<T0,T1,T2,T3,T4,T5,T6,T7,T8,T9,T10,T11,T12,T13,T14,T15,T16,T17>",
+    b"Box<,>",
+    b"Foo<A>.Bar",
+    b"Foo<A>[]",
+    b"Foo[]<A>",
+    b"\"literal\"",
+    b"42",
+    b"`tmpl${T}`",
+    b"A extends B",
+    b"readonly Widget[]",
+    b"new () => Widget",
+    b"asserts x is Widget",
+    b"x is Widget",
+    b"unique symbol",
+    b"Widget[\"key\"]",
+    b"{ [K in keyof T]: T[K] }",
+];
+
+const MODULES: &[Option<&[u8]>] =
+    &[Some(b"pkg.api"), None, Some(b""), Some(b"a.b.c")];
+
+const BUDGET_TEXTS: &[&[u8]] = &[
+    b"A | B",
+    b"Client",
+    b"(handler?: Promise<Session>, number, , flag\t?: boolean) => Result[];",
+    b"T extends Box<infer R> ? keyof R : typeof value;",
+    b"[Map<K, V>, [C, D]] | Foo<A, B<C>>[]",
+    b"T0 | T1 | T2 | T3 | T4 | T5 | T6 | T7 | T8 | T9 | T10 | T11 | T12 | T13 | T14 | T15 | T16",
+    b"a_very_long_identifier_name_that_spans_more_than_sixteen_bytes_twice<A, B>",
+    b"",
+    b"   ",
+];
+
+fn escape(text: &[u8]) -> String {
+    format!("\"{}\"", text.escape_ascii())
+}
+
+fn transcript() -> String {
+    let mut lines = Vec::new();
+    let mut line = |text: &[u8], module: Option<&[u8]>, budget: c_long| {
+        let mut remaining = budget;
+        let ty = parse(
+            text,
+            module,
+            |len| charge_budget(&mut remaining, len),
+            render,
+        );
+        let module = module.map_or("(null)".into(), escape);
+        lines.push(format!(
+            "{}\t{module}\t{budget}\t{ty}\t{remaining}",
+            escape(text)
+        ));
+    };
+    for &module in MODULES {
+        for text in TEXTS {
+            line(text, module, -1);
+        }
+    }
+    for text in BUDGET_TEXTS {
+        for budget in -1..=40 {
+            line(text, Some(b"pkg.api"), budget);
+        }
+    }
+    for depth in (0..=8).map(|shift| 1usize << shift) {
+        let generic =
+            format!("{}Leaf{}", "Box<".repeat(depth), ">".repeat(depth));
+        line(generic.as_bytes(), Some(b"pkg.api"), -1);
+        line(generic.as_bytes(), Some(b"pkg.api"), 200);
+        let array = format!("number{}", "[]".repeat(depth));
+        line(array.as_bytes(), None, -1);
+        let returns: String = (0..depth).map(|i| format!(") => R{i}")).collect();
+        let function = format!("{}X{returns}", "(a: ".repeat(depth));
+        line(function.as_bytes(), Some(b"pkg.api"), -1);
+    }
+    lines.join("\n") + "\n"
+}
+
+#[test]
+fn matches_the_retired_c_reference_transcript() {
+    let expected = include_str!("ts_type_text_cases.tsv");
+    let actual = transcript();
+    for (i, (want, got)) in expected.lines().zip(actual.lines()).enumerate() {
+        assert_eq!(got, want, "transcript line {}", i + 1);
+    }
+    assert_eq!(actual.lines().count(), expected.lines().count());
 }
