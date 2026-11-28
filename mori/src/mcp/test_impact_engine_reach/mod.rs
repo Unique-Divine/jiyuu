@@ -218,7 +218,10 @@ impl<'a> Reach<'a> {
         let ptr = unsafe {
             cbm_ti_graph_enclosing(self.input.graph, file, line, &mut ok)
         };
-        ok.then(|| unsafe { ptr.as_ref() }).ok_or(())
+        if !ok {
+            return Err(());
+        }
+        Ok(unsafe { ptr.as_ref() })
     }
 
     // Prefer spans starting at TEST/SUITE over names. Count each definition
