@@ -21,9 +21,6 @@ enum {
     SECOND_IDX = 1,
 };
 
-// Field name length for ts_node_child_by_field_name() calls.
-#define FIELD_LEN_MODULE_NAME 11 // strlen("module_name")
-
 // Forward declarations
 static void parse_go_imports(CBMExtractCtx *ctx);
 static void parse_python_imports(CBMExtractCtx *ctx);
@@ -113,30 +110,6 @@ static const char *path_last(CBMArena *a, const char *path) {
     return path;
 }
 
-/* An unaliased dotted Python import binds its first component, not its last:
- * `import xml.etree` introduces `xml`.  Keep module_path intact for dependency
- * resolution while recording the language-correct local spelling. */
-static const char *python_import_root(CBMArena *a, const char *path) {
-    if (!path) {
-        return NULL;
-    }
-    const char *dot = strchr(path, '.');
-    return dot ? cbm_arena_strndup(a, path, (size_t)(dot - path)) : path;
-}
-
-/* Spell `from <module> import <name>` as one dotted path. A package-relative
- * module (`from . import x`, `from .. import x`) is nothing but dots, which
- * already end in the separator: joining with another '.' would add a level and
- * name the PARENT package ("..x"), so the import resolved one package too high
- * and fell to a same-named definition anywhere in the project. */
-static const char *python_join_from_import(CBMArena *a, const char *module, const char *name) {
-    size_t len = strlen(module);
-    if (len > 0 && module[len - SKIP_ONE] == '.') {
-        return cbm_arena_sprintf(a, "%s%s", module, name);
-    }
-    return cbm_arena_sprintf(a, "%s.%s", module, name);
-}
-
 // --- Go imports ---
 // import_declaration -> import_spec_list -> import_spec -> (name, path)
 
@@ -172,132 +145,6 @@ static void parse_go_imports(CBMExtractCtx *ctx) {
 // import_statement: import X, import X as Y
 // import_from_statement: from X import Y, from X import Y as Z
 
-// Emit a Python aliased_import (import X as Y / from X import Y as Z).
-static void emit_py_aliased_import(CBMExtractCtx *ctx, TSNode child, const char *mod_prefix) {
-    CBMArena *a = ctx->arena;
-    TSNode mod_node = ts_node_child_by_field_name(child, TS_FIELD("name"));
-    TSNode alias_node = ts_node_child_by_field_name(child, TS_FIELD("alias"));
-    if (ts_node_is_null(mod_node)) {
-        return;
-    }
-    char *name = cbm_node_text(a, mod_node, ctx->source);
-    if (!name || !name[0]) {
-        return;
-    }
-    const char *local = !ts_node_is_null(alias_node) ? cbm_node_text(a, alias_node, ctx->source)
-                                                     : path_last(a, name);
-    const char *full = mod_prefix ? python_join_from_import(a, mod_prefix, name) : name;
-    CBMImport imp = {.local_name = local, .module_path = full};
-    cbm_imports_push(&ctx->result->imports, a, imp);
-}
-
-// Process a single Python import_statement node (import X, import X as Y).
-static void process_py_import_stmt(CBMExtractCtx *ctx, TSNode node) {
-    CBMArena *a = ctx->arena;
-    TSNode name_node = ts_node_child_by_field_name(node, TS_FIELD("name"));
-    if (ts_node_is_null(name_node)) {
-        uint32_t nc = ts_node_child_count(node);
-        for (uint32_t j = 0; j < nc; j++) {
-            TSNode child = ts_node_child(node, j);
-            const char *ck = ts_node_type(child);
-            if (strcmp(ck, "dotted_name") == 0 || strcmp(ck, "identifier") == 0) {
-                char *mod = cbm_node_text(a, child, ctx->source);
-                if (mod && mod[0]) {
-                    CBMImport imp = {.local_name = python_import_root(a, mod), .module_path = mod};
-                    cbm_imports_push(&ctx->result->imports, a, imp);
-                }
-            } else if (strcmp(ck, "aliased_import") == 0) {
-                emit_py_aliased_import(ctx, child, NULL);
-            }
-        }
-    } else if (strcmp(ts_node_type(name_node), "aliased_import") == 0) {
-        /* `import util as u` — the import_statement's `name` field points at the
-         * aliased_import; extract its real module name (not "util as u"). */
-        emit_py_aliased_import(ctx, name_node, NULL);
-    } else {
-        char *mod = cbm_node_text(a, name_node, ctx->source);
-        if (mod && mod[0]) {
-            CBMImport imp = {.local_name = python_import_root(a, mod), .module_path = mod};
-            cbm_imports_push(&ctx->result->imports, a, imp);
-        }
-    }
-}
-
-// Resolve the module_name node for a Python import_from_statement.
-static TSNode resolve_py_module_node(TSNode node) {
-    TSNode module_node = ts_node_child_by_field_name(node, "module_name", FIELD_LEN_MODULE_NAME);
-    if (ts_node_is_null(module_node)) {
-        uint32_t nc = ts_node_child_count(node);
-        for (uint32_t j = 0; j < nc; j++) {
-            TSNode c = ts_node_child(node, j);
-            if (strcmp(ts_node_type(c), "dotted_name") == 0 ||
-                strcmp(ts_node_type(c), "relative_import") == 0) {
-                return c;
-            }
-        }
-    }
-    return module_node;
-}
-
-// Emit a Python import-from name child (identifier/dotted_name).
-static void emit_py_import_from_name(CBMExtractCtx *ctx, TSNode child, const char *mod_path) {
-    CBMArena *a = ctx->arena;
-    char *name = cbm_node_text(a, child, ctx->source);
-    if (name && name[0]) {
-        const char *full = mod_path ? python_join_from_import(a, mod_path, name) : name;
-        CBMImport imp = {.local_name = name, .module_path = full};
-        cbm_imports_push(&ctx->result->imports, a, imp);
-    }
-}
-
-// Process a single Python import_from_statement node (from X import Y [as Z]).
-static void process_py_import_from(CBMExtractCtx *ctx, TSNode node) {
-    CBMArena *a = ctx->arena;
-    // `from __future__ import annotations` is a dedicated node type whose first
-    // child is the literal `__future__` keyword (an identifier, not a
-    // dotted_name).  Emit a single import for `__future__` and return.
-    if (strcmp(ts_node_type(node), "future_import_statement") == 0) {
-        CBMImport imp = {.local_name = cbm_arena_strdup(a, "__future__"),
-                         .module_path = cbm_arena_strdup(a, "__future__")};
-        cbm_imports_push(&ctx->result->imports, a, imp);
-        return;
-    }
-    TSNode module_node = resolve_py_module_node(node);
-    char *mod_path =
-        ts_node_is_null(module_node) ? NULL : cbm_node_text(a, module_node, ctx->source);
-
-    uint32_t nc = ts_node_child_count(node);
-    bool emitted = false;
-    for (uint32_t j = 0; j < nc; j++) {
-        TSNode child = ts_node_child(node, j);
-        const char *ck = ts_node_type(child);
-        if (strcmp(ck, "identifier") == 0 || strcmp(ck, "dotted_name") == 0) {
-            if (!ts_node_is_null(module_node) &&
-                ts_node_start_byte(child) == ts_node_start_byte(module_node)) {
-                continue;
-            }
-            emit_py_import_from_name(ctx, child, mod_path);
-            emitted = true;
-        } else if (strcmp(ck, "aliased_import") == 0) {
-            emit_py_aliased_import(ctx, child, mod_path);
-            emitted = true;
-        } else if (strcmp(ck, "wildcard_import") == 0) {
-            // `from os.path import *` — the module itself is the import.
-            if (mod_path && mod_path[0]) {
-                CBMImport imp = {.local_name = path_last(a, mod_path), .module_path = mod_path};
-                cbm_imports_push(&ctx->result->imports, a, imp);
-                emitted = true;
-            }
-        }
-    }
-    // Defensive: a from-import with a module but no recognized name child
-    // (grammar variant) still records the module as an import.
-    if (!emitted && mod_path && mod_path[0]) {
-        CBMImport imp = {.local_name = path_last(a, mod_path), .module_path = mod_path};
-        cbm_imports_push(&ctx->result->imports, a, imp);
-    }
-}
-
 /* `TYPE_CHECKING` or `<module>.TYPE_CHECKING` (typing.TYPE_CHECKING, t.TYPE_CHECKING). */
 static bool py_is_type_checking_condition(CBMExtractCtx *ctx, TSNode cond) {
     if (ts_node_is_null(cond)) {
@@ -327,18 +174,13 @@ typedef struct {
 } python_import_row_t;
 
 typedef void (*python_import_emit_t)(void *context, const python_import_row_t *row);
-typedef void (*python_import_extractor_t)(TSNode node, const char *source, size_t source_len,
-                                           python_import_emit_t emit, void *context);
 
-static python_import_extractor_t python_import_extractor;
-
-void cbm_python_set_import_extractor(python_import_extractor_t extractor);
-void cbm_python_set_import_extractor(python_import_extractor_t extractor) {
-    python_import_extractor = extractor;
-}
+/* Rust reads one import statement and lends each row's bytes to `emit`. */
+extern void mori_python_extract_imports(TSNode node, const char *source, size_t source_len,
+                                         python_import_emit_t emit, void *context);
 
 /* The Rust callback lends these bytes only during emission. The result stores
- * arena-owned C strings, just as the native extractor does. */
+ * arena-owned C strings. */
 static void python_emit_import_row(void *context, const python_import_row_t *row) {
     CBMExtractCtx *ctx = context;
     CBMArena *arena = ctx->arena;
@@ -367,33 +209,23 @@ static void python_emit_import_row(void *context, const python_import_row_t *row
                      (CBMImport){.local_name = local, .module_path = module_path});
 }
 
-/* One import statement; `type_only` flags every import it records. */
-static void process_py_import_node(CBMExtractCtx *ctx, TSNode node, bool type_only) {
-    const char *kind = ts_node_type(node);
-    int before = ctx->result->imports.count;
-    bool direct = strcmp(kind, "import_statement") == 0;
-    bool from = strcmp(kind, "import_from_statement") == 0 ||
-                strcmp(kind, "future_import_statement") == 0;
-    if (python_import_extractor && (direct || from) && ctx->source && ctx->source_len > 0) {
-        python_import_extractor(node, ctx->source, (size_t)ctx->source_len,
-                                python_emit_import_row, ctx);
-        cbm_log_debug("extract.python_imports", "implementation", "rust");
-    } else if (direct) {
-        process_py_import_stmt(ctx, node);
-    } else if (from) {
-        // `from __future__ import annotations` is a distinct node type in
-        // tree-sitter-python but has the same shape (module + name list).
-        process_py_import_from(ctx, node);
-    }
-    for (int i = before; type_only && i < ctx->result->imports.count; i++) {
-        ctx->result->imports.items[i].type_checking_only = true;
-    }
-}
-
 static bool py_is_import_node(TSNode node) {
     const char *kind = ts_node_type(node);
     return strcmp(kind, "import_statement") == 0 || strcmp(kind, "import_from_statement") == 0 ||
            strcmp(kind, "future_import_statement") == 0;
+}
+
+/* One import statement; `type_only` flags every import it records. */
+static void process_py_import_node(CBMExtractCtx *ctx, TSNode node, bool type_only) {
+    int before = ctx->result->imports.count;
+    if (py_is_import_node(node) && ctx->source && ctx->source_len > 0) {
+        mori_python_extract_imports(node, ctx->source, (size_t)ctx->source_len,
+                                     python_emit_import_row, ctx);
+        cbm_log_debug("extract.python_imports", "implementation", "rust");
+    }
+    for (int i = before; type_only && i < ctx->result->imports.count; i++) {
+        ctx->result->imports.items[i].type_checking_only = true;
+    }
 }
 
 static bool py_import_is_wildcard(TSNode import_node) {

@@ -1,4 +1,4 @@
-//! Python import extraction parity on persisted IMPORTS and CALLS edges.
+//! Python import extraction on persisted IMPORTS and CALLS edges.
 #![cfg(all(feature = "c-backend", unix))]
 
 use std::fs::{self, DirBuilder};
@@ -12,11 +12,8 @@ use serde_json::{Value, json};
 struct Fixture(PathBuf);
 
 impl Fixture {
-    fn new(backend: &str) -> Self {
-        let dir = PathBuf::from(format!(
-            "/tmp/mori-py-{}-{backend}",
-            std::process::id()
-        ));
+    fn new() -> Self {
+        let dir = PathBuf::from(format!("/tmp/mori-py-{}", std::process::id()));
         let mut dirs = DirBuilder::new();
         dirs.mode(0o700).create(&dir).expect("create fixture");
         for name in ["repo", "cache", "rt"] {
@@ -45,6 +42,27 @@ impl Fixture {
                     "from wildcards import *\n",
                     "\ndef use():\n",
                     "    return beta_alias.beta_tool() + parent_alias()\n",
+                ),
+            ),
+            (
+                "forms.py",
+                concat!(
+                    "import alpha.tools as deep_tools\n",
+                    "import beta, wildcards\n",
+                    "from pkg import (shared, nested)\n",
+                    "from pkg.nested import helper as nested_helper, extra\n",
+                    "try:\n    import runtime\nexcept ImportError:\n",
+                    "    runtime = None\n",
+                    "\ndef local():\n    import typed\n",
+                    "    return typed.OnlyTyped()\n",
+                ),
+            ),
+            (
+                "pkg/nested/more.py",
+                concat!(
+                    "from .. import shared\n",
+                    "from ..shared import *\n",
+                    "from .helper import (local_tool, local_tool as again)\n",
                 ),
             ),
             (
@@ -138,13 +156,12 @@ impl Edge {
     }
 }
 
-fn index(backend: &str) -> (Vec<Edge>, String) {
-    let fixture = Fixture::new(backend);
+fn index() -> (Vec<Edge>, String) {
+    let fixture = Fixture::new();
     let args =
         json!({"repo_path": fixture.0.join("repo"), "name": "py-imports"});
     let output = fixture
         .command()
-        .env("MORI_IMPL_PYTHON_IMPORTS", backend)
         .env("CBM_PROFILE", "1")
         .env("CBM_LOG_LEVEL", "debug")
         .args(["cli", "--quiet", "index_repository", &args.to_string()])
@@ -165,7 +182,8 @@ fn index(backend: &str) -> (Vec<Edge>, String) {
             "SELECT e.type, s.file_path, s.name, t.file_path, t.name, e.properties \
              FROM edges e JOIN nodes s ON s.id=e.source_id JOIN nodes t ON t.id=e.target_id \
              WHERE e.type IN ('IMPORTS','CALLS') \
-               AND s.file_path IN ('pkg/nested/imports.py','loop.py','trainer.py','shadow.py') \
+               AND s.file_path IN ('pkg/nested/imports.py','loop.py','trainer.py','shadow.py', \
+                 'forms.py','pkg/nested/more.py') \
              ORDER BY 1,2,3,4,5,6",
         )
         .expect("select import and call edges");
@@ -198,12 +216,9 @@ fn index(backend: &str) -> (Vec<Edge>, String) {
 }
 
 #[test]
-fn python_imports_match_c_for_aliases_relative_paths_and_type_checking() {
-    let (native, native_logs) = index("c");
-    let (rust, rust_logs) = index("rust");
-    assert_eq!(rust, native);
+fn python_imports_keep_aliases_relative_paths_and_type_checking() {
+    let (rust, rust_logs) = index();
     let marker = "msg=extract.python_imports implementation=rust";
-    assert!(!native_logs.contains(marker), "{native_logs}");
     assert!(rust_logs.contains(marker), "{rust_logs}");
 
     for (target, alias) in [
@@ -222,6 +237,44 @@ fn python_imports_match_c_for_aliases_relative_paths_and_type_checking() {
             "missing import {alias} -> {target}: {rust:?}"
         );
     }
+    let mut form_imports: Vec<_> = rust
+        .iter()
+        .filter(|edge| {
+            edge.kind == "IMPORTS"
+                && matches!(
+                    edge.source_path.as_str(),
+                    "forms.py" | "pkg/nested/more.py"
+                )
+        })
+        .map(|edge| {
+            let local = edge.property("local_name");
+            format!(
+                "{} -> {} as {}",
+                edge.source_path,
+                edge.target_path,
+                local.as_str().unwrap_or_default()
+            )
+        })
+        .collect();
+    form_imports.sort();
+    // Rows generated from the retired C extractor: it bound only the first
+    // name of `import beta, wildcards` and skipped imports nested in try
+    // blocks and functions.
+    assert_eq!(
+        form_imports,
+        [
+            "forms.py -> alpha as deep_tools",
+            "forms.py -> beta.py as beta",
+            "forms.py -> pkg as nested",
+            "forms.py -> pkg as shared",
+            "forms.py -> pkg/nested as extra",
+            "forms.py -> pkg/nested as nested_helper",
+            "pkg/nested/more.py -> pkg/nested/helper.py as again",
+            "pkg/nested/more.py -> pkg/nested/helper.py as local_tool",
+            "pkg/nested/more.py -> pkg/shared.py as shared",
+        ],
+        "{rust:?}"
+    );
     let filtered_imports: Vec<_> = rust
         .iter()
         .filter(|edge| edge.kind == "IMPORTS" && edge.source_path == "shadow.py")

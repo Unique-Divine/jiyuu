@@ -541,10 +541,10 @@ The worker debug log records `extract.markdown_sections`.
 
 ### Python Import Extraction
 
-Set `MORI_IMPL_PYTHON_IMPORTS=rust` when starting the daemon to read Python
-import statements through Rust. The worker debug event
-`extract.python_imports` identifies the backend. C emits the arena rows,
-applies the annotation-only import rules, and resolves names across files.
+Rust reads Python import statements. The worker debug event
+`extract.python_imports` records `implementation=rust`. C emits the arena
+rows, applies the annotation-only import rules, and resolves names across
+files.
 
 ### Sharing a Graph With a Team
 

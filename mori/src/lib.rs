@@ -441,12 +441,9 @@ mod python_namespace;
 #[path = "../internal/cbm/lsp/python_walk.rs"]
 mod python_walk;
 
-#[cfg(feature = "c-backend")]
+#[cfg(feature = "native-engine-abi")]
 #[path = "../internal/cbm/python_imports.rs"]
 mod python_imports;
-
-#[cfg(feature = "c-backend")]
-pub use python_imports::register as mori_register_python_imports;
 
 #[cfg(all(
     feature = "native-engine-abi",
