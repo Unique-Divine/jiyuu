@@ -69,7 +69,7 @@ static const CBMType *ruby_seed_signature(CBMArena *arena, const CBMType *ret) {
     } while (0)
 
 /* Register a singleton (class-side) method: receiver key "<qn>.self"
- * matches ruby_lookup_singleton_method's keying convention. Skipped when
+ * matches Ruby ancestry lookup's keying convention. Skipped when
  * either formatted name came back NULL (see REG_METHOD). */
 #define REG_SMETHOD(recv_, name_, ret_)                                          \
     do {                                                                         \

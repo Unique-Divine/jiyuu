@@ -27,6 +27,7 @@ unsafe extern "C" {
     fn cbm_ffi_ts_node_start_byte(node: *const RawNode) -> u32;
     fn cbm_ffi_ts_node_end_byte(node: *const RawNode) -> u32;
     fn cbm_ffi_ts_node_is_named(node: *const RawNode) -> bool;
+    fn cbm_ffi_ts_node_named_child_count(node: *const RawNode) -> u32;
     fn cbm_ffi_ts_node_parent(node: *const RawNode) -> RawNode;
     fn cbm_ffi_ts_node_eq(left: *const RawNode, right: *const RawNode) -> bool;
     fn cbm_ffi_ts_node_child_by_field_name(
@@ -139,9 +140,13 @@ impl RawNode {
     }
 
     pub(crate) unsafe fn named_children(self) -> impl Iterator<Item = Self> {
-        // SAFETY: Namedness is checked while each yielded node's tree is live.
+        // SAFETY: The count and yielded children belong to the same live tree.
+        // Avoid allocating a cursor stack for leaf nodes.
         unsafe {
-            self.children()
+            (cbm_ffi_ts_node_named_child_count(&self) != 0)
+                .then(|| self.children())
+                .into_iter()
+                .flatten()
                 .filter(|child| cbm_ffi_ts_node_is_named(child))
         }
     }

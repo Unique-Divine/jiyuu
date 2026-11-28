@@ -16,6 +16,7 @@ const char *cbm_ffi_ts_node_type(const TSNode *node);
 uint32_t cbm_ffi_ts_node_start_byte(const TSNode *node);
 uint32_t cbm_ffi_ts_node_end_byte(const TSNode *node);
 bool cbm_ffi_ts_node_is_named(const TSNode *node);
+uint32_t cbm_ffi_ts_node_named_child_count(const TSNode *node);
 TSNode cbm_ffi_ts_node_parent(const TSNode *node);
 bool cbm_ffi_ts_node_eq(const TSNode *left, const TSNode *right);
 TSNode cbm_ffi_ts_node_child_by_field_name(const TSNode *node, const char *name, uint32_t length);
