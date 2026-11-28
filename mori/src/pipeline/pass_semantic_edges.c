@@ -17,6 +17,7 @@
 #include "pipeline/pipeline_internal.h"
 #include "graph_buffer/graph_buffer.h"
 #include "semantic/semantic.h"
+#include "semantic/semantic_admission.h"
 #include "semantic/ast_profile.h"
 #include "simhash/minhash.h"
 #include "foundation/hash_table.h"
@@ -70,22 +71,7 @@ enum {
 /* ── Deferred edge buffer (thread-local, merged after parallel pass) ── */
 
 typedef struct {
-    int64_t source_id;
-    int64_t target_id;
-    float score;
-    bool same_file;
-    bool below; /* under the threshold: recorded for CBM_SEM_PAIR_SIGNALS only, never admitted */
-    /* Canonical admission keys (determinism): func index of the discovering
-     * side, its candidate rank, and the partner's func index. The sequential
-     * admission pass replays pairs in (i, c) order so which pairs win the
-     * per-node max_edges budget no longer depends on worker scheduling. */
-    int i;
-    int j;
-    int c;
-} deferred_edge_t;
-
-typedef struct {
-    deferred_edge_t *edges;
+    cbm_semantic_pair_t *edges;
     int count;
     int cap;
 } deferred_edge_buf_t;
@@ -100,22 +86,18 @@ static void deferred_buf_push(deferred_edge_buf_t *buf, int64_t src, int64_t tgt
                               bool same_file, bool below, int i, int j, int c) {
     if (buf->count >= buf->cap) {
         int nc = buf->cap < CBM_SZ_256 ? CBM_SZ_256 : buf->cap * GROW;
-        deferred_edge_t *grown =
-            cbm_realloc(CBM_MEM_CLASS_SEMANTIC, buf->edges, (size_t)nc * sizeof(deferred_edge_t));
+        cbm_semantic_pair_t *grown =
+            cbm_realloc(CBM_MEM_CLASS_SEMANTIC, buf->edges, (size_t)nc * sizeof(*grown));
         if (!grown) {
             return;
         }
         buf->edges = grown;
         buf->cap = nc;
     }
-    buf->edges[buf->count++] = (deferred_edge_t){.source_id = src,
-                                                 .target_id = tgt,
-                                                 .score = score,
-                                                 .same_file = same_file,
-                                                 .below = below,
-                                                 .i = i,
-                                                 .j = j,
-                                                 .c = c};
+    buf->edges[buf->count++] = (cbm_semantic_pair_t){
+        .source_id = src, .target_id = tgt, .score = score, .same_file = same_file,
+        .below = below, .i = i, .j = j, .c = c,
+    };
 }
 
 static void deferred_buf_free(deferred_edge_buf_t *buf) {
@@ -839,14 +821,8 @@ extern int mori_semantic_collect_candidates(const sem_candidate_bands_t *bands, 
                                            int source, score_seen_t *seen,
                                            int candidates[SEM_MAX_CANDIDATES]);
 
-/* Score one candidate pair (i, j) and push a deferred candidate edge if the
- * score passes the threshold. ADMISSION (the per-node max_edges budget) is
- * deliberately NOT decided here: the old check-then-increment on shared
- * atomic counts made the admitted edge SET depend on worker scheduling —
- * multi-threaded runs lost edges vs single-threaded and differed run-to-run
- * (repro_parallel_edge_determinism). Scoring is pure math and stays parallel;
- * the budget is applied afterwards in one sequential pass over the pairs in
- * canonical (i, candidate-rank) order. */
+/* Workers score pairs independently. The merge applies the budget after all
+ * scores are available, using canonical candidate order to break score ties. */
 static void score_try_emit(score_ctx_t *sc, int i, int j, int c, deferred_edge_buf_t *my_buf) {
     if (strcmp(sc->funcs[i].file_ext, sc->funcs[j].file_ext) != 0) {
         return;
@@ -1037,14 +1013,11 @@ static void phase5c_build_lsh_buckets(const uint64_t *signatures, int func_count
     }
 }
 
-/* Phase 6b: serialize deferred edges from all worker buffers into the graph
- * buffer (sequential because gbuf isn't thread-safe). */
-/* Canonical order for candidate pairs: ascending discovering-func index,
- * then ascending candidate rank — the order a sequential scoring loop over
- * canonically-sorted funcs would have produced. */
+/* The merge sorts by function index and then candidate rank so worker
+ * scheduling cannot affect score ties, graph writes, or diagnostic order. */
 static int cmp_deferred_edge_canonical(const void *pa, const void *pb) {
-    const deferred_edge_t *a = pa;
-    const deferred_edge_t *b = pb;
+    const cbm_semantic_pair_t *a = pa;
+    const cbm_semantic_pair_t *b = pb;
     if (a->i != b->i) {
         return a->i < b->i ? -1 : 1;
     }
@@ -1054,18 +1027,13 @@ static int cmp_deferred_edge_canonical(const void *pa, const void *pb) {
     return 0;
 }
 
-/* Sequential, deterministic admission + merge: gather every above-threshold
- * pair from the worker buffers, replay them in canonical (i, rank) order,
- * and apply the per-node max_edges budget HERE — single-threaded — so the
- * admitted edge set is a pure function of the (canonically sorted) inputs,
- * independent of worker count and scheduling. */
 /* CBM_SEM_PAIR_SIGNALS=<path>: one line per recorded pair (from the record
  * floor up, CBM_SEM_PAIR_SIGNALS_FLOOR, default the threshold), in canonical
  * order: both qualified names, the score, every signal value and whether the
  * pair was admitted. The measuring harness for the semantic engine: judged
  * samples are drawn from it, stratified by score. Off unless set. */
 static void pair_signals_line(FILE *f, const cbm_gbuf_t *gbuf, const cbm_sem_func_t *funcs,
-                              const deferred_edge_t *de, bool admitted) {
+                              const cbm_semantic_pair_t *de, bool admitted) {
     cbm_sem_signals_t s;
     cbm_sem_signal_values(&funcs[de->i], &funcs[de->j], &s);
     const cbm_gbuf_node_t *a = cbm_gbuf_find_by_id(gbuf, de->source_id);
@@ -1083,14 +1051,15 @@ static void pair_signals_line(FILE *f, const cbm_gbuf_t *gbuf, const cbm_sem_fun
 }
 
 static int phase6b_merge_edges(cbm_gbuf_t *gbuf, deferred_edge_buf_t *worker_bufs, int worker_count,
-                               int *edge_counts, int max_edges, const cbm_sem_func_t *funcs) {
+                               int *edge_counts, int max_edges, const cbm_sem_func_t *funcs,
+                               int func_count) {
     int total_pairs = 0;
     for (int w = 0; w < worker_count; w++) {
         total_pairs += worker_bufs[w].count;
     }
-    deferred_edge_t *pairs = NULL;
+    cbm_semantic_pair_t *pairs = NULL;
     if (total_pairs > 0) {
-        pairs = cbm_alloc(CBM_MEM_CLASS_SEMANTIC, (size_t)total_pairs * sizeof(deferred_edge_t));
+        pairs = cbm_alloc(CBM_MEM_CLASS_SEMANTIC, (size_t)total_pairs * sizeof(*pairs));
     }
     if (!pairs) {
         for (int w = 0; w < worker_count; w++) {
@@ -1104,12 +1073,12 @@ static int phase6b_merge_edges(cbm_gbuf_t *gbuf, deferred_edge_buf_t *worker_buf
          * memcpy's source is declared nonnull (glibc) even for zero bytes. */
         if (worker_bufs[w].count > 0) {
             memcpy(&pairs[n], worker_bufs[w].edges,
-                   (size_t)worker_bufs[w].count * sizeof(deferred_edge_t));
+                   (size_t)worker_bufs[w].count * sizeof(*pairs));
             n += worker_bufs[w].count;
         }
         deferred_buf_free(&worker_bufs[w]);
     }
-    qsort(pairs, (size_t)n, sizeof(deferred_edge_t), cmp_deferred_edge_canonical);
+    qsort(pairs, (size_t)n, sizeof(*pairs), cmp_deferred_edge_canonical);
 
     /* CBM_SEM_PAIR_DUMP=<path>: every candidate that passed the threshold, with
      * its score, in canonical order. Written HERE because this loop is
@@ -1130,30 +1099,21 @@ static int phase6b_merge_edges(cbm_gbuf_t *gbuf, deferred_edge_buf_t *worker_buf
         }
     }
 
-    /* Admission: best-first by score under the per-function budget
-     * (cbm_sem_admit_best_first); the dumps and the edge inserts below keep
-     * the canonical order. */
-    float *scores = cbm_alloc(CBM_MEM_CLASS_SEMANTIC, (size_t)n * sizeof(float));
-    int *fa = cbm_alloc(CBM_MEM_CLASS_SEMANTIC, (size_t)n * sizeof(int));
-    int *fb = cbm_alloc(CBM_MEM_CLASS_SEMANTIC, (size_t)n * sizeof(int));
-    bool *eligible = cbm_alloc(CBM_MEM_CLASS_SEMANTIC, (size_t)n * sizeof(bool));
-    bool *admitted = cbm_alloc(CBM_MEM_CLASS_SEMANTIC, (size_t)n * sizeof(bool));
-    bool ranked = scores && fa && fb && eligible && admitted;
-    for (int e = 0; ranked && e < n; e++) {
-        scores[e] = pairs[e].score;
-        fa[e] = pairs[e].i;
-        fb[e] = pairs[e].j;
-        eligible[e] = !pairs[e].below;
-    }
-    ranked = ranked && cbm_sem_admit_best_first(scores, fa, fb, eligible, n, max_edges, edge_counts,
-                                                admitted);
-    if (!ranked) {
+    /* Rank by score in Rust. Dumps and edge inserts follow canonical order. */
+    int *order = cbm_alloc(CBM_MEM_CLASS_SEMANTIC, (size_t)n * sizeof(*order));
+    bool *admitted = cbm_alloc(CBM_MEM_CLASS_SEMANTIC, (size_t)n * sizeof(*admitted));
+    bool ranked = order && admitted;
+    if (ranked) {
+        mori_semantic_admit_best_first(pairs, n, max_edges, edge_counts, func_count, order,
+                                      admitted);
+    } else {
         cbm_log_warn("semantic_edges.admission", "reason", "out_of_memory", "pairs", itoa_log(n));
     }
+    cbm_free(CBM_MEM_CLASS_SEMANTIC, order);
 
     int total_edges = 0;
     for (int e = 0; ranked && e < n; e++) {
-        deferred_edge_t *de = &pairs[e];
+        const cbm_semantic_pair_t *de = &pairs[e];
         if (de->below) {
             if (signals) {
                 pair_signals_line(signals, gbuf, funcs, de, false);
@@ -1179,10 +1139,6 @@ static int phase6b_merge_edges(cbm_gbuf_t *gbuf, deferred_edge_buf_t *worker_buf
         cbm_gbuf_insert_edge(gbuf, de->source_id, de->target_id, "SEMANTICALLY_RELATED", props);
         total_edges++;
     }
-    cbm_free(CBM_MEM_CLASS_SEMANTIC, scores);
-    cbm_free(CBM_MEM_CLASS_SEMANTIC, fa);
-    cbm_free(CBM_MEM_CLASS_SEMANTIC, fb);
-    cbm_free(CBM_MEM_CLASS_SEMANTIC, eligible);
     cbm_free(CBM_MEM_CLASS_SEMANTIC, admitted);
     if (pair_dump) {
         (void)fclose(pair_dump);
@@ -1635,8 +1591,8 @@ static int run_scoring_phase(cbm_gbuf_t *gbuf, cbm_sem_func_t *funcs, uint64_t *
     CBM_PROF_END_N("semantic_edges", "6a_score_parallel", t_phase6a, func_count);
 
     CBM_PROF_START(t_phase6b);
-    int total =
-        phase6b_merge_edges(gbuf, worker_bufs, worker_count, edge_counts, cfg.max_edges, funcs);
+    int total = phase6b_merge_edges(gbuf, worker_bufs, worker_count, edge_counts, cfg.max_edges,
+                                    funcs, func_count);
     CBM_PROF_END_N("semantic_edges", "6b_edge_merge_seq", t_phase6b, total);
 
     cbm_free(CBM_MEM_CLASS_SEMANTIC, worker_bufs);

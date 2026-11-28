@@ -31,10 +31,6 @@ mod tools;
 mod ui;
 
 #[cfg(feature = "c-backend")]
-#[path = "mcp/search.rs"]
-mod search;
-
-#[cfg(feature = "c-backend")]
 #[path = "discover/path_verdict.rs"]
 mod path_verdict;
 

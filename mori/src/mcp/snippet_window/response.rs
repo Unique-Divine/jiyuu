@@ -6,7 +6,7 @@ use serde::ser::{SerializeMap, Serializer};
 use std::{borrow::Cow, io};
 
 #[cfg(feature = "native-engine-abi")]
-mod native;
+pub(crate) mod native;
 
 const BYTES_PER_TOKEN: usize = 4;
 
@@ -111,7 +111,7 @@ impl Serialize for Object<'_> {
 }
 
 // yyjson uses uppercase hex digits for escaped JSON control bytes.
-struct JsonFormatter;
+pub(crate) struct JsonFormatter;
 
 impl serde_json::ser::Formatter for JsonFormatter {
     fn write_char_escape<W: io::Write + ?Sized>(
