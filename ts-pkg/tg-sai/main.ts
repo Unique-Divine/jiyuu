@@ -42,6 +42,7 @@ import {
   addTargetToChat,
   createMtcuteClient,
   fetchChatAuditInput,
+  fetchRegistrationDiagnostics,
   findSaiChats,
   normalizeUser,
   fetchChatTitle,
@@ -464,8 +465,15 @@ async function withClient<T>(
   }
 }
 
-async function runAudit(options: BaseCliOptions): Promise<void> {
+async function runAudit(
+  options: BaseCliOptions & { forRegistration?: boolean },
+): Promise<void> {
   await withClient(options.profile, async (client) => {
+    if (options.forRegistration) {
+      const result = await fetchRegistrationDiagnostics(client, options.chat)
+      console.log(JSON.stringify(result, null, 2))
+      return
+    }
     const auditInput = await fetchChatAuditInput(client, {
       chatId: options.chat,
       targetUserId: options.targetUser,
@@ -1919,15 +1927,22 @@ export function createProgram(): Command {
       parsePeer,
       DEFAULT_USER_TARGET_ID,
     )
+    .addOption(
+      new Option(
+        "--for-registration",
+        "Print JSON diagnostics for SaiTeam_bot registration",
+      ).conflicts("targetUser"),
+    )
     .addHelpText(
       "after",
       `
 Examples:
   tg-sai audit --chat -1001234567890
   tg-sai audit --chat @example_sai_chat --target-user @example_user
+  tg-sai audit --chat -1001234567890 --for-registration
 `,
     )
-    .action(async (options: BaseCliOptions) => {
+    .action(async (options: BaseCliOptions & { forRegistration?: boolean }) => {
       await runAudit(options)
     })
 

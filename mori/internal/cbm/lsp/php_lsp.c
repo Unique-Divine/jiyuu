@@ -272,188 +272,54 @@ const char *php_resolve_class_name(PHPLSPContext *ctx, const char *name) {
     return php_ns_to_dot(ctx->arena, name);
 }
 
-/* True when `qn` is, or lies under, the target of a class `use` the pipeline
- * left unresolved: a type outside the project (cross-file mode only). */
-static bool php_external_qn(const PHPLSPContext *ctx, const char *qn) {
-    for (int i = 0; qn && i < ctx->external_use_count; i++) {
-        size_t n = strlen(ctx->external_use_qns[i]);
-        if (strncmp(qn, ctx->external_use_qns[i], n) == 0 && (qn[n] == '\0' || qn[n] == '.'))
-            return true;
-    }
-    return false;
+/* Type and method lookup live in php_resolver/ (Rust): cbm_php_lookup_type,
+ * cbm_php_external_qn and php_lookup_method. These borrowed projections give
+ * it the context and registry rows, which stay in C, including rows added
+ * during class and trait refinement. */
+typedef struct {
+    CBMArena *arena;
+    const CBMTypeRegistry *registry;
+    const char *module_qn;
+    const char **external_uses;
+    int external_use_count;
+} CBMPHPResolverView;
+
+typedef struct {
+    const char *qn;
+    const char **parents;
+    const char **method_names;
+    const char **method_qns;
+} CBMPHPTypeView;
+
+CBMPHPResolverView cbm_php_resolver_view(const PHPLSPContext *ctx);
+CBMPHPTypeView cbm_php_type_view(const CBMRegisteredType *type);
+typedef void (*CBMPHPTypeVisitor)(void *, const CBMRegisteredType *);
+void cbm_php_visit_short_types(const CBMTypeRegistry *reg, const char *name,
+                               CBMPHPTypeVisitor visit, void *data);
+
+CBMPHPResolverView cbm_php_resolver_view(const PHPLSPContext *ctx) {
+    return (CBMPHPResolverView){ctx->arena, ctx->registry, ctx->module_qn, ctx->external_use_qns,
+                                ctx->external_use_count};
 }
 
-/* Try to find a registered type for a "namespaced" QN.
- *
- * Lookup order:
- *   1. exact QN match
- *   2. module_qn + "." + qn (same-file class)
- *   3. project_root + "." + qn (drop trailing module segments one at a time)
- *   4. fall back to a short-name scan of the registry, preferring the
- *      candidate whose QN shares the longest dot-prefix with module_qn
- *      (cross-file class in the same project tree).
- *
- * Step 4 is critical for PHP because the unified extractor builds QNs from
- * file paths but `use App\\Models\\User` produces an "App.Models.User" key.
- * Without short-name fallback, every cross-file class resolution would miss.
- * A QN named through a vendor `use` stops after step 1: `Saloon.Http.Request`
- * is not the project's App.Http.Requests.Request (#1186). */
-static const CBMRegisteredType *lookup_type_with_project(PHPLSPContext *ctx, const char *qn) {
-    if (!qn)
-        return NULL;
-    const CBMRegisteredType *t = cbm_registry_lookup_type(ctx->registry, qn);
-    if (t)
-        return t;
-    if (php_external_qn(ctx, qn))
-        return NULL;
+CBMPHPTypeView cbm_php_type_view(const CBMRegisteredType *type) {
+    return (CBMPHPTypeView){type->qualified_name, type->embedded_types, type->method_names,
+                            type->method_qns};
+}
 
-    if (ctx->module_qn && ctx->module_qn[0]) {
-        const char *combo = cbm_arena_sprintf(ctx->arena, "%s.%s", ctx->module_qn, qn);
-        t = cbm_registry_lookup_type(ctx->registry, combo);
-        if (t)
-            return t;
-
-        const char *m = ctx->module_qn;
-        const char *last_dot = strrchr(m, '.');
-        while (last_dot) {
-            char *prefix = cbm_arena_strndup(ctx->arena, m, (size_t)(last_dot - m));
-            const char *try_qn = cbm_arena_sprintf(ctx->arena, "%s.%s", prefix, qn);
-            t = cbm_registry_lookup_type(ctx->registry, try_qn);
-            if (t)
-                return t;
-            const char *prev = last_dot;
-            last_dot = NULL;
-            for (const char *p = m; p < prev; p++) {
-                if (*p == '.')
-                    last_dot = p;
-            }
-        }
-    }
-
-    /* Step 4: short-name fallback. */
-    const char *short_name = qn;
-    for (const char *p = qn; *p; p++) {
-        if (*p == '.')
-            short_name = p + 1;
-    }
-    if (!short_name || !*short_name)
-        return NULL;
-
-    const CBMRegisteredType *best = NULL;
-    int best_score = -1;
-    /* The registry's own types of this short name, in registration order. */
-    CBMTypeShortIter named = {0};
-    if (ctx->registry)
-        cbm_registry_types_by_short_name(ctx->registry, short_name, &named);
-    for (int i = -1; ctx->registry && (i = cbm_type_short_iter_next(&named)) >= 0;) {
+/* Visit the registry's own types named `name`, in short-name index order. */
+void cbm_php_visit_short_types(const CBMTypeRegistry *reg, const char *name,
+                               CBMPHPTypeVisitor visit, void *data) {
+    if (!reg)
+        return;
+    CBMTypeShortIter iter;
+    cbm_registry_types_by_short_name(reg, name, &iter);
+    for (int i; (i = cbm_type_short_iter_next(&iter)) >= 0;) {
         CBM_LSP_WORK(1);
-        const CBMRegisteredType *cand = &ctx->registry->types[i];
-        if (!cand->short_name || strcmp(cand->short_name, short_name) != 0)
-            continue;
-        int score = 0;
-        if (cand->qualified_name && ctx->module_qn) {
-            const char *m = ctx->module_qn;
-            const char *q = cand->qualified_name;
-            while (*m && *q && *m == *q) {
-                if (*m == '.')
-                    score++;
-                m++;
-                q++;
-            }
-        }
-        if (score > best_score) {
-            best_score = score;
-            best = cand;
-        }
+        const CBMRegisteredType *row = &reg->types[i];
+        if (row->short_name && strcmp(row->short_name, name) == 0)
+            visit(data, row);
     }
-    return best;
-}
-
-/* ── method lookup with parent walk ─────────────────────────────── */
-
-const CBMRegisteredFunc *php_lookup_method(PHPLSPContext *ctx, const char *class_qn,
-                                           const char *method_name) {
-    if (!class_qn || !method_name)
-        return NULL;
-
-    /* Direct lookup by the registry's receiver_qn -> method_name index. */
-    const CBMRegisteredFunc *f = cbm_registry_lookup_method(ctx->registry, class_qn, method_name);
-    if (f)
-        return f;
-
-    /* If the QN we have isn't the registry's canonical key, resolve the
-     * type to its registered identity and retry. */
-    const CBMRegisteredType *t = cbm_registry_lookup_type(ctx->registry, class_qn);
-    if (!t)
-        t = lookup_type_with_project(ctx, class_qn);
-    if (!t)
-        return NULL;
-    if (strcmp(t->qualified_name, class_qn) != 0) {
-        f = cbm_registry_lookup_method(ctx->registry, t->qualified_name, method_name);
-        if (f)
-            return f;
-    }
-
-    /* Walk the full ancestor chain. PHP only allows single inheritance for
-     * `extends`, but a class may also pick up methods from `implements` /
-     * traits, both of which are recorded in embedded_types. We iterate
-     * across all entries and recurse into each branch with cycle-detection.
-     *
-     * Cap depth at 16 across all visited types to bound runtime. */
-    const char *visited[32];
-    int visited_count = 0;
-    const char *frontier[32];
-    int frontier_count = 0;
-    if (t->embedded_types) {
-        for (int i = 0; t->embedded_types[i] && frontier_count < 32; i++) {
-            frontier[frontier_count++] = t->embedded_types[i];
-        }
-    }
-    while (frontier_count > 0 && visited_count < 32) {
-        const char *parent = frontier[--frontier_count];
-        bool seen = false;
-        for (int v = 0; v < visited_count; v++) {
-            if (strcmp(visited[v], parent) == 0) {
-                seen = true;
-                break;
-            }
-        }
-        if (seen)
-            continue;
-        visited[visited_count++] = parent;
-
-        f = cbm_registry_lookup_method(ctx->registry, parent, method_name);
-        if (f)
-            return f;
-
-        const CBMRegisteredType *next = cbm_registry_lookup_type(ctx->registry, parent);
-        if (!next)
-            next = lookup_type_with_project(ctx, parent);
-        if (!next)
-            continue;
-
-        if (strcmp(next->qualified_name, parent) != 0) {
-            f = cbm_registry_lookup_method(ctx->registry, next->qualified_name, method_name);
-            if (f)
-                return f;
-        }
-        if (next->method_qns && next->method_names) {
-            for (int i = 0; next->method_names[i]; i++) {
-                if (strcmp(next->method_names[i], method_name) == 0) {
-                    const CBMRegisteredFunc *cand =
-                        cbm_registry_lookup_func(ctx->registry, next->method_qns[i]);
-                    if (cand)
-                        return cand;
-                }
-            }
-        }
-        if (next->embedded_types) {
-            for (int i = 0; next->embedded_types[i] && frontier_count < 32; i++) {
-                frontier[frontier_count++] = next->embedded_types[i];
-            }
-        }
-    }
-    return NULL;
 }
 
 /* Detect a __call / __callStatic on a class chain. */
@@ -1005,9 +871,7 @@ const CBMType *php_eval_expr_type(PHPLSPContext *ctx, TSNode node) {
                 else
                     cls_qn = php_resolve_class_name(ctx, cls_text);
                 if (cls_qn) {
-                    const CBMRegisteredType *t = cbm_registry_lookup_type(ctx->registry, cls_qn);
-                    if (!t)
-                        t = lookup_type_with_project(ctx, cls_qn);
+                    const CBMRegisteredType *t = cbm_php_lookup_type(ctx, cls_qn);
                     if (t && t->field_names) {
                         for (int i = 0; t->field_names[i]; i++) {
                             if (strcmp(t->field_names[i], member) == 0) {
@@ -1148,9 +1012,7 @@ const CBMType *php_eval_expr_type(PHPLSPContext *ctx, TSNode node) {
             if (recv && recv->kind == CBM_TYPE_NAMED) {
                 char *fname = php_node_text(ctx, field);
                 const CBMRegisteredType *t =
-                    cbm_registry_lookup_type(ctx->registry, recv->data.named.qualified_name);
-                if (!t)
-                    t = lookup_type_with_project(ctx, recv->data.named.qualified_name);
+                    cbm_php_lookup_type(ctx, recv->data.named.qualified_name);
                 if (t && t->field_names && fname) {
                     for (int i = 0; t->field_names[i]; i++) {
                         if (strcmp(t->field_names[i], fname) == 0) {
@@ -1296,9 +1158,7 @@ static const CBMType *eval_member_call_type(PHPLSPContext *ctx, TSNode call_node
             const CBMType *sig = f->signature;
             if (sig->kind == CBM_TYPE_FUNC && sig->data.func.return_types &&
                 sig->data.func.return_types[0]) {
-                const CBMRegisteredType *rt = cbm_registry_lookup_type(ctx->registry, class_qn);
-                if (!rt)
-                    rt = lookup_type_with_project(ctx, class_qn);
+                const CBMRegisteredType *rt = cbm_php_lookup_type(ctx, class_qn);
                 if (rt && rt->type_param_names && recv_type->data.template_type.template_args) {
                     return php_substitute_template(ctx->arena, sig->data.func.return_types[0],
                                                    rt->type_param_names,
@@ -1468,7 +1328,7 @@ static void emit_external_or_unindexed(PHPLSPContext *ctx, const char *class_qn,
                                        const char *method_name, const char *unindexed_strategy,
                                        CBMResolvedKind kind) {
     const char *target = cbm_arena_sprintf(ctx->arena, "%s.%s", class_qn, method_name);
-    if (php_external_qn(ctx, class_qn)) {
+    if (cbm_php_external_qn(ctx, class_qn)) {
         emit_resolved_kind(ctx, target, "php_external_receiver", 0.95f, kind);
         return;
     }
@@ -1482,7 +1342,7 @@ static void emit_external_or_unindexed(PHPLSPContext *ctx, const char *class_qn,
  * name-only binding of the call to a same-named project method (#1186). */
 static const char *php_receiver_strategy(const PHPLSPContext *ctx, const char *class_qn,
                                          const char *strategy) {
-    return php_external_qn(ctx, class_qn) ? "php_external_receiver" : strategy;
+    return cbm_php_external_qn(ctx, class_qn) ? "php_external_receiver" : strategy;
 }
 
 static void emit_unresolved(PHPLSPContext *ctx, const char *expr_text, const char *reason) {
@@ -3904,7 +3764,7 @@ static void flatten_trait_into_class(PHPLSPContext *ctx, CBMTypeRegistry *reg, c
     /* Resolve trait through alias-style lookup if needed. */
     const CBMRegisteredType *t = cbm_registry_lookup_type(reg, trait_qn);
     if (!t)
-        t = lookup_type_with_project(ctx, trait_qn);
+        t = cbm_php_lookup_type(ctx, trait_qn);
     const char *canonical_trait_qn = t ? t->qualified_name : trait_qn;
 
     /* A trait cannot meaningfully flatten into itself. PHP itself rejects

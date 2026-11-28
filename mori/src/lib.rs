@@ -316,8 +316,20 @@ mod go_types_native;
 mod native_tree;
 
 #[cfg(feature = "native-engine-abi")]
+#[path = "../internal/cbm/lsp/native_type_registry.rs"]
+mod native_type_registry;
+
+#[cfg(any(feature = "native-engine-abi", test))]
+#[path = "../internal/cbm/lsp/php_resolver/mod.rs"]
+mod php_resolver;
+
+#[cfg(feature = "native-engine-abi")]
 #[path = "../internal/cbm/lsp/rust_path.rs"]
 mod rust_path;
+
+#[cfg(any(feature = "native-engine-abi", test))]
+#[path = "../internal/cbm/lsp/perl_packages/mod.rs"]
+mod perl_packages;
 
 #[cfg(feature = "c-backend")]
 #[path = "../internal/cbm/rust_use_imports.rs"]
