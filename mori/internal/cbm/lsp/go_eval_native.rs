@@ -568,15 +568,12 @@ impl<'file> File<'file> {
         }
     }
 
+    /// Reports whether work at `depth` may continue. Past the depth limit,
+    /// the caller skips that subtree (walk) or yields `Unknown` (evaluation),
+    /// and the rest of the file still resolves, as in the C walker. Only
+    /// cancellation or an earlier failure stops the whole file.
     pub(super) fn within_depth(&self, depth: usize) -> bool {
-        if !self.keep_working() {
-            return false;
-        }
-        if depth >= self.depth_limit {
-            self.fail();
-            return false;
-        }
-        true
+        self.keep_working() && depth < self.depth_limit
     }
 
     pub(super) fn walk(&self, node: BorrowedNode<'_>) {
