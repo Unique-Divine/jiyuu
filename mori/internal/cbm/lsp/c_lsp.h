@@ -187,6 +187,15 @@ void cbm_c_lsp_record_failure(CBMFileResult *result, CBMLSPStatus status);
 void cbm_c_lsp_test_memo_fail_after(int successful_allocations);
 void cbm_c_lsp_test_depth_fail(bool enabled);
 uint32_t cbm_c_lsp_test_walks_take(void);
+// Field lookup through the Rust path or the C reference. field_name NULL
+// resolves the receiver type; field_type non-NULL receives the field's type
+// and the call returns NULL; otherwise the call returns the declaring type.
+const CBMRegisteredType *cbm_c_lsp_test_field_lookup(CBMArena *arena,
+                                                     const CBMTypeRegistry *registry,
+                                                     const char *module_qn,
+                                                     const char **include_ns_qns, int include_count,
+                                                     const char *type_qn, const char *field_name,
+                                                     const CBMType **field_type, bool c_reference);
 #endif
 
 // Cross-file LSP: build registry from defs + stdlib, re-parse and resolve.

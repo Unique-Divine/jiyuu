@@ -61,7 +61,7 @@ static void c_emit_resolved_call(CLSPContext *ctx, const char *callee_qn, const 
                                  float confidence);
 static void c_emit_unresolved_call(CLSPContext *ctx, const char *expr_text, const char *reason);
 static const CBMType *c_lookup_field_type(CLSPContext *ctx, const char *type_qn,
-                                          const char *field_name, int depth);
+                                          const char *field_name);
 static const CBMRegisteredType *c_resolve_field_owner_type(CLSPContext *ctx, const char *type_qn);
 static void c_process_function(CLSPContext *ctx, TSNode func_node);
 static bool c_process_configured_test_body(CLSPContext *ctx, TSNode scope);
@@ -1930,7 +1930,7 @@ static const CBMType *c_eval_expr_type_inner(CLSPContext *ctx, TSNode node) {
             return method->signature;
 
         // Look up field
-        const CBMType *field_type = c_lookup_field_type(ctx, type_qn, field_name, 0);
+        const CBMType *field_type = c_lookup_field_type(ctx, type_qn, field_name);
         if (field_type && !cbm_type_is_unknown(field_type)) {
             // Template field substitution: if field type is TYPE_PARAM (or NAMED matching
             // a template param name) and receiver is a TEMPLATE type, substitute using
@@ -3277,9 +3277,94 @@ static const CBMType *c_struct_field_type_at(const CBMRegisteredType *rt, int id
     return rt->field_names[idx] ? rt->field_types[idx] : NULL;
 }
 
-// Field type lookup
+/* Borrowed registry rows for c_field_lookup/mod.rs. The callbacks expose the
+ * exact and short-name indexes, including shared-registry shadowing. */
+typedef struct {
+    const CBMRegisteredType *identity;
+    const char *qualified_name;
+    const char *alias_of;
+    const char *const *bases;
+    const char *const *field_names;
+    const CBMType *const *field_types;
+} CFieldRecord;
+
+typedef bool (*CFieldVisit)(void *state, CFieldRecord row);
+
+typedef struct {
+    const void *data;
+    CFieldRecord (*exact)(const void *data, const char *name);
+    void (*visit_short)(const void *data, const char *name, CFieldVisit visit, void *state);
+    const char *module;
+    const char *const *includes;
+    size_t include_count;
+} CFieldRegistry;
+
+extern const CBMRegisteredType *mori_c_field_lookup(const CFieldRegistry *registry,
+                                                    const char *type_qn, const char *field_name,
+                                                    const CBMType **field_type);
+
+static CFieldRecord c_field_record(const CBMRegisteredType *record) {
+    if (!record)
+        return (CFieldRecord){0};
+    return (CFieldRecord){record,
+                          record->qualified_name,
+                          record->alias_of,
+                          record->embedded_types,
+                          record->field_names,
+                          record->field_types};
+}
+
+static CFieldRecord c_field_exact(const void *data, const char *name) {
+    return c_field_record(cbm_registry_lookup_type(data, name));
+}
+
+static void c_field_visit_short(const void *data, const char *name, CFieldVisit visit,
+                                void *state) {
+    CBMTypeShortIter it;
+    cbm_registry_types_by_short_name_chain(data, name, &it);
+    int index;
+    while ((index = cbm_type_short_iter_next(&it)) >= 0) {
+        if (!visit(state, c_field_record(&it.reg->types[index])))
+            return;
+    }
+}
+
+/* The registered type a member access is made on (field_name NULL), the type
+ * that declares field_name (field_type NULL), or the declared field's type.
+ * The lookup walks aliases and base classes; see c_field_lookup/mod.rs. */
+static const CBMRegisteredType *c_find_field(CLSPContext *ctx, const char *type_qn,
+                                             const char *field_name, const CBMType **field_type) {
+    if (!ctx->registry)
+        return NULL;
+    CFieldRegistry registry = {ctx->registry,  c_field_exact,       c_field_visit_short,
+                               ctx->module_qn, ctx->include_ns_qns, (size_t)ctx->include_count};
+    return mori_c_field_lookup(&registry, type_qn, field_name, field_type);
+}
+
 static const CBMType *c_lookup_field_type(CLSPContext *ctx, const char *type_qn,
-                                          const char *field_name, int depth) {
+                                          const char *field_name) {
+    const CBMType *type = NULL;
+    if (!field_name)
+        return NULL;
+    c_find_field(ctx, type_qn, field_name, &type);
+    return type;
+}
+
+static const CBMRegisteredType *c_lookup_field_owner(CLSPContext *ctx, const char *type_qn,
+                                                     const char *field_name) {
+    if (!field_name)
+        return NULL;
+    return c_find_field(ctx, type_qn, field_name, NULL);
+}
+
+static const CBMRegisteredType *c_resolve_field_owner_type(CLSPContext *ctx, const char *type_qn) {
+    return c_find_field(ctx, type_qn, NULL, NULL);
+}
+
+#ifdef CBM_ENABLE_TEST_SEAMS
+/* C reference for the Rust field lookup, kept for the parity test only. */
+static const CBMType *c_ref_lookup_field_type(CLSPContext *ctx, const char *type_qn,
+                                              const char *field_name, int depth) {
     if (!type_qn || !field_name || depth > 5)
         return NULL;
 
@@ -3287,12 +3372,12 @@ static const CBMType *c_lookup_field_type(CLSPContext *ctx, const char *type_qn,
      * struct under its own module, the registry holds it under the header
      * that declares it. Without it `d->ops->shut` loses its type at the first
      * step whenever `d`'s struct comes from a header. */
-    const CBMRegisteredType *rt = c_resolve_field_owner_type(ctx, type_qn);
+    const CBMRegisteredType *rt = c_ref_resolve_field_owner_type(ctx, type_qn);
     if (!rt)
         return NULL;
 
     if (rt->alias_of)
-        return c_lookup_field_type(ctx, rt->alias_of, field_name, depth + 1);
+        return c_ref_lookup_field_type(ctx, rt->alias_of, field_name, depth + 1);
 
     if (rt->field_names) {
         for (int i = 0; rt->field_names[i]; i++) {
@@ -3306,7 +3391,7 @@ static const CBMType *c_lookup_field_type(CLSPContext *ctx, const char *type_qn,
     if (rt->embedded_types) {
         for (int i = 0; rt->embedded_types[i]; i++) {
             const CBMType *f =
-                c_lookup_field_type(ctx, rt->embedded_types[i], field_name, depth + 1);
+                c_ref_lookup_field_type(ctx, rt->embedded_types[i], field_name, depth + 1);
             if (f)
                 return f;
         }
@@ -3315,7 +3400,7 @@ static const CBMType *c_lookup_field_type(CLSPContext *ctx, const char *type_qn,
 }
 
 // True when qn is `prefix` followed by a '.' segment boundary.
-static bool c_qn_in_module(const char *qn, const char *prefix) {
+static bool c_ref_qn_in_module(const char *qn, const char *prefix) {
     size_t plen = prefix ? strlen(prefix) : 0;
     return plen > 0 && strncmp(qn, prefix, plen) == 0 && qn[plen] == '.';
 }
@@ -3334,15 +3419,16 @@ static bool c_qn_in_module(const char *qn, const char *prefix) {
 // `Ops` of their own scope; counted as candidates they made every such name
 // ambiguous and left the object untyped. They are considered only when no
 // candidate with members exists (the "typed, declares no such field" answer).
-static bool c_type_has_members(const CBMRegisteredType *t) {
+static bool c_ref_type_has_members(const CBMRegisteredType *t) {
     return (t->field_names && t->field_names[0]) || (t->embedded_types && t->embedded_types[0]) ||
            t->alias_of;
 }
 
-// One short-name scan of c_resolve_field_owner_type. *found says whether the
+// One short-name scan of c_ref_resolve_field_owner_type. *found says whether the
 // scan decided anything, including "ambiguous" (NULL with *found set).
-static const CBMRegisteredType *c_field_owner_by_short_name(CLSPContext *ctx, const char *shortn,
-                                                            bool members_only, bool *found) {
+static const CBMRegisteredType *c_ref_field_owner_by_short_name(CLSPContext *ctx,
+                                                                const char *shortn,
+                                                                bool members_only, bool *found) {
     size_t slen = strlen(shortn);
     const CBMRegisteredType *included = NULL;
     const CBMRegisteredType *only = NULL;
@@ -3358,16 +3444,16 @@ static const CBMRegisteredType *c_field_owner_by_short_name(CLSPContext *ctx, co
         size_t qlen = q ? strlen(q) : 0;
         if (qlen <= slen + 1 || q[qlen - slen - 1] != '.' || strcmp(q + qlen - slen, shortn) != 0)
             continue;
-        if (members_only && !c_type_has_members(cand))
+        if (members_only && !c_ref_type_has_members(cand))
             continue;
         *found = true;
-        if (c_qn_in_module(q, ctx->module_qn))
+        if (c_ref_qn_in_module(q, ctx->module_qn))
             return cand;
         if (only && strcmp(only->qualified_name, q) != 0)
             only_ambiguous = true;
         only = cand;
         for (int inc = 0; inc < ctx->include_count; inc++) {
-            if (!c_qn_in_module(q, ctx->include_ns_qns[inc]))
+            if (!c_ref_qn_in_module(q, ctx->include_ns_qns[inc]))
                 continue;
             if (included && strcmp(included->qualified_name, q) != 0)
                 included_ambiguous = true;
@@ -3380,7 +3466,8 @@ static const CBMRegisteredType *c_field_owner_by_short_name(CLSPContext *ctx, co
     return only_ambiguous ? NULL : only;
 }
 
-static const CBMRegisteredType *c_resolve_field_owner_type(CLSPContext *ctx, const char *type_qn) {
+static const CBMRegisteredType *c_ref_resolve_field_owner_type(CLSPContext *ctx,
+                                                               const char *type_qn) {
     const CBMRegisteredType *rt = cbm_registry_lookup_type(ctx->registry, type_qn);
     if (!rt && ctx->module_qn) {
         char sbuf[1024];
@@ -3389,34 +3476,34 @@ static const CBMRegisteredType *c_resolve_field_owner_type(CLSPContext *ctx, con
             prefixed = cbm_arena_sprintf(ctx->arena, "%s.%s", ctx->module_qn, type_qn);
         rt = cbm_registry_lookup_type(ctx->registry, prefixed);
     }
-    if (!ctx->registry || (rt && c_type_has_members(rt)))
+    if (!ctx->registry || (rt && c_ref_type_has_members(rt)))
         return rt;
 
     const char *dot = strrchr(type_qn, '.');
     const char *shortn = dot ? dot + 1 : type_qn;
     bool found = false;
-    const CBMRegisteredType *owner = c_field_owner_by_short_name(ctx, shortn, true, &found);
+    const CBMRegisteredType *owner = c_ref_field_owner_by_short_name(ctx, shortn, true, &found);
     if (found)
         return owner;
     if (rt)
         return rt;
-    return c_field_owner_by_short_name(ctx, shortn, false, &found);
+    return c_ref_field_owner_by_short_name(ctx, shortn, false, &found);
 }
 
 // The registered type that DECLARES field_name, reached from type_qn through
-// aliases and base classes as c_lookup_field_type walks them. A field whose
+// aliases and base classes as c_ref_lookup_field_type walks them. A field whose
 // type text did not parse still has an owner, so only the name decides.
-static const CBMRegisteredType *c_lookup_field_owner(CLSPContext *ctx, const char *type_qn,
-                                                     const char *field_name, int depth) {
+static const CBMRegisteredType *c_ref_lookup_field_owner(CLSPContext *ctx, const char *type_qn,
+                                                         const char *field_name, int depth) {
     if (!type_qn || !field_name || depth > 5)
         return NULL;
 
-    const CBMRegisteredType *rt = c_resolve_field_owner_type(ctx, type_qn);
+    const CBMRegisteredType *rt = c_ref_resolve_field_owner_type(ctx, type_qn);
     if (!rt)
         return NULL;
 
     if (rt->alias_of)
-        return c_lookup_field_owner(ctx, rt->alias_of, field_name, depth + 1);
+        return c_ref_lookup_field_owner(ctx, rt->alias_of, field_name, depth + 1);
 
     if (rt->field_names) {
         for (int i = 0; rt->field_names[i]; i++) {
@@ -3428,13 +3515,39 @@ static const CBMRegisteredType *c_lookup_field_owner(CLSPContext *ctx, const cha
     if (rt->embedded_types) {
         for (int i = 0; rt->embedded_types[i]; i++) {
             const CBMRegisteredType *owner =
-                c_lookup_field_owner(ctx, rt->embedded_types[i], field_name, depth + 1);
+                c_ref_lookup_field_owner(ctx, rt->embedded_types[i], field_name, depth + 1);
             if (owner)
                 return owner;
         }
     }
     return NULL;
 }
+
+const CBMRegisteredType *cbm_c_lsp_test_field_lookup(CBMArena *arena,
+                                                     const CBMTypeRegistry *registry,
+                                                     const char *module_qn,
+                                                     const char **include_ns_qns, int include_count,
+                                                     const char *type_qn, const char *field_name,
+                                                     const CBMType **field_type, bool c_reference) {
+    CLSPContext ctx = {0};
+    ctx.arena = arena;
+    ctx.registry = registry;
+    ctx.module_qn = module_qn;
+    ctx.module_qn_len = module_qn ? strlen(module_qn) : 0;
+    ctx.include_ns_qns = include_ns_qns;
+    ctx.include_count = include_count;
+    if (!field_name)
+        return c_reference ? c_ref_resolve_field_owner_type(&ctx, type_qn)
+                           : c_resolve_field_owner_type(&ctx, type_qn);
+    if (field_type) {
+        *field_type = c_reference ? c_ref_lookup_field_type(&ctx, type_qn, field_name, 0)
+                                  : c_lookup_field_type(&ctx, type_qn, field_name);
+        return NULL;
+    }
+    return c_reference ? c_ref_lookup_field_owner(&ctx, type_qn, field_name, 0)
+                       : c_lookup_field_owner(&ctx, type_qn, field_name);
+}
+#endif
 
 // ============================================================================
 // c_process_statement: bind variables from statements
@@ -4467,7 +4580,7 @@ static void c_publish_field_owner(CLSPContext *ctx, const char *type_qn, const c
                           c_field_ref_hash(ctx->enclosing_func_qn, type_qn, field_name)))
         return;
 
-    const CBMRegisteredType *owner = c_lookup_field_owner(ctx, type_qn, field_name, 0);
+    const CBMRegisteredType *owner = c_lookup_field_owner(ctx, type_qn, field_name);
     if (!owner && ctx->cpp_mode) {
         /* C++: an object of a KNOWN type that declares no such field
          * (`text.size()` on a std::string) is evidence that no project Field
@@ -4545,7 +4658,7 @@ static const CBMType *c_designate_member(CLSPContext *ctx, const CBMType *type, 
     if (!type_qn || !name || !name[0])
         return NULL;
     c_publish_field_owner(ctx, type_qn, name);
-    return c_lookup_field_type(ctx, type_qn, name, 0);
+    return c_lookup_field_type(ctx, type_qn, name);
 }
 
 /* The type of one element of an array being initialized, NULL otherwise. */
