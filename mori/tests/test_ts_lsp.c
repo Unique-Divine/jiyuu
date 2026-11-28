@@ -5215,6 +5215,63 @@ TEST(tslsp_tsx_ordinary_same_leaf_calls_join_by_exact_site) {
     PASS();
 }
 
+/* Exercise the Rust parser through the production budget wrapper. */
+TEST(tslsp_type_text_closed_arena_returns_unknown) {
+    static const char *const texts[] = {
+        "Client",   "lower",   "exports.Client",
+        "Document", "string",  "this",
+        "T[]",      "[A, B]",  "A | B",
+        "A & B",    "keyof W", "typeof value",
+        "infer R",  "() => R", "T extends U ? X : Y",
+        "{ a: A }", "(a) b",   "",
+        NULL,
+    };
+    static const char *const modules[] = {"pkg.api", NULL, "", "a.b.c"};
+    CBMArena closed = {0};
+    cbm_ts_lsp_test_set_type_budget(-1);
+    for (size_t i = 0; i < sizeof(texts) / sizeof(texts[0]); i++) {
+        for (size_t m = 0; m < sizeof(modules) / sizeof(modules[0]); m++) {
+            ASSERT_TRUE(cbm_ts_lsp_test_parse_type_text(&closed, texts[i], modules[m]) ==
+                        cbm_type_unknown());
+        }
+    }
+    ASSERT_EQ(cbm_ts_lsp_test_budget_remaining(), -1);
+    ASSERT_FALSE(cbm_ts_lsp_test_budget_warned());
+    PASS();
+}
+
+TEST(tslsp_type_text_budget_warning) {
+    CBMArena arena;
+    cbm_arena_init(&arena);
+    cbm_ts_lsp_test_set_type_budget(0);
+
+    bool missing_unknown =
+        cbm_ts_lsp_test_parse_type_text(&arena, NULL, "pkg.api") == cbm_type_unknown();
+    long missing_budget = cbm_ts_lsp_test_budget_remaining();
+    bool missing_warned = cbm_ts_lsp_test_budget_warned();
+
+    bool exhausted_unknown =
+        cbm_ts_lsp_test_parse_type_text(&arena, "Client", "pkg.api") == cbm_type_unknown();
+    long exhausted_budget = cbm_ts_lsp_test_budget_remaining();
+    bool exhausted_warned = cbm_ts_lsp_test_budget_warned();
+
+    const CBMType *unarmed = cbm_ts_lsp_test_parse_type_text(&arena, "Client", "pkg.api");
+    bool unarmed_named = unarmed && unarmed->kind == CBM_TYPE_NAMED;
+    long unarmed_budget = cbm_ts_lsp_test_budget_remaining();
+    cbm_ts_lsp_test_set_type_budget(-1);
+    cbm_arena_destroy(&arena);
+
+    ASSERT_TRUE(missing_unknown);
+    ASSERT_EQ(missing_budget, 0);
+    ASSERT_FALSE(missing_warned);
+    ASSERT_TRUE(exhausted_unknown);
+    ASSERT_EQ(exhausted_budget, -1);
+    ASSERT_TRUE(exhausted_warned);
+    ASSERT_TRUE(unarmed_named);
+    ASSERT_EQ(unarmed_budget, -1);
+    PASS();
+}
+
 /* ── Suite registration ────────────────────────────────────────────────────── */
 
 SUITE(ts_lsp) {
@@ -5704,4 +5761,7 @@ SUITE(ts_lsp) {
     RUN_TEST(tslsp_js_ordinary_same_leaf_calls_join_by_exact_site);
     RUN_TEST(tslsp_ts_ordinary_same_leaf_calls_join_by_exact_site);
     RUN_TEST(tslsp_tsx_ordinary_same_leaf_calls_join_by_exact_site);
+
+    RUN_TEST(tslsp_type_text_closed_arena_returns_unknown);
+    RUN_TEST(tslsp_type_text_budget_warning);
 }

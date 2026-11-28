@@ -14,6 +14,9 @@ collision_cu/main.cu	occurrence_probe	Alpha.render	Method	162:180	alpha . render
 collision_cu/main.cu	occurrence_probe	Bravo.render	Method	226:246	HIDDEN_RENDER(bravo)	bravo . render
 # clsp_cpp_new_expression_joins_exact_occurrence
 construction/main.cpp	occurrence_probe	Widget.Widget	Method	67:79	new Widget()	Widget
+# C field-owner lookup through a struct-field function pointer
+field_pointer/main.c	occurrence_probe	Ops.shut	Field	228:243	d->ops->shut(3)	d->ops->shut
+field_pointer/main.c	occurrence_probe	OtherOps.close	Field	264:279	other->close(4)	other->close
 # clsp_c_global_initializer_does_not_inherit_previous_function_caller
 global/main.c		helper	Function	73:81	helper()	helper
 # perllsp_repeated_target_calls_join_by_exact_site
@@ -39,9 +42,124 @@ repeated_cu/main.cu	occurrence_probe	Bravo.render	Method	177:191	bravo.render()	
 ruby/main.rb	Admin::User.shout	Admin::User.name	Method	82:91	self.name	self.name
 ruby/main.rb	Outside.probe	Admin::User	Class	136:151	Admin::User.new	Admin::User
 ruby/main.rb	Outside.probe	Admin::User.name	Method	156:162	u.name	u.name
+# Ruby superclass and included module lookup
+ruby_ancestry/main.rb	Child.probe	Base.helper	Method	149:160	self.helper	self.helper
+ruby_ancestry/main.rb	Child.probe	Greetable.greet	Method	165:175	self.greet	self.greet
 # rubylsp_block_param_shadows_local
 ruby_shadow/main.rb	Worker.run	Foo	Class	67:74	Foo.new	Foo
 ruby_shadow/main.rb	Worker.run	Foo.bar	Method	231:236	a.bar	a.bar
 # clsp_c_nested_function_pointer_shadow_restores_outer_target
 shadowed/main.c	occurrence_probe	bravo_target	Function	234:238	fp()	fp
 shadowed/main.c	occurrence_probe	alpha_target	Function	265:269	fp()	fp
+# Python inheritance: C3 order, super() and the depth-first fallback (no C3 order)
+python_inheritance/main.py	Bad.probe	Third.work	Method	579:593	super().work()	super().work
+python_inheritance/main.py	Broken.call	P.run	Method	801:811	self.run()	self.run
+python_inheritance/main.py	Broken.up	P.run	Method	846:859	super().run()	super().run
+python_inheritance/main.py	Child.__init__	Root.__init__	Method	247:265	super().__init__()	super().__init__
+python_inheritance/main.py	Child.direct	Right.work	Method	304:315	self.work()	self.work
+python_inheritance/main.py	Child.via_super	Right.work	Method	357:371	super().work()	super().work
+# Python package re-exports: from-imports, a module attribute, a star import
+# limited by __all__, a renamed chain, and a private name outside __all__ that
+# only the textual fallback reaches
+python_reexport/pkg/__init__.py
+python_reexport/pkg/chain.py
+python_reexport/pkg/impl.py
+python_reexport/pkg/star.py
+python_reexport/main.py	chained	pkg/impl.py:helper	Function	269:279	pkg.deep()	pkg.deep
+python_reexport/main.py	direct	pkg/impl.py:helper	Function	106:114	helper()	helper
+python_reexport/main.py	hidden	pkg/star.py:_hidden	Function	307:320	pkg._hidden()	pkg._hidden
+python_reexport/main.py	make	pkg/impl.py:Widget	Class	185:193	Widget()	Widget
+python_reexport/main.py	starred_name	pkg/star.py:starred	Function	227:240	pkg.starred()	pkg.starred
+python_reexport/main.py	via_package	pkg/impl.py:helper	Function	147:159	pkg.helper()	pkg.helper
+# Python annotations: plain, Optional, Union, quoted, List and PEP 604
+# parameters, a return annotation and an annotated local
+python_annotations/main.py	chained	Engine.start	Method	703:717	make().start()	make().start
+python_annotations/main.py	chained	make	Function	703:709	make()	make
+python_annotations/main.py	listed	Wheel.spin	Method	466:478	wheel.spin()	wheel.spin
+python_annotations/main.py	local	Engine.start	Method	772:786	engine.start()	engine.start
+python_annotations/main.py	local	make	Function	754:760	make()	make
+python_annotations/main.py	make	Engine	Class	666:674	Engine()	Engine
+python_annotations/main.py	optional	Engine.start	Method	261:275	engine.start()	engine.start
+python_annotations/main.py	pep604	Engine.start	Method	618:630	part.start()	part.start
+python_annotations/main.py	plain	Engine.start	Method	193:207	engine.start()	engine.start
+python_annotations/main.py	quoted	Engine.start	Method	383:397	engine.start()	engine.start
+python_annotations/main.py	union	Wheel.spin	Method	328:339	part.spin()	part.spin
+# Python invocation targets: direct, constructor, static and class methods,
+# dict dispatch, a lambda, a local alias, a stdlib module and a nested function
+python_invocation/main.py	Box.build	Box.__init__	Method	228:233	Box()	Box
+python_invocation/main.py	alias_call	helper	Function	673:677	fn()	fn
+python_invocation/main.py	alias_call	helper	Function	655:661	helper	helper	CALL_REFERENCE
+python_invocation/main.py	class_call	Box.create	Method	526:538	Box.create()	Box.create
+python_invocation/main.py	construct	Box.__init__	Method	423:428	Box()	Box
+python_invocation/main.py	construct	Box.grow	Method	440:450	box.grow()	box.grow
+python_invocation/main.py	direct	helper	Function	385:393	helper()	helper
+python_invocation/main.py	dispatch	helper	Function	568:576	HANDLERS	HANDLERS
+python_invocation/main.py	lambda_call	square	Variable	616:625	square(3)	square
+python_invocation/main.py	nested	nested.inner	Function	801:808	inner()	inner
+python_invocation/main.py	nested.inner	other	Function	781:788	other()	other
+python_invocation/main.py	static_call	Box.build	Method	483:494	Box.build()	Box.build
+# Python callable values passed as arguments or bound to a name; the
+# conditional expression stays an unproven usage
+python_callable_values/main.py	conditional	apply	Function	526:561	apply(helper if flag else other, 6)	apply
+python_callable_values/main.py	keyword	apply	Function	409:433	apply(fn=other, value=4)	apply
+python_callable_values/main.py	keyword	other	Function	418:423	other	other	CALL_REFERENCE
+python_callable_values/main.py	partial	helper	Function	370:376	helper	helper	CALL_REFERENCE
+python_callable_values/main.py	passes_function	apply	Function	236:252	apply(helper, 1)	apply
+python_callable_values/main.py	passes_function	helper	Function	242:248	helper	helper	CALL_REFERENCE
+python_callable_values/main.py	passes_method	Box	Class	286:291	Box()	Box
+python_callable_values/main.py	passes_method	Box.method	Method	309:319	box.method	method	CALL_REFERENCE
+python_callable_values/main.py	passes_method	apply	Function	303:323	apply(box.method, 2)	apply
+python_callable_values/main.py	stored	apply	Function	477:489	apply(fn, 5)	apply
+python_callable_values/main.py	stored	helper	Function	459:465	helper	helper	CALL_REFERENCE
+# Python walk: operators, subscripts, a comprehension, with, branches, a loop,
+# try, match patterns, a lambda and a class attribute initializer
+python_walk/main.py		make	Function	918:924	make()	make
+python_walk/main.py	Holder.use	Vector.norm	Method	960:979	self.default.norm()	self.default.norm
+python_walk/main.py	branches	Vector	Class	699:707	Vector()	Vector
+python_walk/main.py	branches	Vector.norm	Method	719:727	v.norm()	v.norm
+python_walk/main.py	branches	make	Function	670:676	make()	make
+python_walk/main.py	comprehension	make	Function	518:524	make()	make
+python_walk/main.py	guarded	make	Function	831:837	make()	make
+python_walk/main.py	lambdas	make	Function	1182:1188	make()	make
+python_walk/main.py	loop	make	Function	756:762	make()	make
+python_walk/main.py	make	Vector	Class	333:341	Vector()	Vector
+python_walk/main.py	matched	make	Function	1123:1129	make()	make
+python_walk/main.py	operators	make	Function	384:390	make()	make
+python_walk/main.py	subscript	make	Function	460:466	make()	make
+python_walk/main.py	with_block	Resource	Class	578:588	Resource()	Resource
+python_walk/main.py	with_block	Resource.read	Method	612:622	res.read()	res.read
+# tslsp_type_text: TS annotations whose call resolution depends on parsed type text
+tsjs_types/main.ts		Gadget	Class	1101:1113	new Gadget()	Gadget
+tsjs_types/main.ts	array	Widget.render	Method	588:608	items.pop().render()	items.pop().render
+tsjs_types/main.ts	arrayGeneric	Gadget.spin	Method	705:716	item.spin()	item.spin
+tsjs_types/main.ts	callback	Widget.render	Method	880:895	make().render()	make().render
+tsjs_types/main.ts	callbackArg	Gadget.spin	Method	981:995	make(1).spin()	make(1).spin
+tsjs_types/main.ts	chained	Box.get	Method	1419:1435	returned().get()	returned().get
+tsjs_types/main.ts	chained	returned	Function	1419:1429	returned()	returned
+tsjs_types/main.ts	generic	Box.get	Method	249:258	box.get()	box.get
+tsjs_types/main.ts	intersection	Gadget.spin	Method	528:539	item.spin()	item.spin
+tsjs_types/main.ts	keyed	Widget.render	Method	1060:1073	item.render()	item.render
+tsjs_types/main.ts	nullable	Widget.render	Method	453:466	item.render()	item.render
+tsjs_types/main.ts	returned	Box	Class	1362:1383	new Box(new Gadget())	Box
+tsjs_types/main.ts	returned	Gadget	Class	1370:1382	new Gadget()	Gadget
+tsjs_types/main.ts	tuple	Gadget.spin	Method	812:825	second.spin()	second.spin
+tsjs_types/main.ts	union	Widget.render	Method	384:397	item.render()	item.render
+tsjs_types/main.ts	wrapped	Widget.render	Method	316:329	item.render()	item.render
+# tslsp_tsx_type_text: TSX annotations with unions and generic returns
+tsjs_tsx/main.tsx	renderPanel	Panel.item	Method	330:342	panel.item()	panel.item
+tsjs_tsx/main.tsx	renderTyped	ViewData.query	Method	232:251	data.query("typed")	data.query
+# tslsp_jsdoc_type_text: JSDoc types parsed by the same type-text parser
+tsjs_jsdoc/main.js	array	Widget.render	Method	309:329	items.pop().render()	items.pop().render
+tsjs_jsdoc/main.js	arrayGeneric	Gadget.spin	Method	441:452	item.spin()	item.spin
+tsjs_jsdoc/main.js	awaited	Gadget.spin	Method	787:815	(await fetchGadget()).spin()	(await fetchGadget()).spin
+tsjs_jsdoc/main.js	awaited	fetchGadget	Function	794:807	fetchGadget()	fetchGadget
+tsjs_jsdoc/main.js	build	Widget	Class	600:612	new Widget()	Widget
+tsjs_jsdoc/main.js	callback	Gadget.spin	Method	527:540	make().spin()	make().spin
+tsjs_jsdoc/main.js	chained	Widget.render	Method	642:658	build().render()	build().render
+tsjs_jsdoc/main.js	chained	build	Function	642:649	build()	build
+tsjs_jsdoc/main.js	fetchGadget	Gadget	Class	739:751	new Gadget()	Gadget
+tsjs_jsdoc/main.js	named	Widget.render	Method	150:163	item.render()	item.render
+tsjs_jsdoc/main.js	union	Widget.render	Method	232:245	item.render()	item.render
+# tslsp_jsx_jsdoc_type_text: JSDoc names and function types in JSX
+tsjs_jsx/main.jsx	renderLegacy	JsxSession.query	Method	136:156	session.query("jsx")	session.query
+tsjs_jsx/main.jsx	renderOpened	JsxSession.query	Method	259:282	open(1).query("opened")	open(1).query

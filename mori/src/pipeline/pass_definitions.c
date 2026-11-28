@@ -124,7 +124,7 @@ static void link_def_parents(cbm_pipeline_ctx_t *ctx, const CBMDefinition *def, 
             cbm_gbuf_insert_edge(ctx->gbuf, parent->id, node_id, "DEFINES_METHOD", "{}");
         }
     }
-    cbm_pipeline_diagram_parent_edge(ctx, def, node_id);
+    mori_pipeline_diagram_parent_edge(ctx->gbuf, def->label, def->parent_class, node_id);
 }
 
 /* Process one definition: create node, register, DEFINES edge. `file_doc`,
@@ -823,7 +823,8 @@ int cbm_pipeline_pass_definitions(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t
              * map is available without the cache (single-file scope). */
             total_imports += create_import_edges_for_file(ctx, result, rel, NULL);
             create_channel_edges_for_file(ctx, result, rel);
-            cbm_pipeline_diagram_arrows(ctx, result);
+            mori_pipeline_diagram_arrows(ctx->gbuf, result->diagram_arrows.items,
+                                         result->diagram_arrows.count);
             cbm_pipeline_create_env_configures_for_file(ctx, result, rel);
             cbm_free_result(result);
         }
@@ -864,7 +865,8 @@ int cbm_pipeline_pass_definitions(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t
             total_imports +=
                 create_import_edges_for_file(ctx, result, files[i].rel_path, namespace_map);
             create_channel_edges_for_file(ctx, result, files[i].rel_path);
-            cbm_pipeline_diagram_arrows(ctx, result);
+            mori_pipeline_diagram_arrows(ctx->gbuf, result->diagram_arrows.items,
+                                         result->diagram_arrows.count);
             cbm_pipeline_create_env_configures_for_file(ctx, result, files[i].rel_path);
         }
         /* Publish instead of free — see the twin in pass_parallel.c (#1355). */

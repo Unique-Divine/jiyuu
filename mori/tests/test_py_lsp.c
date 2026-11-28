@@ -659,6 +659,23 @@ TEST(pylsp_super_call) {
     PASS();
 }
 
+TEST(pylsp_c3_diamond_and_super_use_same_order) {
+    CBMFileResult *r = extract_py(
+        "class Root:\n"
+        "    def work(self): pass\n"
+        "class Left(Root): pass\n"
+        "class Right(Root):\n"
+        "    def work(self): pass\n"
+        "class Child(Left, Right):\n"
+        "    def direct(self): self.work()\n"
+        "    def via_super(self): super().work()\n");
+    ASSERT_NOT_NULL(r);
+    ASSERT_GTE(find_resolved(r, "Child.direct", "Right.work"), 0);
+    ASSERT_GTE(find_resolved(r, "Child.via_super", "Right.work"), 0);
+    cbm_free_result(r);
+    PASS();
+}
+
 TEST(pylsp_multi_inheritance_first_base) {
     CBMFileResult *r = extract_py(
         "class A:\n"
@@ -5229,6 +5246,797 @@ TEST(pylsp_range_wildcard_and_scratch_failures_keep_exact_later_calls) {
     PASS();
 }
 
+/* ── Inheritance and super() lookup cases (python_mro.rs) ─────────── */
+
+static const char **pympro_list(CBMArena *a, const char *const *names, int count) {
+    const char **out = cbm_arena_alloc(a, (size_t)(count + 1) * sizeof(*out));
+    for (int i = 0; i < count; i++)
+        out[i] = names[i];
+    out[count] = NULL;
+    return out;
+}
+
+static void pympro_class(CBMArena *a, CBMTypeRegistry *reg, const char *qn,
+                         const char *const *bases, int count, const char *alias) {
+    CBMRegisteredType t;
+    memset(&t, 0, sizeof(t));
+    t.qualified_name = qn;
+    const char *dot = strrchr(qn, '.');
+    t.short_name = dot ? dot + 1 : qn;
+    t.embedded_types = bases ? pympro_list(a, bases, count) : NULL;
+    t.alias_of = alias;
+    cbm_registry_add_type(reg, t);
+}
+
+static void pympro_method(CBMTypeRegistry *reg, const char *owner, const char *name) {
+    CBMRegisteredFunc f;
+    memset(&f, 0, sizeof(f));
+    f.qualified_name = cbm_arena_sprintf(reg->arena, "%s.%s", owner, name);
+    f.receiver_type = owner;
+    f.short_name = name;
+    f.min_params = -1;
+    cbm_registry_add_func(reg, f);
+}
+
+/* Diamonds, single and multiple inheritance, an inconsistent order, aliases,
+ * cycles, unknown and external bases, chains past the depth limit, and base
+ * lists at and past the 64-entry order limit. */
+static void pympro_registry(CBMArena *a, CBMTypeRegistry *reg) {
+    const char *lr[] = {"m.Left", "m.Right"};
+    const char *root[] = {"m.Root"};
+    pympro_class(a, reg, "m.Root", NULL, 0, NULL);
+    pympro_class(a, reg, "m.Left", root, 1, NULL);
+    pympro_class(a, reg, "m.Right", root, 1, NULL);
+    pympro_class(a, reg, "m.Child", lr, 2, NULL);
+    pympro_method(reg, "m.Root", "work");
+    pympro_method(reg, "m.Root", "__init__");
+    pympro_method(reg, "m.Right", "work");
+    pympro_method(reg, "m.Child", "own");
+
+    const char *base[] = {"m.Base"};
+    pympro_class(a, reg, "m.Base", NULL, 0, NULL);
+    pympro_class(a, reg, "m.Sub", base, 1, NULL);
+    pympro_method(reg, "m.Base", "go");
+
+    const char *ab[] = {"m.A", "m.B"};
+    const char *ba[] = {"m.B", "m.A"};
+    const char *fs[] = {"m.First", "m.Second"};
+    pympro_class(a, reg, "m.A", NULL, 0, NULL);
+    pympro_class(a, reg, "m.B", NULL, 0, NULL);
+    pympro_class(a, reg, "m.First", ab, 2, NULL);
+    pympro_class(a, reg, "m.Second", ba, 2, NULL);
+    pympro_class(a, reg, "m.Bad", fs, 2, NULL);
+    pympro_method(reg, "m.A", "work");
+    pympro_method(reg, "m.B", "work");
+    pympro_method(reg, "m.B", "__init__");
+
+    const char *alias[] = {"m.Alias"};
+    pympro_class(a, reg, "m.Alias", NULL, 0, "m.Right");
+    pympro_class(a, reg, "m.AliasChild", alias, 1, NULL);
+    pympro_class(a, reg, "m.AliasLoop", NULL, 0, "m.AliasLoop");
+
+    const char *cyc2[] = {"m.Cyc2"};
+    const char *cyc[] = {"m.Cyc"};
+    pympro_class(a, reg, "m.Cyc", cyc2, 1, NULL);
+    pympro_class(a, reg, "m.Cyc2", cyc, 1, NULL);
+
+    const char *ext[] = {"ext.Mixin", "m.Base"};
+    pympro_class(a, reg, "m.Ext", ext, 2, NULL);
+
+    /* m.D0 -> m.D1 -> ... -> m.D20, method on the last. */
+    for (int i = 0; i <= 20; i++) {
+        const char *qn = cbm_arena_sprintf(a, "m.D%d", i);
+        const char *next[] = {cbm_arena_sprintf(a, "m.D%d", i + 1)};
+        pympro_class(a, reg, qn, i < 20 ? next : NULL, i < 20 ? 1 : 0, NULL);
+    }
+    pympro_method(reg, "m.D20", "deep");
+    pympro_method(reg, "m.D10", "mid");
+
+    /* Wide63: 63 bases (order of 64), Wide64: 64 bases, Wide62Deep: 62
+     * bases plus Sub, whose order has two entries (65 in all). */
+    const char *wide[64];
+    for (int i = 0; i < 64; i++)
+        wide[i] = cbm_arena_sprintf(a, "w.W%d", i);
+    pympro_class(a, reg, "m.Wide63", wide, 63, NULL);
+    pympro_class(a, reg, "m.Wide64", wide, 64, NULL);
+    const char *wide_deep[63];
+    for (int i = 0; i < 62; i++)
+        wide_deep[i] = wide[i];
+    wide_deep[62] = "m.Sub";
+    pympro_class(a, reg, "m.Wide62Deep", wide_deep, 63, NULL);
+    pympro_class(a, reg, "w.W62", NULL, 0, NULL);
+    pympro_method(reg, "w.W62", "work");
+}
+
+static const char *const PYMRO_CLASSES[] = {
+    "m.Root",   "m.Left",      "m.Right",     "m.Child",  "m.Base",   "m.Sub",
+    "m.A",      "m.First",     "m.Second",    "m.Bad",    "m.Alias",  "m.AliasChild",
+    "m.AliasLoop", "m.Cyc",    "m.Ext",       "m.D0",     "m.D3",     "m.D10",
+    "m.Wide63", "m.Wide64",    "m.Wide62Deep", "m.Unknown", "ext.Mixin",
+};
+
+static const char *const PYMRO_MEMBERS[] = {"work", "__init__", "go", "own", "deep", "mid",
+                                            "missing"};
+
+/* Every (class, member) pair with a lookup or super() target, as the C
+ * reference resolved them before its removal. Other pairs resolve to none. */
+typedef struct {
+    const char *cls;
+    const char *member;
+    const char *lookup;
+    const char *super_target;
+} PyMroExpected;
+
+static const PyMroExpected PYMRO_EXPECTED[] = {
+    {"m.Root", "work", "m.Root.work", NULL},
+    {"m.Root", "__init__", "m.Root.__init__", NULL},
+    {"m.Left", "work", "m.Root.work", "m.Root.work"},
+    {"m.Left", "__init__", "m.Root.__init__", "m.Root.__init__"},
+    {"m.Right", "work", "m.Right.work", "m.Root.work"},
+    {"m.Right", "__init__", "m.Root.__init__", "m.Root.__init__"},
+    {"m.Child", "work", "m.Right.work", "m.Right.work"},
+    {"m.Child", "__init__", "m.Root.__init__", "m.Root.__init__"},
+    {"m.Child", "own", "m.Child.own", NULL},
+    {"m.Base", "go", "m.Base.go", NULL},
+    {"m.Sub", "__init__", NULL, "m.Base.__init__"},
+    {"m.Sub", "go", "m.Base.go", "m.Base.go"},
+    {"m.A", "work", "m.A.work", NULL},
+    {"m.First", "work", "m.A.work", "m.A.work"},
+    {"m.First", "__init__", "m.B.__init__", "m.B.__init__"},
+    {"m.Second", "work", "m.B.work", "m.B.work"},
+    {"m.Second", "__init__", "m.B.__init__", "m.B.__init__"},
+    {"m.Bad", "work", "m.A.work", "m.A.work"},
+    {"m.Bad", "__init__", "m.B.__init__", "m.B.__init__"},
+    {"m.Alias", "work", "m.Right.work", NULL},
+    {"m.Alias", "__init__", "m.Root.__init__", NULL},
+    {"m.AliasChild", "work", "m.Right.work", "m.Right.work"},
+    {"m.AliasChild", "__init__", "m.Root.__init__", "m.Root.__init__"},
+    {"m.Cyc", "__init__", NULL, "m.Cyc2.__init__"},
+    {"m.Ext", "__init__", NULL, "ext.Mixin.__init__"},
+    {"m.Ext", "go", "m.Base.go", "m.Base.go"},
+    {"m.D0", "__init__", NULL, "m.D1.__init__"},
+    {"m.D0", "mid", "m.D10.mid", "m.D10.mid"},
+    {"m.D3", "__init__", NULL, "m.D4.__init__"},
+    {"m.D3", "deep", NULL, "m.D20.deep"},
+    {"m.D3", "mid", "m.D10.mid", "m.D10.mid"},
+    {"m.D10", "__init__", NULL, "m.D11.__init__"},
+    {"m.D10", "deep", "m.D20.deep", "m.D20.deep"},
+    {"m.D10", "mid", "m.D10.mid", NULL},
+    {"m.Wide63", "work", "w.W62.work", "w.W62.work"},
+    {"m.Wide63", "__init__", NULL, "w.W0.__init__"},
+    {"m.Wide64", "work", "w.W62.work", "w.W62.work"},
+    {"m.Wide64", "__init__", NULL, "w.W0.__init__"},
+    {"m.Wide62Deep", "__init__", NULL, "w.W0.__init__"},
+    {"m.Wide62Deep", "go", "m.Base.go", "m.Base.go"},
+};
+
+static const PyMroExpected *pymro_expected(const char *cls, const char *member) {
+    for (size_t i = 0; i < sizeof(PYMRO_EXPECTED) / sizeof(PYMRO_EXPECTED[0]); i++) {
+        if (strcmp(PYMRO_EXPECTED[i].cls, cls) == 0 &&
+            strcmp(PYMRO_EXPECTED[i].member, member) == 0)
+            return &PYMRO_EXPECTED[i];
+    }
+    return NULL;
+}
+
+static bool pymro_same(const char *expected, const char *actual) {
+    return expected == actual || (expected && actual && strcmp(expected, actual) == 0);
+}
+
+static int pymro_check(PyLSPContext *ctx) {
+    int mismatches = 0;
+    for (size_t i = 0; i < sizeof(PYMRO_CLASSES) / sizeof(PYMRO_CLASSES[0]); i++) {
+        for (size_t j = 0; j < sizeof(PYMRO_MEMBERS) / sizeof(PYMRO_MEMBERS[0]); j++) {
+            const char *cls = PYMRO_CLASSES[i];
+            const char *member = PYMRO_MEMBERS[j];
+            const PyMroExpected *want = pymro_expected(cls, member);
+            const CBMRegisteredFunc *f = cbm_py_mro_test_lookup(ctx, cls, member);
+            const char *lookup = f ? f->qualified_name : NULL;
+            const char *super_target = cbm_py_mro_test_super(ctx, cls, member);
+            const char *want_lookup = want ? want->lookup : NULL;
+            const char *want_super = want ? want->super_target : NULL;
+            if (!pymro_same(want_lookup, lookup) || !pymro_same(want_super, super_target)) {
+                printf("  %s.%s: lookup=%s (want %s) super=%s (want %s)\n", cls, member,
+                       lookup ? lookup : "(null)", want_lookup ? want_lookup : "(null)",
+                       super_target ? super_target : "(null)",
+                       want_super ? want_super : "(null)");
+                mismatches++;
+            }
+        }
+    }
+    return mismatches;
+}
+
+TEST(pylsp_inheritance_lookup_cases) {
+    CBMArena a;
+    cbm_arena_init(&a);
+    CBMTypeRegistry reg;
+    cbm_registry_init(&reg, &a);
+    pympro_registry(&a, &reg);
+    PyLSPContext ctx;
+    py_lsp_init(&ctx, &a, "", 0, &reg, "m", NULL);
+    /* The second round reads the orders the first one cached. */
+    int mismatches = pymro_check(&ctx);
+    mismatches += pymro_check(&ctx);
+    cbm_arena_destroy(&a);
+    ASSERT_EQ(mismatches, 0);
+    PASS();
+}
+
+/* ── Annotation cases (python_annotation.rs) ─────────────────────────── */
+
+/* A compact spelling of an annotation's type: ? unknown, N:qn named,
+ * B:name builtin, T:name[args] template, U(members) union. */
+static void pyann_render(char *out, size_t cap, const CBMType *t) {
+    size_t len = strlen(out);
+    if (len + 1 >= cap)
+        return;
+    char *p = out + len;
+    size_t left = cap - len;
+    if (!t) {
+        snprintf(p, left, "NULL");
+        return;
+    }
+    switch (t->kind) {
+    case CBM_TYPE_UNKNOWN:
+        snprintf(p, left, "?");
+        return;
+    case CBM_TYPE_NAMED:
+        snprintf(p, left, "N:%s", t->data.named.qualified_name);
+        return;
+    case CBM_TYPE_BUILTIN:
+        snprintf(p, left, "B:%s", t->data.builtin.name);
+        return;
+    case CBM_TYPE_TEMPLATE:
+        snprintf(p, left, "T:%s[", t->data.template_type.template_name);
+        for (int i = 0; i < t->data.template_type.arg_count; i++) {
+            if (i)
+                strncat(out, ",", cap - strlen(out) - 1);
+            pyann_render(out, cap, t->data.template_type.template_args[i]);
+        }
+        strncat(out, "]", cap - strlen(out) - 1);
+        return;
+    case CBM_TYPE_UNION:
+        snprintf(p, left, "U(");
+        for (int i = 0; i < t->data.union_type.count; i++) {
+            if (i)
+                strncat(out, ",", cap - strlen(out) - 1);
+            pyann_render(out, cap, t->data.union_type.members[i]);
+        }
+        strncat(out, ")", cap - strlen(out) - 1);
+        return;
+    default:
+        snprintf(p, left, "K%d", (int)t->kind);
+        return;
+    }
+}
+
+/* The type each spelling resolved to through the C reference before its
+ * removal, in registry form (scoped 0) and in a file scope that binds
+ * Imported (scoped 1), with and without a module: builtins, None,
+ * Optional and Union spellings, PEP 604 unions, generic containers,
+ * quoted forward references, whitespace, malformed brackets, dotted,
+ * scope-bound and registered names, and deep nesting. */
+typedef struct {
+    int scoped;
+    const char *module_qn;
+    const char *ann;
+    const char *type;
+} PyAnnCase;
+
+static const PyAnnCase PYANN_CASES[] = {
+    {0, NULL, NULL, "?"},
+    {1, NULL, NULL, "?"},
+    {0, NULL, "", "?"},
+    {1, NULL, "", "?"},
+    {0, NULL, " ", "N: "},
+    {1, NULL, " ", "N: "},
+    {0, NULL, "int", "B:int"},
+    {1, NULL, "int", "B:int"},
+    {0, NULL, "str", "B:str"},
+    {1, NULL, "str", "B:str"},
+    {0, NULL, "bool", "B:bool"},
+    {1, NULL, "bool", "B:bool"},
+    {0, NULL, "float", "B:float"},
+    {1, NULL, "float", "B:float"},
+    {0, NULL, "bytes", "B:bytes"},
+    {1, NULL, "bytes", "B:bytes"},
+    {0, NULL, "None", "B:None"},
+    {1, NULL, "None", "B:None"},
+    {0, NULL, "object", "B:object"},
+    {1, NULL, "object", "B:object"},
+    {0, NULL, "Any", "N:Any"},
+    {1, NULL, "Any", "N:Any"},
+    {0, NULL, "Self", "N:Self"},
+    {1, NULL, "Self", "N:Self"},
+    {0, NULL, "Foo", "N:Foo"},
+    {1, NULL, "Foo", "N:Foo"},
+    {0, NULL, "  Foo  ", "N:  Foo  "},
+    {1, NULL, "  Foo  ", "N:  Foo  "},
+    {0, NULL, "'Foo'", "N:Foo"},
+    {1, NULL, "'Foo'", "N:Foo"},
+    {0, NULL, "\"Foo\"", "N:Foo"},
+    {1, NULL, "\"Foo\"", "N:Foo"},
+    {0, NULL, "'Foo", "N:'Foo"},
+    {1, NULL, "'Foo", "N:'Foo"},
+    {0, NULL, "Known", "N:Known"},
+    {1, NULL, "Known", "N:Known"},
+    {0, NULL, "Imported", "N:Imported"},
+    {1, NULL, "Imported", "N:ext.Imported"},
+    {0, NULL, "Imported.Inner", "N:Imported.Inner"},
+    {1, NULL, "Imported.Inner", "N:Imported.Inner"},
+    {0, NULL, "mod.Foo", "N:mod.Foo"},
+    {1, NULL, "mod.Foo", "N:mod.Foo"},
+    {0, NULL, "typing.Optional[Foo]", "U(N:Foo,B:None)"},
+    {1, NULL, "typing.Optional[Foo]", "U(N:Foo,B:None)"},
+    {0, NULL, "Optional[Foo]", "U(N:Foo,B:None)"},
+    {1, NULL, "Optional[Foo]", "U(N:Foo,B:None)"},
+    {0, NULL, "Optional [Foo]", "U(N:Foo,B:None)"},
+    {1, NULL, "Optional [Foo]", "U(N:Foo,B:None)"},
+    {0, NULL, "Optional[]", "N:Optional"},
+    {1, NULL, "Optional[]", "N:Optional"},
+    {0, NULL, "Optional['Foo']", "U(N:Foo,B:None)"},
+    {1, NULL, "Optional['Foo']", "U(N:Foo,B:None)"},
+    {0, NULL, "Optional[Union[A, B]]", "U(N:A,N:B,B:None)"},
+    {1, NULL, "Optional[Union[A, B]]", "U(N:A,N:B,B:None)"},
+    {0, NULL, "Union[A, B]", "U(N:A,N:B)"},
+    {1, NULL, "Union[A, B]", "U(N:A,N:B)"},
+    {0, NULL, "Union[A]", "N:A"},
+    {1, NULL, "Union[A]", "N:A"},
+    {0, NULL, "Union[]", "N:Union"},
+    {1, NULL, "Union[]", "N:Union"},
+    {0, NULL, "Union[A, B, A]", "U(N:A,N:B)"},
+    {1, NULL, "Union[A, B, A]", "U(N:A,N:B)"},
+    {0, NULL, "Union[int, None]", "U(B:int,B:None)"},
+    {1, NULL, "Union[int, None]", "U(B:int,B:None)"},
+    {0, NULL, "A | B", "N:A | B"},
+    {1, NULL, "A | B", "U(N:A,N:B)"},
+    {0, NULL, "A | None", "N:A | None"},
+    {1, NULL, "A | None", "U(N:A,B:None)"},
+    {0, NULL, "A|B|C", "N:A|B|C"},
+    {1, NULL, "A|B|C", "U(N:A,N:B,N:C)"},
+    {0, NULL, "int | 'Foo'", "N:int | 'Foo'"},
+    {1, NULL, "int | 'Foo'", "U(B:int,N:Foo)"},
+    {0, NULL, "None | Known", "N:None | Known"},
+    {1, NULL, "None | Known", "U(B:None,N:Known)"},
+    {0, NULL, "list[Foo]", "T:list[N:Foo]"},
+    {1, NULL, "list[Foo]", "T:list[N:Foo]"},
+    {0, NULL, "List[Foo]", "T:List[N:Foo]"},
+    {1, NULL, "List[Foo]", "T:List[N:Foo]"},
+    {0, NULL, "list[]", "N:list"},
+    {1, NULL, "list[]", "N:list"},
+    {0, NULL, "list[Known]", "T:list[N:Known]"},
+    {1, NULL, "list[Known]", "T:list[N:Known]"},
+    {0, NULL, "dict[str, Foo]", "T:dict[B:str,N:Foo]"},
+    {1, NULL, "dict[str, Foo]", "T:dict[B:str,N:Foo]"},
+    {0, NULL, "Dict[str, List[Foo]]", "T:Dict[B:str,T:List[N:Foo]]"},
+    {1, NULL, "Dict[str, List[Foo]]", "T:Dict[B:str,T:List[N:Foo]]"},
+    {0, NULL, "set[Optional['Foo']]", "T:set[U(N:Foo,B:None)]"},
+    {1, NULL, "set[Optional['Foo']]", "T:set[U(N:Foo,B:None)]"},
+    {0, NULL, "tuple[int, ...]", "T:tuple[B:int,N:...]"},
+    {1, NULL, "tuple[int, ...]", "T:tuple[B:int,N:...]"},
+    {0, NULL, "Tuple[int, str]", "T:Tuple[B:int,B:str]"},
+    {1, NULL, "Tuple[int, str]", "T:Tuple[B:int,B:str]"},
+    {0, NULL, "Callable[[int], str]", "T:Callable[T:[B:int],B:str]"},
+    {1, NULL, "Callable[[int], str]", "T:Callable[T:[B:int],B:str]"},
+    {0, NULL, "Literal['a']", "T:Literal[N:a]"},
+    {1, NULL, "Literal['a']", "T:Literal[N:a]"},
+    {0, NULL, "Annotated[Foo, 1]", "N:Foo"},
+    {1, NULL, "Annotated[Foo, 1]", "N:Foo"},
+    {0, NULL, "type[Foo]", "N:Foo"},
+    {1, NULL, "type[Foo]", "N:Foo"},
+    {0, NULL, "Type[Known]", "N:Known"},
+    {1, NULL, "Type[Known]", "N:Known"},
+    {0, NULL, "Awaitable[Foo]", "T:Awaitable[N:Foo]"},
+    {1, NULL, "Awaitable[Foo]", "T:Awaitable[N:Foo]"},
+    {0, NULL, "Iterator[Imported]", "T:Iterator[N:Imported]"},
+    {1, NULL, "Iterator[Imported]", "T:Iterator[N:ext.Imported]"},
+    {0, NULL, "Foo[", "N:Foo["},
+    {1, NULL, "Foo[", "N:Foo["},
+    {0, NULL, "Foo]", "N:Foo]"},
+    {1, NULL, "Foo]", "N:Foo]"},
+    {0, NULL, "Foo[]]", "N:Foo"},
+    {1, NULL, "Foo[]]", "N:Foo"},
+    {0, NULL, "[Foo]", "T:[N:Foo]"},
+    {1, NULL, "[Foo]", "T:[N:Foo]"},
+    {0, NULL, "Foo[Bar", "N:Foo[Bar"},
+    {1, NULL, "Foo[Bar", "N:Foo[Bar"},
+    {0, NULL, "list[list[list[list[Foo]]]]", "T:list[T:list[T:list[T:list[N:Foo]]]]"},
+    {1, NULL, "list[list[list[list[Foo]]]]", "T:list[T:list[T:list[T:list[N:Foo]]]]"},
+    {0, NULL, "Optional[list[A | B]]", "U(T:list[N:A | B],B:None)"},
+    {1, NULL, "Optional[list[A | B]]", "U(T:list[U(N:A,N:B)],B:None)"},
+    {0, NULL, "Imported[int]", "T:Imported[B:int]"},
+    {1, NULL, "Imported[int]", "T:Imported[B:int]"},
+    {0, NULL, "Known | int", "N:Known | int"},
+    {1, NULL, "Known | int", "U(N:Known,B:int)"},
+    {0, "pkg.mod", NULL, "?"},
+    {1, "pkg.mod", NULL, "?"},
+    {0, "pkg.mod", "", "?"},
+    {1, "pkg.mod", "", "?"},
+    {0, "pkg.mod", " ", "N:pkg.mod. "},
+    {1, "pkg.mod", " ", "N: "},
+    {0, "pkg.mod", "int", "B:int"},
+    {1, "pkg.mod", "int", "B:int"},
+    {0, "pkg.mod", "str", "B:str"},
+    {1, "pkg.mod", "str", "B:str"},
+    {0, "pkg.mod", "bool", "B:bool"},
+    {1, "pkg.mod", "bool", "B:bool"},
+    {0, "pkg.mod", "float", "B:float"},
+    {1, "pkg.mod", "float", "B:float"},
+    {0, "pkg.mod", "bytes", "B:bytes"},
+    {1, "pkg.mod", "bytes", "B:bytes"},
+    {0, "pkg.mod", "None", "B:None"},
+    {1, "pkg.mod", "None", "B:None"},
+    {0, "pkg.mod", "object", "B:object"},
+    {1, "pkg.mod", "object", "B:object"},
+    {0, "pkg.mod", "Any", "N:Any"},
+    {1, "pkg.mod", "Any", "N:Any"},
+    {0, "pkg.mod", "Self", "N:Self"},
+    {1, "pkg.mod", "Self", "N:Self"},
+    {0, "pkg.mod", "Foo", "N:pkg.mod.Foo"},
+    {1, "pkg.mod", "Foo", "N:Foo"},
+    {0, "pkg.mod", "  Foo  ", "N:pkg.mod.  Foo  "},
+    {1, "pkg.mod", "  Foo  ", "N:  Foo  "},
+    {0, "pkg.mod", "'Foo'", "N:pkg.mod.Foo"},
+    {1, "pkg.mod", "'Foo'", "N:Foo"},
+    {0, "pkg.mod", "\"Foo\"", "N:pkg.mod.Foo"},
+    {1, "pkg.mod", "\"Foo\"", "N:Foo"},
+    {0, "pkg.mod", "'Foo", "N:pkg.mod.'Foo"},
+    {1, "pkg.mod", "'Foo", "N:'Foo"},
+    {0, "pkg.mod", "Known", "N:pkg.mod.Known"},
+    {1, "pkg.mod", "Known", "N:pkg.mod.Known"},
+    {0, "pkg.mod", "Imported", "N:pkg.mod.Imported"},
+    {1, "pkg.mod", "Imported", "N:ext.Imported"},
+    {0, "pkg.mod", "Imported.Inner", "N:Imported.Inner"},
+    {1, "pkg.mod", "Imported.Inner", "N:Imported.Inner"},
+    {0, "pkg.mod", "mod.Foo", "N:mod.Foo"},
+    {1, "pkg.mod", "mod.Foo", "N:mod.Foo"},
+    {0, "pkg.mod", "typing.Optional[Foo]", "U(N:pkg.mod.Foo,B:None)"},
+    {1, "pkg.mod", "typing.Optional[Foo]", "U(N:Foo,B:None)"},
+    {0, "pkg.mod", "Optional[Foo]", "U(N:pkg.mod.Foo,B:None)"},
+    {1, "pkg.mod", "Optional[Foo]", "U(N:Foo,B:None)"},
+    {0, "pkg.mod", "Optional [Foo]", "U(N:pkg.mod.Foo,B:None)"},
+    {1, "pkg.mod", "Optional [Foo]", "U(N:Foo,B:None)"},
+    {0, "pkg.mod", "Optional[]", "N:Optional"},
+    {1, "pkg.mod", "Optional[]", "N:Optional"},
+    {0, "pkg.mod", "Optional['Foo']", "U(N:pkg.mod.Foo,B:None)"},
+    {1, "pkg.mod", "Optional['Foo']", "U(N:Foo,B:None)"},
+    {0, "pkg.mod", "Optional[Union[A, B]]", "U(N:pkg.mod.A,N:pkg.mod.B,B:None)"},
+    {1, "pkg.mod", "Optional[Union[A, B]]", "U(N:A,N:B,B:None)"},
+    {0, "pkg.mod", "Union[A, B]", "U(N:pkg.mod.A,N:pkg.mod.B)"},
+    {1, "pkg.mod", "Union[A, B]", "U(N:A,N:B)"},
+    {0, "pkg.mod", "Union[A]", "N:pkg.mod.A"},
+    {1, "pkg.mod", "Union[A]", "N:A"},
+    {0, "pkg.mod", "Union[]", "N:Union"},
+    {1, "pkg.mod", "Union[]", "N:Union"},
+    {0, "pkg.mod", "Union[A, B, A]", "U(N:pkg.mod.A,N:pkg.mod.B)"},
+    {1, "pkg.mod", "Union[A, B, A]", "U(N:A,N:B)"},
+    {0, "pkg.mod", "Union[int, None]", "U(B:int,B:None)"},
+    {1, "pkg.mod", "Union[int, None]", "U(B:int,B:None)"},
+    {0, "pkg.mod", "A | B", "N:pkg.mod.A | B"},
+    {1, "pkg.mod", "A | B", "U(N:A,N:B)"},
+    {0, "pkg.mod", "A | None", "N:pkg.mod.A | None"},
+    {1, "pkg.mod", "A | None", "U(N:A,B:None)"},
+    {0, "pkg.mod", "A|B|C", "N:pkg.mod.A|B|C"},
+    {1, "pkg.mod", "A|B|C", "U(N:A,N:B,N:C)"},
+    {0, "pkg.mod", "int | 'Foo'", "N:pkg.mod.int | 'Foo'"},
+    {1, "pkg.mod", "int | 'Foo'", "U(B:int,N:Foo)"},
+    {0, "pkg.mod", "None | Known", "N:pkg.mod.None | Known"},
+    {1, "pkg.mod", "None | Known", "U(B:None,N:pkg.mod.Known)"},
+    {0, "pkg.mod", "list[Foo]", "T:list[N:pkg.mod.Foo]"},
+    {1, "pkg.mod", "list[Foo]", "T:list[N:Foo]"},
+    {0, "pkg.mod", "List[Foo]", "T:List[N:pkg.mod.Foo]"},
+    {1, "pkg.mod", "List[Foo]", "T:List[N:Foo]"},
+    {0, "pkg.mod", "list[]", "N:pkg.mod.list"},
+    {1, "pkg.mod", "list[]", "N:list"},
+    {0, "pkg.mod", "list[Known]", "T:list[N:pkg.mod.Known]"},
+    {1, "pkg.mod", "list[Known]", "T:list[N:pkg.mod.Known]"},
+    {0, "pkg.mod", "dict[str, Foo]", "T:dict[B:str,N:pkg.mod.Foo]"},
+    {1, "pkg.mod", "dict[str, Foo]", "T:dict[B:str,N:Foo]"},
+    {0, "pkg.mod", "Dict[str, List[Foo]]", "T:Dict[B:str,T:List[N:pkg.mod.Foo]]"},
+    {1, "pkg.mod", "Dict[str, List[Foo]]", "T:Dict[B:str,T:List[N:Foo]]"},
+    {0, "pkg.mod", "set[Optional['Foo']]", "T:set[U(N:pkg.mod.Foo,B:None)]"},
+    {1, "pkg.mod", "set[Optional['Foo']]", "T:set[U(N:Foo,B:None)]"},
+    {0, "pkg.mod", "tuple[int, ...]", "T:tuple[B:int,N:...]"},
+    {1, "pkg.mod", "tuple[int, ...]", "T:tuple[B:int,N:...]"},
+    {0, "pkg.mod", "Tuple[int, str]", "T:Tuple[B:int,B:str]"},
+    {1, "pkg.mod", "Tuple[int, str]", "T:Tuple[B:int,B:str]"},
+    {0, "pkg.mod", "Callable[[int], str]", "T:Callable[T:[B:int],B:str]"},
+    {1, "pkg.mod", "Callable[[int], str]", "T:Callable[T:[B:int],B:str]"},
+    {0, "pkg.mod", "Literal['a']", "T:Literal[N:pkg.mod.a]"},
+    {1, "pkg.mod", "Literal['a']", "T:Literal[N:a]"},
+    {0, "pkg.mod", "Annotated[Foo, 1]", "N:pkg.mod.Foo"},
+    {1, "pkg.mod", "Annotated[Foo, 1]", "N:Foo"},
+    {0, "pkg.mod", "type[Foo]", "N:pkg.mod.Foo"},
+    {1, "pkg.mod", "type[Foo]", "N:Foo"},
+    {0, "pkg.mod", "Type[Known]", "N:pkg.mod.Known"},
+    {1, "pkg.mod", "Type[Known]", "N:pkg.mod.Known"},
+    {0, "pkg.mod", "Awaitable[Foo]", "T:Awaitable[N:pkg.mod.Foo]"},
+    {1, "pkg.mod", "Awaitable[Foo]", "T:Awaitable[N:Foo]"},
+    {0, "pkg.mod", "Iterator[Imported]", "T:Iterator[N:pkg.mod.Imported]"},
+    {1, "pkg.mod", "Iterator[Imported]", "T:Iterator[N:ext.Imported]"},
+    {0, "pkg.mod", "Foo[", "N:pkg.mod.Foo["},
+    {1, "pkg.mod", "Foo[", "N:Foo["},
+    {0, "pkg.mod", "Foo]", "N:pkg.mod.Foo]"},
+    {1, "pkg.mod", "Foo]", "N:Foo]"},
+    {0, "pkg.mod", "Foo[]]", "N:pkg.mod.Foo"},
+    {1, "pkg.mod", "Foo[]]", "N:Foo"},
+    {0, "pkg.mod", "[Foo]", "T:[N:pkg.mod.Foo]"},
+    {1, "pkg.mod", "[Foo]", "T:[N:Foo]"},
+    {0, "pkg.mod", "Foo[Bar", "N:pkg.mod.Foo[Bar"},
+    {1, "pkg.mod", "Foo[Bar", "N:Foo[Bar"},
+    {0, "pkg.mod", "list[list[list[list[Foo]]]]", "T:list[T:list[T:list[T:list[N:pkg.mod.Foo]]]]"},
+    {1, "pkg.mod", "list[list[list[list[Foo]]]]", "T:list[T:list[T:list[T:list[N:Foo]]]]"},
+    {0, "pkg.mod", "Optional[list[A | B]]", "U(T:list[N:pkg.mod.A | B],B:None)"},
+    {1, "pkg.mod", "Optional[list[A | B]]", "U(T:list[U(N:A,N:B)],B:None)"},
+    {0, "pkg.mod", "Imported[int]", "T:Imported[B:int]"},
+    {1, "pkg.mod", "Imported[int]", "T:Imported[B:int]"},
+    {0, "pkg.mod", "Known | int", "N:pkg.mod.Known | int"},
+    {1, "pkg.mod", "Known | int", "U(N:pkg.mod.Known,B:int)"},
+};
+
+TEST(pylsp_annotation_cases) {
+    CBMArena a;
+    cbm_arena_init(&a);
+    CBMTypeRegistry reg;
+    cbm_registry_init(&reg, &a);
+    CBMRegisteredType known;
+    memset(&known, 0, sizeof(known));
+    known.qualified_name = "pkg.mod.Known";
+    known.short_name = "Known";
+    cbm_registry_add_type(&reg, known);
+    int mismatches = 0;
+    for (size_t i = 0; i < sizeof(PYANN_CASES) / sizeof(PYANN_CASES[0]); i++) {
+        const PyAnnCase *want = &PYANN_CASES[i];
+        PyLSPContext ctx;
+        const char *locals[] = {"Imported"};
+        const char *qns[] = {"ext.Imported"};
+        bind_imports_into_ctx(&ctx, &a, &reg, locals, qns, 1);
+        ctx.module_qn = want->module_qn;
+        const CBMType *type = want->scoped
+                                  ? cbm_py_annotation_test_resolve(&ctx, want->ann)
+                                  : cbm_py_annotation_test_parse(&a, want->ann, want->module_qn);
+        char text[512] = "";
+        pyann_render(text, sizeof(text), type);
+        if (strcmp(text, want->type) != 0) {
+            printf("  %s(%s, module=%s): %s, want %s\n", want->scoped ? "resolve" : "parse",
+                   want->ann ? want->ann : "(null)", want->module_qn ? want->module_qn : "(null)",
+                   text, want->type);
+            mismatches++;
+        }
+    }
+    cbm_arena_destroy(&a);
+    ASSERT_EQ(mismatches, 0);
+    PASS();
+}
+
+/* The invocation resolver fixture, extracted under the sanitizers. */
+TEST(pylsp_invocation_fixture_extracts) {
+    CBMFileResult *r = extract_py(
+        "import os.path\n"
+        "\n"
+        "\n"
+        "def helper():\n"
+        "    return 1\n"
+        "\n"
+        "\n"
+        "def other():\n"
+        "    return 2\n"
+        "\n"
+        "\n"
+        "class Box:\n"
+        "    def __init__(self):\n"
+        "        self.size = 0\n"
+        "\n"
+        "    def grow(self):\n"
+        "        return self.size\n"
+        "\n"
+        "    @staticmethod\n"
+        "    def build():\n"
+        "        return Box()\n"
+        "\n"
+        "    @classmethod\n"
+        "    def create(cls):\n"
+        "        return cls()\n"
+        "\n"
+        "\n"
+        "HANDLERS = {\"a\": helper, \"b\": other}\n"
+        "square = lambda x: x * x\n"
+        "\n"
+        "\n"
+        "def direct():\n"
+        "    return helper()\n"
+        "\n"
+        "\n"
+        "def construct():\n"
+        "    box = Box()\n"
+        "    return box.grow()\n"
+        "\n"
+        "\n"
+        "def static_call():\n"
+        "    return Box.build()\n"
+        "\n"
+        "\n"
+        "def class_call():\n"
+        "    return Box.create()\n"
+        "\n"
+        "\n"
+        "def dispatch():\n"
+        "    return HANDLERS[\"a\"]()\n"
+        "\n"
+        "\n"
+        "def lambda_call():\n"
+        "    return square(3)\n"
+        "\n"
+        "\n"
+        "def alias_call():\n"
+        "    fn = helper\n"
+        "    return fn()\n"
+        "\n"
+        "\n"
+        "def module_call():\n"
+        "    return os.path.join(\"a\", \"b\")\n"
+        "\n"
+        "\n"
+        "def nested():\n"
+        "    def inner():\n"
+        "        return other()\n"
+        "\n"
+        "    return inner()\n");
+    ASSERT_NOT_NULL(r);
+    cbm_free_result(r);
+    PASS();
+}
+
+
+/* The callable-value resolver fixture, extracted under the sanitizers. */
+TEST(pylsp_callable_value_fixture_extracts) {
+    CBMFileResult *r = extract_py(
+        "import functools\n"
+        "\n"
+        "\n"
+        "def helper(value):\n"
+        "    return value\n"
+        "\n"
+        "\n"
+        "def other(value):\n"
+        "    return value\n"
+        "\n"
+        "\n"
+        "class Box:\n"
+        "    def method(self, value):\n"
+        "        return value\n"
+        "\n"
+        "\n"
+        "def apply(fn, value):\n"
+        "    return fn(value)\n"
+        "\n"
+        "\n"
+        "def passes_function():\n"
+        "    return apply(helper, 1)\n"
+        "\n"
+        "\n"
+        "def passes_method():\n"
+        "    box = Box()\n"
+        "    return apply(box.method, 2)\n"
+        "\n"
+        "\n"
+        "def partial():\n"
+        "    return functools.partial(helper, 3)\n"
+        "\n"
+        "\n"
+        "def keyword():\n"
+        "    return apply(fn=other, value=4)\n"
+        "\n"
+        "\n"
+        "def stored():\n"
+        "    fn = helper\n"
+        "    return apply(fn, 5)\n"
+        "\n"
+        "\n"
+        "def conditional(flag):\n"
+        "    return apply(helper if flag else other, 6)\n");
+    ASSERT_NOT_NULL(r);
+    cbm_free_result(r);
+    PASS();
+}
+
+
+/* The walk resolver fixture, extracted under the sanitizers. */
+TEST(pylsp_walk_fixture_extracts) {
+    CBMFileResult *r = extract_py(
+        "class Vector:\n"
+        "    def __add__(self, other):\n"
+        "        return self\n"
+        "\n"
+        "    def __getitem__(self, key):\n"
+        "        return key\n"
+        "\n"
+        "    def norm(self):\n"
+        "        return 1\n"
+        "\n"
+        "\n"
+        "class Resource:\n"
+        "    def __enter__(self):\n"
+        "        return self\n"
+        "\n"
+        "    def __exit__(self, *args):\n"
+        "        return False\n"
+        "\n"
+        "    def read(self):\n"
+        "        return 2\n"
+        "\n"
+        "\n"
+        "def make():\n"
+        "    return Vector()\n"
+        "\n"
+        "\n"
+        "def operators():\n"
+        "    a = make()\n"
+        "    b = make()\n"
+        "    total = a + b\n"
+        "    return total.norm()\n"
+        "\n"
+        "\n"
+        "def subscript():\n"
+        "    v = make()\n"
+        "    return v[0]\n"
+        "\n"
+        "\n"
+        "def comprehension():\n"
+        "    return [make().norm() for _ in [1, 2]]\n"
+        "\n"
+        "\n"
+        "def with_block():\n"
+        "    with Resource() as res:\n"
+        "        return res.read()\n"
+        "\n"
+        "\n"
+        "def branches(flag):\n"
+        "    if flag:\n"
+        "        v = make()\n"
+        "    else:\n"
+        "        v = Vector()\n"
+        "    return v.norm()\n"
+        "\n"
+        "\n"
+        "def loop():\n"
+        "    for v in [make(), make()]:\n"
+        "        v.norm()\n"
+        "\n"
+        "\n"
+        "def guarded():\n"
+        "    try:\n"
+        "        return make().norm()\n"
+        "    except ValueError:\n"
+        "        return None\n"
+        "\n"
+        "\n"
+        "class Holder:\n"
+        "    default = make()\n"
+        "\n"
+        "    def use(self):\n"
+        "        return self.default.norm()\n"
+        "\n"
+        "\n"
+        "def matched(value):\n"
+        "    match value:\n"
+        "        case Vector() as v:\n"
+        "            return v.norm()\n"
+        "        case [first, *rest]:\n"
+        "            return make()\n"
+        "    return None\n"
+        "\n"
+        "\n"
+        "def lambdas():\n"
+        "    pick = lambda: make()\n"
+        "    return pick().norm()\n");
+    ASSERT_NOT_NULL(r);
+    cbm_free_result(r);
+    PASS();
+}
+
+
 SUITE(py_lsp) {
     RUN_TEST(pylsp_range_order_boundaries_and_null_contract);
     RUN_TEST(pylsp_range_growth_rebuild_seal_and_independent_failure);
@@ -5309,6 +6117,12 @@ SUITE(py_lsp) {
     RUN_TEST(pylsp_dataclass_constructor);
     RUN_TEST(pylsp_super_call);
     RUN_TEST(pylsp_multi_inheritance_first_base);
+    RUN_TEST(pylsp_c3_diamond_and_super_use_same_order);
+    RUN_TEST(pylsp_inheritance_lookup_cases);
+    RUN_TEST(pylsp_annotation_cases);
+    RUN_TEST(pylsp_invocation_fixture_extracts);
+    RUN_TEST(pylsp_callable_value_fixture_extracts);
+    RUN_TEST(pylsp_walk_fixture_extracts);
     RUN_TEST(pylsp_pep695_generic_class);
     /* Phase 9 — cross-file + batch */
     RUN_TEST(pylsp_crossfile_method_dispatch);
