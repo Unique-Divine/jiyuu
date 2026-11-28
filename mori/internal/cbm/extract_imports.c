@@ -142,15 +142,8 @@ static const char *python_join_from_import(CBMArena *a, const char *module, cons
 
 typedef void (*CBMGoImportSink)(void *context, const char *path, size_t path_len,
                                 const char *name, size_t name_len);
-typedef void (*CBMGoImportExtractor)(TSNode root, const char *source, size_t source_len,
-                                     void *context, CBMGoImportSink sink);
-
-static CBMGoImportExtractor go_import_extractor;
-
-void cbm_go_set_import_extractor(CBMGoImportExtractor extractor);
-void cbm_go_set_import_extractor(CBMGoImportExtractor extractor) {
-    go_import_extractor = extractor;
-}
+extern void mori_go_extract_imports(TSNode root, const char *source, size_t source_len,
+                                    void *context, CBMGoImportSink sink);
 
 /* The extractor lends both byte slices for this call. Store them in the
  * result arena, which outlives the borrowed Tree-sitter tree and source. */
@@ -168,76 +161,11 @@ static void store_go_import(void *context, const char *path, size_t path_len,
     cbm_imports_push(&ctx->result->imports, ctx->arena, import);
 }
 
-// Parse a single Go import_spec node.
-static void parse_go_import_spec(CBMExtractCtx *ctx, TSNode spec) {
-    CBMArena *a = ctx->arena;
-    TSNode path_node = ts_node_child_by_field_name(spec, TS_FIELD("path"));
-    if (ts_node_is_null(path_node)) {
-        return;
-    }
-    char *path = strip_quotes(a, cbm_node_text(a, path_node, ctx->source));
-    if (!path || !path[0]) {
-        return;
-    }
-
-    /* cgo: `import "C"` names the cgo PSEUDO-package, not a real one — "C" is
-     * reserved by go/build and no package with that import path can exist.
-     * Emitting it as an ordinary import makes the import resolver fall through
-     * to its symbol-name fallback (cbm_pipeline_resolve_import_node Strategy 3,
-     * pass_pkgmap.c), which matches the literal name "C" against every project
-     * node called C and picks the lexicographically smallest: on a real Go repo
-     * all 27 cgo files pointed their IMPORTS edge at the same unrelated `C`
-     * member of a test helper. Drop it — the C side is not a graph package, and
-     * the file's remaining imports are unaffected. */
-    if (strcmp(path, "C") == 0) {
-        return;
-    }
-
-    TSNode name_node = ts_node_child_by_field_name(spec, TS_FIELD("name"));
-    const char *local_name =
-        !ts_node_is_null(name_node) ? cbm_node_text(a, name_node, ctx->source) : path_last(a, path);
-
-    CBMImport imp = {.local_name = local_name, .module_path = path};
-    cbm_imports_push(&ctx->result->imports, a, imp);
-}
-
 static void parse_go_imports(CBMExtractCtx *ctx) {
-    if (go_import_extractor && ctx->source && ctx->source_len >= 0) {
-        go_import_extractor(ctx->root, ctx->source, (size_t)ctx->source_len, ctx,
-                            store_go_import);
-        cbm_log_debug("extract.go_imports", "implementation", "rust");
+    if (!ctx->source || ctx->source_len < 0)
         return;
-    }
-
-    TSTreeCursor cursor = ts_tree_cursor_new(ctx->root);
-    if (!ts_tree_cursor_goto_first_child(&cursor)) {
-        ts_tree_cursor_delete(&cursor);
-        return;
-    }
-    do {
-        TSNode decl = ts_tree_cursor_current_node(&cursor);
-        if (strcmp(ts_node_type(decl), "import_declaration") != 0) {
-            continue;
-        }
-
-        uint32_t dc = ts_node_child_count(decl);
-        for (uint32_t j = 0; j < dc; j++) {
-            TSNode child = ts_node_child(decl, j);
-            const char *ck = ts_node_type(child);
-            if (strcmp(ck, "import_spec") == 0) {
-                parse_go_import_spec(ctx, child);
-            } else if (strcmp(ck, "import_spec_list") == 0) {
-                uint32_t sc = ts_node_child_count(child);
-                for (uint32_t k = 0; k < sc; k++) {
-                    TSNode spec = ts_node_child(child, k);
-                    if (strcmp(ts_node_type(spec), "import_spec") == 0) {
-                        parse_go_import_spec(ctx, spec);
-                    }
-                }
-            }
-        }
-    } while (ts_tree_cursor_goto_next_sibling(&cursor));
-    ts_tree_cursor_delete(&cursor);
+    mori_go_extract_imports(ctx->root, ctx->source, (size_t)ctx->source_len, ctx, store_go_import);
+    cbm_log_debug("extract.go_imports", "implementation", "rust");
 }
 
 // --- Python imports ---

@@ -7,62 +7,7 @@
 #include "type_registry.h"
 #include "../cbm.h"
 
-// GoLSPContext holds state for Go expression type evaluation within a file.
-typedef struct {
-    CBMArena* arena;
-    const char* source;
-    int source_len;
-    const CBMTypeRegistry* registry;
-    CBMScope* current_scope;
-
-    // Import map: local_name -> package QN (arena-allocated)
-    const char** import_local_names;   // NULL-terminated
-    const char** import_package_qns;   // NULL-terminated
-    int import_count;
-    CBMNameRows import_rows; // import_local_names by name, rows in table order
-
-    // Current function context
-    const char* enclosing_func_qn;
-    const char* package_qn;  // module QN for this file
-    const char* rel_path;    // repo-relative file path: init() QN suffix (#1910); NULL = flat
-
-    // Output: resolved calls accumulate here
-    CBMResolvedCallArray* resolved_calls;
-
-    // AST-walk recursion depth for resolve_calls_in_node (guards stack overflow
-    // on deeply-nested/cyclic files; see cbm_lsp_max_walk_depth). Zero via memset.
-    int walk_depth;
-
-    // Debug mode (CBM_LSP_DEBUG env)
-    bool debug;
-} GoLSPContext;
-
-// Initialize a GoLSPContext for processing one file.
-void go_lsp_init(GoLSPContext* ctx, CBMArena* arena, const char* source, int source_len,
-    const CBMTypeRegistry* registry, const char* package_qn, CBMResolvedCallArray* out);
-
-// Add an import mapping.
-void go_lsp_add_import(GoLSPContext* ctx, const char* local_name, const char* package_qn);
-
-// Process all functions in a file's AST, evaluating types and resolving calls.
-// root is the tree-sitter root node of the file.
-void go_lsp_process_file(GoLSPContext* ctx, TSNode root);
-
-// Evaluate the type of a Go expression node.
-const CBMType* go_eval_expr_type(GoLSPContext* ctx, TSNode node);
-
-// Parse a Go type AST node into a CBMType.
-const CBMType* go_parse_type_node(GoLSPContext* ctx, TSNode node);
-
-// Process a Go statement, binding variables into the current scope.
-void go_process_statement(GoLSPContext* ctx, TSNode node);
-
-// Evaluate a builtin call (make, new, append, len, cap, delete).
-const CBMType* go_eval_builtin_call(GoLSPContext* ctx, const char* name, TSNode args);
-
-// Look up a field or method on a type, traversing embedded types.
-const CBMRegisteredFunc* go_lookup_field_or_method(GoLSPContext* ctx,
-    const char* type_qn, const char* member_name);
+#include <stdatomic.h>
 
 // Entry point: build registry from file's own defs + run LSP resolution.
 // Called from cbm_extract_file() after definitions and imports are extracted.
@@ -149,41 +94,41 @@ void cbm_run_go_lsp_cross_with_registry(
     TSTree* cached_tree,           // NULL = parse internally
     CBMResolvedCallArray* out);
 
-/* Tier 3: AST-walk-free fast resolver. Iterates result->calls and
- * resolves fully-qualified calls (pkg.Func) directly from the
- * pre-built registry — no tree-sitter parse, no AST walk. Returns
- * the count of calls that STILL need the slow path (methods on
- * locals + qualified calls we couldn't resolve). When the return
- * value is 0, the caller can skip the cbm_run_go_lsp_cross_with_
- * registry parse+walk entirely. Resolved entries are appended to
- * result->resolved_calls in result->arena. */
-int cbm_go_fast_resolve_qualified_calls(
-    CBMFileResult* result,
-    CBMTypeRegistry* reg,
-    const char** import_names, const char** import_qns, int import_count);
+typedef enum {
+    CBM_GO_RESOLVE_COMPLETE = 0,
+    CBM_GO_RESOLVE_CANCELLED,
+    CBM_GO_RESOLVE_FAILED,
+    CBM_GO_RESOLVE_UNAVAILABLE,
+} CBMGoResolveStatus;
 
-// --- Batch cross-file LSP ---
+#define CBM_GO_RESOLVE_ERROR "Go resolution failed"
 
-// Per-file input for batch Go LSP processing.
-typedef struct {
-    const char* source;
-    int source_len;
-    const char* module_qn;
-    const char* rel_path;          // repo-relative path (init() QNs, #1910); NULL = flat
-    TSTree* cached_tree;           // from TSTree caching (NULL = parse internally)
-    CBMLSPDef* defs;               // combined file-local + cross-file defs
-    int def_count;
-    const char** import_names;     // parallel arrays, import_count long
-    const char** import_qns;
-    int import_count;
-} CBMBatchGoLSPFile;
+CBMGoResolveStatus cbm_run_go_lsp_status(
+    CBMArena *arena, CBMFileResult *result, const char *source, int source_len,
+    TSNode root, const char *rel_path, const _Atomic int *cancelled);
 
-// Process multiple Go files' cross-file LSP in one CGo call.
-// out must point to file_count pre-zeroed CBMResolvedCallArray structs.
-// Uses per-file arenas internally; results are copied to the output arena.
-void cbm_batch_go_lsp_cross(
-    CBMArena* arena,
-    CBMBatchGoLSPFile* files, int file_count,
-    CBMResolvedCallArray* out);
+CBMGoResolveStatus cbm_run_go_lsp_cross_status(
+    CBMArena *arena, const char *source, int source_len, const char *module_qn,
+    const char *rel_path, CBMLSPDef *defs, int def_count, const char **import_names,
+    const char **import_qns, int import_count, TSTree *cached_tree, CBMResolvedCallArray *out,
+    const _Atomic int *cancelled);
+
+CBMGoResolveStatus cbm_run_go_lsp_cross_with_registry_status(
+    CBMArena *arena, const char *source, int source_len, const char *module_qn,
+    const char *rel_path, CBMTypeRegistry *reg, const char **import_names,
+    const char **import_qns, int import_count, TSTree *cached_tree,
+    CBMResolvedCallArray *out, const _Atomic int *cancelled);
+
+/* Refine existing Go call facts against a sealed project registry. Append
+ * results only after the Rust resolver completes, before the AST walk. */
+CBMGoResolveStatus cbm_go_resolve_cross_metadata(
+    CBMFileResult *result, const CBMTypeRegistry *reg, const char **import_names,
+    const char **import_qns, int import_count, const _Atomic int *cancelled);
+
+#ifdef CBM_ENABLE_TEST_SEAMS
+/* Cancel this thread's next Go walk after it stages the given row count.
+ * Zero cancels between metadata and the walk. A negative count disables it. */
+void cbm_go_test_cancel_walk_after(int rows);
+#endif
 
 #endif // CBM_LSP_GO_LSP_H

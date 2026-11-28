@@ -315,32 +315,6 @@ typedef int (*cbm_mcp_cypher_evaluator_fn)(struct sqlite3 *db, const char *query
                                            void *budget_context, const cbm_mcp_cypher_sink_t *sink);
 void cbm_mcp_set_cypher_evaluator(cbm_mcp_cypher_evaluator_fn evaluate);
 
-typedef struct {
-    const char *fts_query;
-    const char *project;
-    const char *file_like;
-    const char *label;
-    const char *kind;
-    const char *ns;
-    double label_weight;
-} cbm_rank_search_filters_t;
-typedef struct {
-    const char *rank_sql;
-    const char *count_sql;
-    const char *probe_sql;
-    const cbm_rank_search_filters_t *filters;
-    const char *exact_query;
-    int limit;
-    int offset;
-    int candidate_limit;
-} cbm_rank_search_request_t;
-typedef void (*cbm_rank_search_row_fn)(void *context, struct sqlite3_stmt *row);
-/* False means FTS is unavailable and the caller can use the pattern path. */
-typedef bool (*cbm_rank_search_reader_fn)(
-    struct sqlite3 *db, const cbm_rank_search_request_t *request, int *total,
-    bool *window_saturated, void *context, cbm_rank_search_row_fn emit);
-void cbm_mcp_set_rank_search_reader(cbm_rank_search_reader_fn reader);
-
 typedef bool (*cbm_mcp_search_code_degrees_fn)(struct sqlite3 *db, const int64_t *node_ids,
                                                int count, int *in_degrees, int *out_degrees);
 void cbm_mcp_set_search_code_degrees_reader(cbm_mcp_search_code_degrees_fn reader);

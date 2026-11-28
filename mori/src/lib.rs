@@ -3,6 +3,11 @@
 #[path = "daemon/ipc/mod.rs"]
 pub mod ipc;
 
+#[cfg(feature = "native-engine-abi")]
+#[doc(hidden)]
+#[path = "cypher/cypher_scalar.rs"]
+pub mod cypher_scalar;
+
 #[cfg(any(feature = "native-engine-abi", test))]
 #[path = "mcp/stdio/mod.rs"]
 mod stdio;
@@ -22,15 +27,27 @@ mod complexity;
 #[cfg(feature = "native-engine-abi")]
 #[path = "pipeline/csharp_doc_links/mod.rs"]
 mod csharp_doc_links;
+#[cfg(any(feature = "native-engine-abi", test))]
+#[path = "pipeline/definition_props.rs"]
+mod definition_props;
+#[cfg(feature = "native-engine-abi")]
+#[path = "mcp/detect_changes/mod.rs"]
+mod detect_changes;
 #[cfg(feature = "native-engine-abi")]
 #[path = "pipeline/doc_file_links.rs"]
 mod doc_file_links;
+#[cfg(feature = "native-engine-abi")]
+#[path = "store/doc_links_preview.rs"]
+mod doc_links_preview;
 #[cfg(feature = "native-engine-abi")]
 #[path = "pipeline/docker_image.rs"]
 mod docker_image;
 #[cfg(any(feature = "native-engine-abi", test))]
 #[path = "pipeline/explicit_override/mod.rs"]
 mod explicit_override;
+#[cfg(any(feature = "native-engine-abi", test))]
+#[path = "pipeline/extraction_schedule.rs"]
+mod extraction_schedule;
 #[cfg(any(feature = "native-engine-abi", test))]
 #[path = "foundation/ffi_output.rs"]
 mod ffi_output;
@@ -44,8 +61,14 @@ mod jvm_doc_links;
 #[path = "pipeline/kubernetes.rs"]
 mod kubernetes;
 #[cfg(feature = "native-engine-abi")]
+#[path = "mcp/impact_graph.rs"]
+mod mcp_impact_graph;
+#[cfg(feature = "native-engine-abi")]
 #[path = "pipeline/msbuild_condition.rs"]
 mod msbuild_condition;
+#[cfg(any(feature = "native-engine-abi", test))]
+#[path = "pipeline/msbuild_expand.rs"]
+mod msbuild_expand;
 #[cfg(any(feature = "native-engine-abi", test))]
 #[path = "pipeline/msbuild_import.rs"]
 mod msbuild_import;
@@ -74,8 +97,14 @@ mod rust_doc_cargo;
 #[path = "pipeline/rust_doc_path.rs"]
 mod rust_doc_path;
 #[cfg(feature = "native-engine-abi")]
+#[path = "mcp/search/mod.rs"]
+mod search;
+#[cfg(feature = "native-engine-abi")]
 #[path = "mcp/search_code_request/mod.rs"]
 mod search_code_request;
+#[cfg(any(feature = "native-engine-abi", test))]
+#[path = "pipeline/semantic_admission.rs"]
+mod semantic_admission;
 #[cfg(any(feature = "native-engine-abi", test))]
 #[path = "pipeline/semantic_candidates.rs"]
 mod semantic_candidates;
@@ -102,6 +131,15 @@ mod terraform;
 #[cfg(feature = "native-engine-abi")]
 #[path = "cli/test_impact_cli.rs"]
 mod test_impact_cli;
+#[cfg(any(feature = "native-engine-abi", test))]
+#[path = "mcp/trace_page.rs"]
+mod trace_page;
+
+#[cfg(all(feature = "c-backend", not(test)))]
+pub use search::register_search_readers;
+#[cfg(feature = "native-engine-abi")]
+#[path = "mcp/test_impact_engine_reach/mod.rs"]
+mod test_impact_engine_reach;
 #[cfg(feature = "native-engine-abi")]
 #[path = "mcp/test_impact_git.rs"]
 mod test_impact_git;
@@ -109,6 +147,9 @@ mod test_impact_git;
 #[cfg(any(feature = "native-engine-abi", test))]
 #[path = "cli/config_cli/mod.rs"]
 mod config_cli;
+#[cfg(any(feature = "native-engine-abi", test))]
+#[path = "cli/tiered_profiles/mod.rs"]
+mod tiered_profiles;
 
 #[cfg(any(feature = "native-engine-abi", test))]
 #[path = "mcp/mcp_dispatch/methods.rs"]
@@ -137,6 +178,10 @@ mod ui_http_host;
 #[path = "ui/http_transport.rs"]
 mod ui_http_transport;
 
+#[cfg(feature = "native-engine-abi")]
+#[path = "ui/xrepo.rs"]
+mod ui_xrepo;
+
 #[cfg(any(feature = "graphql-callbacks", test))]
 #[path = "pipeline/gqlgen.rs"]
 mod gqlgen;
@@ -159,6 +204,9 @@ mod index_supervision;
 #[cfg(any(feature = "native-engine-abi", test))]
 #[path = "daemon/job_recovery/mod.rs"]
 mod job_recovery;
+#[cfg(feature = "native-engine-abi")]
+#[path = "daemon/project_lock.rs"]
+mod project_lock;
 #[cfg(any(feature = "native-engine-abi", test))]
 mod watcher;
 
@@ -219,16 +267,65 @@ mod graphql_extract;
 #[cfg(feature = "c-backend")]
 pub use graphql_extract::register as mori_register_graphql_extractor;
 
-#[cfg(feature = "c-backend")]
+#[cfg(any(feature = "native-engine-abi", test))]
+#[path = "../internal/cbm/lsp/go_cross.rs"]
+mod go_cross;
+
+#[cfg(any(feature = "native-engine-abi", test))]
+#[path = "../internal/cbm/lsp/go_results.rs"]
+mod go_results;
+
+#[cfg(any(feature = "native-engine-abi", test))]
+#[path = "../internal/cbm/lsp/resolver.rs"]
+mod resolver;
+
+#[cfg(feature = "native-engine-abi")]
+#[path = "../internal/cbm/lsp/go_eval.rs"]
+mod go_eval;
+
+#[cfg(feature = "native-engine-abi")]
+#[path = "../internal/cbm/lsp/go_identity.rs"]
+mod go_identity;
+
+#[cfg(feature = "native-engine-abi")]
 #[path = "../internal/cbm/go_imports.rs"]
 mod go_imports;
 
-#[cfg(feature = "c-backend")]
-pub use go_imports::register as mori_register_go_import_extractor;
+#[cfg(feature = "native-engine-abi")]
+#[path = "../internal/cbm/lsp/go_registry_ast.rs"]
+mod go_registry_ast;
+
+#[cfg(feature = "native-engine-abi")]
+#[path = "../internal/cbm/lsp/go_registry_defs.rs"]
+mod go_registry_defs;
+
+#[cfg(feature = "native-engine-abi")]
+#[path = "../internal/cbm/lsp/go_registry_generics.rs"]
+mod go_registry_generics;
+
+#[cfg(feature = "native-engine-abi")]
+#[path = "../internal/cbm/lsp/go_types.rs"]
+mod go_types;
+
+#[cfg(feature = "native-engine-abi")]
+#[path = "../internal/cbm/lsp/go_types_native.rs"]
+mod go_types_native;
 
 #[cfg(feature = "native-engine-abi")]
 #[path = "../internal/cbm/native_tree.rs"]
 mod native_tree;
+
+#[cfg(any(feature = "native-engine-abi", test))]
+#[path = "../internal/cbm/lsp/php_resolver/mod.rs"]
+mod php_resolver;
+
+#[cfg(feature = "native-engine-abi")]
+#[path = "../internal/cbm/lsp/rust_path.rs"]
+mod rust_path;
+
+#[cfg(any(feature = "native-engine-abi", test))]
+#[path = "../internal/cbm/lsp/perl_packages/mod.rs"]
+mod perl_packages;
 
 #[cfg(feature = "c-backend")]
 #[path = "../internal/cbm/rust_use_imports.rs"]
@@ -264,11 +361,14 @@ mod config_toml_edit;
 #[path = "cli/config_yaml_edit/mod.rs"]
 mod config_yaml_edit;
 #[cfg(feature = "native-engine-abi")]
-#[path = "mcp/file_outline.rs"]
+#[path = "mcp/file_outline/mod.rs"]
 mod file_outline;
 #[cfg(feature = "native-engine-abi")]
 #[path = "store/fts_writer.rs"]
 mod fts_writer;
+#[cfg(any(feature = "native-engine-abi", test))]
+#[path = "store/leiden.rs"]
+mod leiden;
 #[cfg(feature = "native-engine-abi")]
 #[path = "store/store_digest/mod.rs"]
 mod store_digest;
@@ -276,6 +376,9 @@ mod store_digest;
 #[cfg(any(feature = "native-engine-abi", test))]
 #[path = "pipeline/full_build_driver.rs"]
 mod full_build_driver;
+#[cfg(any(feature = "native-engine-abi", test))]
+#[path = "pipeline/incremental_execute.rs"]
+mod incremental_execute;
 #[cfg(feature = "native-engine-abi")]
 #[path = "pipeline/source_publish.rs"]
 mod source_publish;

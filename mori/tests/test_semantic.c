@@ -9,6 +9,7 @@
 #include "../src/foundation/compat_thread.h"
 #include <semantic/rotsq.h>
 #include <semantic/semantic.h>
+#include <semantic/semantic_admission.h>
 
 #include <math.h>
 #include <stdatomic.h>
@@ -466,13 +467,17 @@ TEST(sem_combine_weighs_signals) {
  * never admitted and takes no budget. */
 TEST(sem_admit_best_first_keeps_the_best) {
     /* function 0 has four partners in canonical order, budget 2 */
-    const float scores[] = {0.80F, 0.90F, 0.95F, 0.99F, 0.90F};
-    const int fa[] = {0, 0, 0, 0, 5};
-    const int fb[] = {1, 2, 3, 4, 6};
-    const bool eligible[] = {true, true, true, false, true};
+    const cbm_semantic_pair_t pairs[] = {
+        {.i = 0, .j = 1, .c = 0, .score = 0.80F},
+        {.i = 0, .j = 2, .c = 1, .score = 0.90F},
+        {.i = 0, .j = 3, .c = 2, .score = 0.95F},
+        {.i = 0, .j = 4, .c = 3, .score = 0.99F, .below = true},
+        {.i = 5, .j = 6, .c = 0, .score = 0.90F},
+    };
     int counts[7] = {0};
+    int order[5];
     bool admitted[5];
-    ASSERT_TRUE(cbm_sem_admit_best_first(scores, fa, fb, eligible, 5, 2, counts, admitted));
+    mori_semantic_admit_best_first(pairs, 5, 2, counts, 7, order, admitted);
     ASSERT_FALSE(admitted[0]); /* first-come would have kept 0.80 */
     ASSERT_TRUE(admitted[1]);
     ASSERT_TRUE(admitted[2]);
@@ -481,16 +486,18 @@ TEST(sem_admit_best_first_keeps_the_best) {
     ASSERT_EQ(counts[0], 2);
     ASSERT_EQ(counts[4], 0);
 
-    /* ties: the earlier pair in canonical order wins the last slot */
-    const float tied[] = {0.85F, 0.85F};
-    const int ta[] = {0, 0};
-    const int tb[] = {1, 2};
-    const bool all[] = {true, true};
+    /* The earlier pair wins the shared target's last slot. */
+    const cbm_semantic_pair_t tied[] = {
+        {.i = 0, .j = 2, .score = 0.85F},
+        {.i = 1, .j = 2, .score = 0.85F},
+    };
     int tcounts[3] = {0};
     bool tadmitted[2];
-    ASSERT_TRUE(cbm_sem_admit_best_first(tied, ta, tb, all, 2, 1, tcounts, tadmitted));
+    mori_semantic_admit_best_first(tied, 2, 1, tcounts, 3, order, tadmitted);
     ASSERT_TRUE(tadmitted[0]);
     ASSERT_FALSE(tadmitted[1]);
+    ASSERT_EQ(tcounts[1], 0);
+    ASSERT_EQ(tcounts[2], 1);
     PASS();
 }
 

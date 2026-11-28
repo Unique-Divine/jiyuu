@@ -2,6 +2,7 @@
 #define CBM_H
 
 #include <stdint.h>
+#include <stdatomic.h>
 #include <stdbool.h>
 #include "arena.h"
 #include "tree_sitter/api.h"
@@ -1298,6 +1299,14 @@ CBMFileResult *cbm_extract_file_ex_with_tests(
     const char *rel_path, int64_t timeout_micros, const char **extra_defines,
     const char **include_paths, const CBMMacroTable *macro_table,
     const CBMReturnTypeTable *return_type_table, const cbm_test_declarations_t *test_declarations);
+
+/* The pipeline passes its cancel token to resolution in the extraction call. */
+CBMFileResult *cbm_extract_file_ex_with_tests_cancellable(
+    const char *source, int source_len, CBMLanguage language, const char *project,
+    const char *rel_path, int64_t timeout_micros, const char **extra_defines,
+    const char **include_paths, const CBMMacroTable *macro_table,
+    const CBMReturnTypeTable *return_type_table, const cbm_test_declarations_t *test_declarations,
+    const _Atomic int *cancelled);
 
 // Free all memory associated with a result.
 void cbm_free_result(CBMFileResult *result);

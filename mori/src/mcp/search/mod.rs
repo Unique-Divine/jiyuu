@@ -1,25 +1,34 @@
 //! Executes search queries against the caller's live SQLite connection.
 //!
-//! The native planner supplies the predicates and bound values. That preserves
-//! the indexed name ranges and the connection's custom regex functions. The
-//! native output callbacks keep allocation and rendering on the C side.
+//! Rust owns the ranked SQL. The native caller supplies the search options
+//! and collects rows on the same connection used for other request reads.
+//! Pattern search still uses the native predicates and regex functions.
 
+#[cfg(any(feature = "c-backend", test))]
 use std::collections::HashMap;
 use std::ffi::{c_char, c_int, c_void};
-use std::{panic, ptr};
+#[cfg(any(feature = "c-backend", test))]
+use std::panic;
+use std::ptr;
 
 use rusqlite::ffi::{self, sqlite3, sqlite3_stmt};
+#[cfg(any(feature = "c-backend", test))]
 use rusqlite::{Connection, ToSql, params_from_iter};
 
-#[path = "search_code.rs"]
+mod ranked_sql;
+#[cfg(any(feature = "c-backend", test))]
+#[path = "../search_code.rs"]
 mod search_code;
 
+#[cfg(any(feature = "c-backend", test))]
 const STORE_OK: c_int = 0;
+#[cfg(any(feature = "c-backend", test))]
 const STORE_ERR: c_int = -1;
 
 type EmitRow = unsafe extern "C" fn(*mut c_void, *mut sqlite3_stmt);
+#[cfg(any(feature = "c-backend", test))]
 type ReportError = unsafe extern "C" fn(*mut c_void, *const c_char);
-#[cfg(not(test))]
+#[cfg(all(feature = "c-backend", not(test)))]
 type PatternReader = unsafe extern "C" fn(
     *mut sqlite3,
     *const c_char,
@@ -45,9 +54,6 @@ struct RankFilters {
 
 #[repr(C)]
 struct RankRequest {
-    rank_sql: *const c_char,
-    count_sql: *const c_char,
-    probe_sql: *const c_char,
     filters: *const RankFilters,
     exact_query: *const c_char,
     limit: c_int,
@@ -55,17 +61,7 @@ struct RankRequest {
     candidate_limit: c_int,
 }
 
-#[cfg(not(test))]
-type RankReader = unsafe extern "C" fn(
-    *mut sqlite3,
-    *const RankRequest,
-    *mut c_int,
-    *mut bool,
-    *mut c_void,
-    EmitRow,
-) -> bool;
-
-#[cfg(not(test))]
+#[cfg(all(feature = "c-backend", not(test)))]
 type CodeDegreeReader = unsafe extern "C" fn(
     *mut sqlite3,
     *const i64,
@@ -74,6 +70,7 @@ type CodeDegreeReader = unsafe extern "C" fn(
     *mut c_int,
 ) -> bool;
 
+#[cfg(any(feature = "c-backend", test))]
 fn count_call_degrees(
     connection: &Connection,
     ids: &[i64],
@@ -109,6 +106,7 @@ fn count_call_degrees(
     Ok(())
 }
 
+#[cfg(any(feature = "c-backend", test))]
 unsafe extern "C" fn read_code_degrees(
     db: *mut sqlite3,
     ids: *const i64,
@@ -151,11 +149,27 @@ struct Statement(*mut sqlite3_stmt);
 impl Statement {
     // The caller lends the DB for the lifetime of the statement and supplies
     // NUL-terminated SQL.
+    #[cfg(any(feature = "c-backend", test))]
     unsafe fn prepare(db: *mut sqlite3, sql: *const c_char) -> Option<Self> {
-        let mut stmt = ptr::null_mut();
         // SAFETY: The arguments follow the contract above.
+        unsafe { Self::prepare_with_len(db, sql, -1) }
+    }
+
+    unsafe fn prepare_rank_sql(db: *mut sqlite3, sql: &str) -> Option<Self> {
+        let len = c_int::try_from(sql.len()).ok()?;
+        // SAFETY: SQLite borrows exactly len bytes from SQL during prepare.
+        unsafe { Self::prepare_with_len(db, sql.as_ptr().cast(), len) }
+    }
+
+    unsafe fn prepare_with_len(
+        db: *mut sqlite3,
+        sql: *const c_char,
+        len: c_int,
+    ) -> Option<Self> {
+        let mut stmt = ptr::null_mut();
+        // SAFETY: The caller lends the connection and SQL for prepare.
         let status = unsafe {
-            ffi::sqlite3_prepare_v2(db, sql, -1, &mut stmt, ptr::null_mut())
+            ffi::sqlite3_prepare_v2(db, sql, len, &mut stmt, ptr::null_mut())
         };
         (status == ffi::SQLITE_OK && !stmt.is_null()).then(|| Self(stmt))
     }
@@ -174,6 +188,7 @@ impl Statement {
         }
     }
 
+    #[cfg(any(feature = "c-backend", test))]
     unsafe fn bind_texts(&self, binds: &[*const c_char]) {
         for (index, value) in binds.iter().enumerate() {
             // SAFETY: The native plan lends its bound values for the query.
@@ -199,6 +214,7 @@ impl Drop for Statement {
     }
 }
 
+#[cfg(any(feature = "c-backend", test))]
 unsafe extern "C" fn read_pattern(
     db: *mut sqlite3,
     count_sql: *const c_char,
@@ -245,7 +261,7 @@ unsafe extern "C" fn read_pattern(
     })
 }
 
-// Parameter positions shared by the native BM25 statements. The count uses
+// Parameter positions shared by the BM25 statements. The count uses
 // slot 3 for its candidate window, while the page uses slot 5.
 const QUERY: c_int = 1;
 const PROJECT: c_int = 2;
@@ -289,13 +305,13 @@ impl RankFilters {
 
 unsafe fn count_candidates(
     db: *mut sqlite3,
-    sql: *const c_char,
     filters: &RankFilters,
     window: c_int,
 ) -> c_int {
-    // SAFETY: The native request lends the connection, SQL, and filters.
+    // SAFETY: The native request lends the connection and filters.
     unsafe {
-        let Some(count) = Statement::prepare(db, sql) else {
+        let Some(count) = Statement::prepare_rank_sql(db, ranked_sql::COUNT)
+        else {
             return 0;
         };
         filters.bind(&count);
@@ -308,7 +324,8 @@ unsafe fn count_candidates(
     }
 }
 
-unsafe extern "C" fn read_ranked(
+#[unsafe(no_mangle)]
+unsafe extern "C" fn mori_rank_search(
     db: *mut sqlite3,
     request: *const RankRequest,
     total: *mut c_int,
@@ -321,12 +338,13 @@ unsafe extern "C" fn read_ranked(
     unsafe {
         let request = &*request;
         let filters = &*request.filters;
-        let Some(ranked) = Statement::prepare(db, request.rank_sql) else {
+        let Some(ranked) = Statement::prepare_rank_sql(db, ranked_sql::PAGE)
+        else {
             // Older or lean databases can lack the FTS table.
             return false;
         };
-        let saturated =
-            Statement::prepare(db, request.probe_sql).is_none_or(|probe| {
+        let saturated = Statement::prepare_rank_sql(db, ranked_sql::PROBE)
+            .is_none_or(|probe| {
                 probe.bind_text(QUERY, filters.fts_query);
                 probe.bind_int(2, request.candidate_limit);
                 probe.step() != ffi::SQLITE_DONE
@@ -339,10 +357,10 @@ unsafe extern "C" fn read_ranked(
         } else {
             request.candidate_limit
         };
-        *total = count_candidates(db, request.count_sql, filters, window);
+        *total = count_candidates(db, filters, window);
         if saturated && *total == 0 && window != ALL_CANDIDATES {
             window = ALL_CANDIDATES;
-            *total = count_candidates(db, request.count_sql, filters, window);
+            *total = count_candidates(db, filters, window);
         }
         *window_saturated = saturated && window != ALL_CANDIDATES;
 
@@ -361,20 +379,21 @@ unsafe extern "C" fn read_ranked(
     }
 }
 
-#[cfg(not(test))]
+#[cfg(all(feature = "c-backend", not(test)))]
 unsafe extern "C" {
     fn cbm_store_set_pattern_search_reader(reader: PatternReader);
-    fn cbm_mcp_set_rank_search_reader(reader: RankReader);
     fn cbm_mcp_set_search_code_degrees_reader(reader: CodeDegreeReader);
 }
 
-/// Register during process startup, before native worker threads can start.
-#[cfg(not(test))]
-pub(crate) unsafe fn register() {
+#[cfg(all(feature = "c-backend", not(test)))]
+/// Register the search readers used by the linked binary.
+///
+/// # Safety
+/// Must be called before native worker threads start.
+pub unsafe fn register_search_readers() {
     // SAFETY: The registered function lives for the process lifetime.
     unsafe {
         cbm_store_set_pattern_search_reader(read_pattern);
-        cbm_mcp_set_rank_search_reader(read_ranked);
         cbm_mcp_set_search_code_degrees_reader(read_code_degrees);
         search_code::register();
     }
@@ -476,8 +495,19 @@ mod tests {
     fn ranked_reader_reports_a_window_and_expands_it_for_file_filters() {
         let db = Connection::open_in_memory().unwrap();
         db.execute_batch(
-            "CREATE VIRTUAL TABLE needle USING fts5(name, path UNINDEXED);
-             INSERT INTO needle VALUES ('needle','a'), ('needle','b'), ('needle','c');",
+            "CREATE TABLE nodes (
+                id INTEGER PRIMARY KEY, label TEXT, name TEXT, project TEXT,
+                qualified_name TEXT, file_path TEXT, start_line INT, end_line INT, properties TEXT
+             );
+             CREATE VIRTUAL TABLE nodes_fts USING fts5(
+                name, qualified_name, label, file_path, body
+             );
+             INSERT INTO nodes VALUES
+                 (1,'Function','needle','test','test.a.needle','a',1,2,'{}'),
+                 (2,'Function','needle','test','test.b.needle','b',1,2,'{}'),
+                 (3,'Function','needle','test','test.c.needle','c',1,2,'{}');
+             INSERT INTO nodes_fts(rowid,name,qualified_name,label,file_path)
+                 SELECT id,name,qualified_name,label,file_path FROM nodes;",
         )
         .unwrap();
         let mut filters = RankFilters {
@@ -495,12 +525,6 @@ mod tests {
         ] {
             filters.file_like = path;
             let request = RankRequest {
-                rank_sql: c"SELECT q.rowid FROM                     (SELECT rowid, path FROM needle WHERE needle MATCH ?1                      ORDER BY bm25(needle), rowid LIMIT ?5) q                      WHERE (?6 IS NULL OR path LIKE ?6) LIMIT ?3 OFFSET ?4"
-                    .as_ptr(),
-                count_sql: c"SELECT count(*) FROM                     (SELECT rowid, path FROM needle WHERE needle MATCH ?1                      ORDER BY bm25(needle), rowid LIMIT ?3) q                      WHERE (?6 IS NULL OR path LIKE ?6)"
-                    .as_ptr(),
-                probe_sql: c"SELECT rowid FROM needle WHERE needle MATCH ?1                      ORDER BY bm25(needle), rowid LIMIT 1 OFFSET ?2"
-                    .as_ptr(),
                 filters: &filters,
                 exact_query: c"needle".as_ptr(),
                 limit: 5,
@@ -512,7 +536,7 @@ mod tests {
             let mut output = ResultRows::default();
             // SAFETY: The connection, request, and outputs stay live until return.
             let handled = unsafe {
-                read_ranked(
+                mori_rank_search(
                     db.handle(),
                     &request,
                     &mut total,
