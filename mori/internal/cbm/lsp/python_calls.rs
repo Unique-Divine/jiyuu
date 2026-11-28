@@ -7,7 +7,7 @@ use crate::native_tree::{BorrowedNode as Node, RawNode};
 
 #[repr(C)]
 #[derive(Clone, Copy)]
-struct Name {
+pub(crate) struct Name {
     data: *const c_char,
     size: usize,
 }
@@ -478,7 +478,7 @@ impl File<'_> {
             return None;
         }
         while node.kind() == c"parenthesized_expression" {
-            let mut children = node.children().filter(|child| child.is_named());
+            let mut children = node.named_children();
             let inner = children.next()?;
             if children.next().is_some() {
                 return None;
@@ -691,7 +691,7 @@ unsafe extern "C" fn mori_py_argument_references(
     let file = unsafe { File::borrow(context, native, module, false) };
     let node = unsafe { Node::from_root(&*call) };
     if let Some(arguments) = node.field(c"arguments") {
-        for arg in arguments.children().filter(|child| child.is_named()) {
+        for arg in arguments.named_children() {
             file.reference(arg);
         }
     }

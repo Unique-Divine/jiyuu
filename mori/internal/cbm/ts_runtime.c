@@ -28,6 +28,11 @@ bool cbm_ffi_ts_node_is_named(const TSNode *node) {
     return ts_node_is_named(*node);
 }
 
+uint32_t cbm_ffi_ts_node_named_child_count(const TSNode *node) {
+    cbm_ffi_ts_node_written(node);
+    return ts_node_named_child_count(*node);
+}
+
 TSNode cbm_ffi_ts_node_parent(const TSNode *node) {
     cbm_ffi_ts_node_written(node);
     return ts_node_parent(*node);

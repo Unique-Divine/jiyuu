@@ -103,7 +103,7 @@ void cbm_py_lsp_record_failure(CBMFileResult *result, CBMLSPStatus status) {
 }
 
 // Forward decls
-static void py_resolve_calls_in_inner(PyLSPContext *ctx, TSNode node);
+static void py_resolve_calls_in(PyLSPContext *ctx, TSNode node);
 
 /* Named children of one node for an index loop (#1527). ts_node_named_child(n, i)
  * restarts tree-sitter's child iterator at the first child, so indexing every
@@ -215,20 +215,6 @@ static void py_mark_ambiguous_callable_bindings(CBMTypeRegistry *registry, CBMAr
     }
 }
 
-/* Depth-guarded entry for the AST call-resolution walk. The walk recurses once
- * per nesting level; a deeply-nested or cyclic file can overflow the native
- * stack (SIGSEGV) and take down the whole index. Past the cap the subtree is
- * skipped — its calls stay unresolved, which is graceful degradation, not a
- * crash. The cap is CBM_LSP_MAX_WALK_DEPTH, env-overridable via the same name.
- * The walk_depth-- runs after the inner returns, so early returns in the body
- * never leak the counter. */
-static void py_resolve_calls_in(PyLSPContext *ctx, TSNode node) {
-    if (!ctx || ctx->eval_failure || ctx->walk_depth >= cbm_lsp_max_walk_depth())
-        return;
-    ctx->walk_depth++;
-    py_resolve_calls_in_inner(ctx, node);
-    ctx->walk_depth--;
-}
 static const char *py_exact_callable_target(PyLSPContext *ctx, TSNode node,
                                               bool *lexical_alias);
 static const CBMType *py_eval_expr_type(PyLSPContext *ctx, TSNode node);
@@ -3681,39 +3667,6 @@ static void py_walk_if_statement(PyLSPContext *ctx, TSNode if_node) {
     }
 }
 
-/* Map a Python infix operator token to its dunder method name. */
-static const char *py_binop_dunder(const char *op_text) {
-    if (!op_text)
-        return NULL;
-    if (strcmp(op_text, "+") == 0)
-        return "__add__";
-    if (strcmp(op_text, "-") == 0)
-        return "__sub__";
-    if (strcmp(op_text, "*") == 0)
-        return "__mul__";
-    if (strcmp(op_text, "/") == 0)
-        return "__truediv__";
-    if (strcmp(op_text, "//") == 0)
-        return "__floordiv__";
-    if (strcmp(op_text, "%") == 0)
-        return "__mod__";
-    if (strcmp(op_text, "**") == 0)
-        return "__pow__";
-    if (strcmp(op_text, "<<") == 0)
-        return "__lshift__";
-    if (strcmp(op_text, ">>") == 0)
-        return "__rshift__";
-    if (strcmp(op_text, "&") == 0)
-        return "__and__";
-    if (strcmp(op_text, "|") == 0)
-        return "__or__";
-    if (strcmp(op_text, "^") == 0)
-        return "__xor__";
-    if (strcmp(op_text, "@") == 0)
-        return "__matmul__";
-    return NULL;
-}
-
 /* If `recv` is a user-defined NAMED type that defines `dunder`, emit a CALLS
  * edge to that dunder method (operator-overload / subscript desugaring).  This
  * models `a + b` → T.__add__ and `s[k]` → T.__getitem__ as calls.
@@ -3772,11 +3725,200 @@ static void py_emit_dunder_call(PyLSPContext *ctx, const CBMType *recv, const ch
     }
 }
 
+/* The walker owns traversal order. These operations apply it to the file's
+ * existing scope and type storage, and to the native result carriers. */
+typedef struct {
+    CBMScope *previous;
+    bool comprehension;
+    bool entered;
+} PyWalkFrame;
+
+typedef struct {
+    bool (*enter_node)(PyLSPContext *);
+    void (*leave_node)(PyLSPContext *);
+    bool (*failed)(PyLSPContext *);
+    const char *(*text)(PyLSPContext *, const TSNode *);
+    void (*statement)(PyLSPContext *, const TSNode *);
+    void (*invocation)(PyLSPContext *, const TSNode *);
+    void (*dunder)(PyLSPContext *, const TSNode *, PyCallName, const TSNode *);
+    void (*if_statement)(PyLSPContext *, const TSNode *);
+    void (*class_definition)(PyLSPContext *, const TSNode *);
+    bool (*in_class)(PyLSPContext *);
+    PyWalkFrame (*enter_scope)(PyLSPContext *, bool);
+    void (*leave_scope)(PyLSPContext *, PyWalkFrame);
+    const CBMType *(*annotation)(PyLSPContext *, PyCallName);
+    const CBMType *(*scope_value)(PyLSPContext *, PyCallName);
+    const CBMType *(*evaluate)(PyLSPContext *, const TSNode *);
+    const CBMType *(*iterable_element)(PyLSPContext *, const CBMType *);
+    void (*bind)(PyLSPContext *, PyCallName, const CBMType *);
+    void (*bind_list)(PyLSPContext *, PyCallName, const CBMType *);
+    void (*bind_for_target)(PyLSPContext *, const TSNode *, const CBMType *);
+} PyWalkNative;
+
+extern void mori_py_walk(PyLSPContext *, const PyWalkNative *, const TSNode *);
+
+static bool py_walk_enter_node(PyLSPContext *ctx) {
+    if (ctx->eval_failure || ctx->walk_depth >= cbm_lsp_max_walk_depth())
+        return false;
+    ctx->walk_depth++;
+    return true;
+}
+
+static void py_walk_leave_node(PyLSPContext *ctx) {
+    ctx->walk_depth--;
+}
+
+static bool py_walk_failed(PyLSPContext *ctx) {
+    return ctx->eval_failure != CBM_LSP_COMPLETE;
+}
+
+static void py_walk_statement(PyLSPContext *ctx, const TSNode *node) {
+    cbm_ffi_ts_node_written(node);
+    py_process_statement(ctx, *node);
+}
+
+static void py_walk_invocation(PyLSPContext *ctx, const TSNode *node) {
+    cbm_ffi_ts_node_written(node);
+    py_resolve_value_references_at(ctx, *node);
+    py_emit_call_for(ctx, *node);
+}
+
+static void py_walk_dunder(PyLSPContext *ctx, const TSNode *receiver, PyCallName name,
+                            const TSNode *site) {
+    cbm_ffi_ts_node_written(receiver);
+    cbm_ffi_ts_node_written(site);
+    py_emit_dunder_call(ctx, py_eval_expr_type(ctx, *receiver), py_call_name(name), *site);
+}
+
+static void py_walk_if(PyLSPContext *ctx, const TSNode *node) {
+    cbm_ffi_ts_node_written(node);
+    py_walk_if_statement(ctx, *node);
+}
+
+static void py_walk_class(PyLSPContext *ctx, const TSNode *node) {
+    cbm_ffi_ts_node_written(node);
+    py_exec_class_definition(ctx, *node);
+}
+
+static bool py_walk_in_class(PyLSPContext *ctx) {
+    return ctx->class_body_outer_scope != NULL;
+}
+
+static PyWalkFrame py_walk_enter_scope(PyLSPContext *ctx, bool class_comprehension) {
+    PyWalkFrame frame = {ctx->current_scope, ctx->class_body_in_comprehension, true};
+    if (class_comprehension) {
+        CBMScope *parent = frame.comprehension ? frame.previous : ctx->class_body_outer_scope;
+        CBMScope *inner = py_class_frame_push(ctx, parent);
+        if (!inner)
+            return (PyWalkFrame){0};
+        py_scope_restore(ctx, inner);
+        ctx->class_body_in_comprehension = true;
+    } else {
+        ctx->current_scope = py_scope_push_checked(ctx);
+    }
+    return frame;
+}
+
+static void py_walk_leave_scope(PyLSPContext *ctx, PyWalkFrame frame) {
+    ctx->class_body_in_comprehension = frame.comprehension;
+    py_scope_restore(ctx, frame.previous);
+}
+
+static const CBMType *py_walk_annotation(PyLSPContext *ctx, PyCallName name) {
+    return py_resolve_annotation(ctx, py_call_name(name));
+}
+
+static const CBMType *py_walk_scope_value(PyLSPContext *ctx, PyCallName name) {
+    return cbm_scope_lookup(ctx->current_scope, py_call_name(name));
+}
+
+static const CBMType *py_walk_evaluate(PyLSPContext *ctx, const TSNode *node) {
+    if (node)
+        cbm_ffi_ts_node_written(node);
+    return py_eval_expr_type(ctx, node ? *node : (TSNode){0});
+}
+
+static void py_walk_bind(PyLSPContext *ctx, PyCallName name, const CBMType *type) {
+    py_scope_bind(ctx, py_call_name(name), type ? type : cbm_type_unknown());
+}
+
+static void py_walk_bind_list(PyLSPContext *ctx, PyCallName name, const CBMType *element) {
+    py_scope_bind(ctx, py_call_name(name), cbm_type_template(ctx->arena, "list", &element, 1));
+}
+
+static void py_walk_bind_for_target(PyLSPContext *ctx, const TSNode *left, const CBMType *type) {
+    if (!left)
+        return;
+    cbm_ffi_ts_node_written(left);
+    py_bind_for_target(ctx, *left, type ? type : cbm_type_unknown());
+}
+
+#ifdef CBM_ENABLE_TEST_SEAMS
+/* ── C reference for python_walk.rs, kept for the parity test ──────── */
+
+/* Routes the call-resolution walk through the C below instead of
+ * python_walk.rs (cbm_py_lsp_test_use_c_reference). */
+static bool py_test_c_reference;
+
+void cbm_py_lsp_test_use_c_reference(bool enabled) {
+    py_test_c_reference = enabled;
+}
+
+static void py_c_resolve_calls_in_inner(PyLSPContext *ctx, TSNode node);
+
+/* Depth-guarded entry for the AST call-resolution walk. The walk recurses once
+ * per nesting level; a deeply-nested or cyclic file can overflow the native
+ * stack (SIGSEGV) and take down the whole index. Past the cap the subtree is
+ * skipped — its calls stay unresolved, which is graceful degradation, not a
+ * crash. The cap is CBM_LSP_MAX_WALK_DEPTH, env-overridable via the same name.
+ * The walk_depth-- runs after the inner returns, so early returns in the body
+ * never leak the counter. */
+static void py_c_resolve_calls_in(PyLSPContext *ctx, TSNode node) {
+    if (!ctx || ctx->eval_failure || ctx->walk_depth >= cbm_lsp_max_walk_depth())
+        return;
+    ctx->walk_depth++;
+    py_c_resolve_calls_in_inner(ctx, node);
+    ctx->walk_depth--;
+}
+
+/* Map a Python infix operator token to its dunder method name. */
+static const char *py_c_binop_dunder(const char *op_text) {
+    if (!op_text)
+        return NULL;
+    if (strcmp(op_text, "+") == 0)
+        return "__add__";
+    if (strcmp(op_text, "-") == 0)
+        return "__sub__";
+    if (strcmp(op_text, "*") == 0)
+        return "__mul__";
+    if (strcmp(op_text, "/") == 0)
+        return "__truediv__";
+    if (strcmp(op_text, "//") == 0)
+        return "__floordiv__";
+    if (strcmp(op_text, "%") == 0)
+        return "__mod__";
+    if (strcmp(op_text, "**") == 0)
+        return "__pow__";
+    if (strcmp(op_text, "<<") == 0)
+        return "__lshift__";
+    if (strcmp(op_text, ">>") == 0)
+        return "__rshift__";
+    if (strcmp(op_text, "&") == 0)
+        return "__and__";
+    if (strcmp(op_text, "|") == 0)
+        return "__or__";
+    if (strcmp(op_text, "^") == 0)
+        return "__xor__";
+    if (strcmp(op_text, "@") == 0)
+        return "__matmul__";
+    return NULL;
+}
+
 /* A class comprehension evaluates its leftmost iterable in the class frame,
  * but the implicit body scope skips class locals. Nested comprehensions keep
  * the surrounding comprehension frame. Keep class execution marked active so
  * legacy bare-name dispatch cannot bypass either frame's lexical bindings. */
-static void py_resolve_class_comprehension(PyLSPContext *ctx, TSNode node) {
+static void py_c_resolve_class_comprehension(PyLSPContext *ctx, TSNode node) {
     if (ctx->eval_failure)
         return;
     PyKids kids = py_kids(ctx->arena, node);
@@ -3793,7 +3935,7 @@ static void py_resolve_class_comprehension(PyLSPContext *ctx, TSNode node) {
     if (first_for == kids.n)
         return;
     const CBMType *first_type = py_eval_expr_type(ctx, first_right);
-    py_resolve_calls_in(ctx, first_right);
+    py_c_resolve_calls_in(ctx, first_right);
     if (ctx->eval_failure)
         return;
     const CBMType *first_elem = py_iterable_element_type(ctx, first_type);
@@ -3815,23 +3957,23 @@ static void py_resolve_class_comprehension(PyLSPContext *ctx, TSNode node) {
             if (i != first_for) {
                 TSNode right = ts_node_child_by_field_name(child, "right", 5);
                 const CBMType *iter = py_eval_expr_type(ctx, right);
-                py_resolve_calls_in(ctx, right);
+                py_c_resolve_calls_in(ctx, right);
                 if (ctx->eval_failure)
                     break;
                 elem = py_iterable_element_type(ctx, iter);
             }
             py_bind_for_target(ctx, left, elem);
         } else {
-            py_resolve_calls_in(ctx, child);
+            py_c_resolve_calls_in(ctx, child);
         }
     }
     for (uint32_t i = 0; i < first_for && !ctx->eval_failure; i++)
-        py_resolve_calls_in(ctx, py_kid(&kids, i));
+        py_c_resolve_calls_in(ctx, py_kid(&kids, i));
     ctx->class_body_in_comprehension = saved_comprehension;
     py_scope_restore(ctx, saved_scope);
 }
 
-static void py_resolve_calls_in_inner(PyLSPContext *ctx, TSNode node) {
+static void py_c_resolve_calls_in_inner(PyLSPContext *ctx, TSNode node) {
     if (!ctx || ts_node_is_null(node))
         return;
     const char *k = ts_node_type(node);
@@ -3853,7 +3995,7 @@ static void py_resolve_calls_in_inner(PyLSPContext *ctx, TSNode node) {
         TSNode left = ts_node_child_by_field_name(node, "left", 4);
         TSNode op = ts_node_child_by_field_name(node, "operator", 8);
         if (!ts_node_is_null(left) && !ts_node_is_null(op)) {
-            const char *dunder = py_binop_dunder(py_node_text(ctx, op));
+            const char *dunder = py_c_binop_dunder(py_node_text(ctx, op));
             if (dunder) {
                 py_emit_dunder_call(ctx, py_eval_expr_type(ctx, left), dunder, node);
             }
@@ -3881,7 +4023,7 @@ static void py_resolve_calls_in_inner(PyLSPContext *ctx, TSNode node) {
         if (!ts_node_is_null(subject) && strcmp(ts_node_type(subject), "identifier") == 0) {
             subject_name = py_node_text(ctx, subject);
         }
-        py_resolve_calls_in(ctx, subject);
+        py_c_resolve_calls_in(ctx, subject);
         if (!ts_node_is_null(body)) {
             uint32_t bcc = ts_node_named_child_count(body);
             for (uint32_t i = 0; i < bcc; i++) {
@@ -4021,7 +4163,7 @@ static void py_resolve_calls_in_inner(PyLSPContext *ctx, TSNode node) {
                 }
 
                 if (!ts_node_is_null(conseq)) {
-                    py_resolve_calls_in(ctx, conseq);
+                    py_c_resolve_calls_in(ctx, conseq);
                 }
                 py_scope_restore(ctx, saved);
             }
@@ -4034,7 +4176,7 @@ static void py_resolve_calls_in_inner(PyLSPContext *ctx, TSNode node) {
     if (strcmp(k, "list_comprehension") == 0 || strcmp(k, "dictionary_comprehension") == 0 ||
         strcmp(k, "set_comprehension") == 0 || strcmp(k, "generator_expression") == 0) {
         if (ctx->class_body_outer_scope) {
-            py_resolve_class_comprehension(ctx, node);
+            py_c_resolve_class_comprehension(ctx, node);
             return;
         }
         CBMScope *saved = ctx->current_scope;
@@ -4060,7 +4202,7 @@ static void py_resolve_calls_in_inner(PyLSPContext *ctx, TSNode node) {
         // Second pass: recurse into all children (body + filter clauses
         // benefit from the bound vars).
         for (uint32_t i = 0; i < cnc; i++) {
-            py_resolve_calls_in(ctx, ts_node_named_child(node, i));
+            py_c_resolve_calls_in(ctx, ts_node_named_child(node, i));
         }
         py_scope_restore(ctx, saved);
         return;
@@ -4082,8 +4224,43 @@ static void py_resolve_calls_in_inner(PyLSPContext *ctx, TSNode node) {
 
     PyKids nk = py_kids(ctx->arena, node);
     for (uint32_t i = 0; i < nk.n && !ctx->eval_failure; i++) {
-        py_resolve_calls_in(ctx, py_kid(&nk, i));
+        py_c_resolve_calls_in(ctx, py_kid(&nk, i));
     }
+}
+#endif /* CBM_ENABLE_TEST_SEAMS */
+
+static void py_resolve_calls_in(PyLSPContext *ctx, TSNode node) {
+#ifdef CBM_ENABLE_TEST_SEAMS
+    if (py_test_c_reference) {
+        py_c_resolve_calls_in(ctx, node);
+        return;
+    }
+#endif
+    if (!ctx || ts_node_is_null(node))
+        return;
+
+    static const PyWalkNative native = {
+        .enter_node = py_walk_enter_node,
+        .leave_node = py_walk_leave_node,
+        .failed = py_walk_failed,
+        .text = py_call_text,
+        .statement = py_walk_statement,
+        .invocation = py_walk_invocation,
+        .dunder = py_walk_dunder,
+        .if_statement = py_walk_if,
+        .class_definition = py_walk_class,
+        .in_class = py_walk_in_class,
+        .enter_scope = py_walk_enter_scope,
+        .leave_scope = py_walk_leave_scope,
+        .annotation = py_walk_annotation,
+        .scope_value = py_walk_scope_value,
+        .evaluate = py_walk_evaluate,
+        .iterable_element = py_iterable_element_type,
+        .bind = py_walk_bind,
+        .bind_list = py_walk_bind_list,
+        .bind_for_target = py_walk_bind_for_target,
+    };
+    mori_py_walk(ctx, &native, &node);
 }
 
 /* ── function / class processing ───────────────────────────────── */

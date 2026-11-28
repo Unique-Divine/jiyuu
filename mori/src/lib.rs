@@ -394,6 +394,10 @@ mod python_mro;
 #[path = "../internal/cbm/lsp/python_namespace.rs"]
 mod python_namespace;
 
+#[cfg(feature = "native-engine-abi")]
+#[path = "../internal/cbm/lsp/python_walk.rs"]
+mod python_walk;
+
 #[cfg(feature = "c-backend")]
 #[path = "../internal/cbm/python_imports.rs"]
 mod python_imports;
