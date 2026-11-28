@@ -16,86 +16,10 @@
 
 /* ── Helpers — same shape as test_go_lsp.c ──────────────────────── */
 
-static CBMFileResult *extract_py_once(const char *source) {
+static CBMFileResult *extract_py(const char *source) {
     return cbm_extract_file(source, (int)strlen(source), CBM_LANG_PYTHON,
                             "test", "main.py", 0, NULL, NULL);
 }
-
-#ifdef CBM_ENABLE_TEST_SEAMS
-/* While the C reference of a Rust Python resolver stays compiled in, every
- * extract_py also extracts with the C reference and returns NULL when the
- * resolved calls, synthetic calls or usages differ, so each test below that
- * extracts a file doubles as a parity case. */
-static bool pyparity_str(const char *what, int i, const char *c, const char *rust) {
-    if (c == rust || (c && rust && strcmp(c, rust) == 0))
-        return true;
-    printf("  parity %s[%d]: C=%s Rust=%s\n", what, i, c ? c : "(null)",
-           rust ? rust : "(null)");
-    return false;
-}
-
-static bool pyparity_int(const char *what, int i, long long c, long long rust) {
-    if (c == rust)
-        return true;
-    printf("  parity %s[%d]: C=%lld Rust=%lld\n", what, i, c, rust);
-    return false;
-}
-
-static bool pyparity_same(const CBMFileResult *c, const CBMFileResult *r) {
-    bool same = pyparity_int("resolved_calls.count", 0, c->resolved_calls.count,
-                             r->resolved_calls.count);
-    for (int i = 0; same && i < c->resolved_calls.count; i++) {
-        const CBMResolvedCall *a = &c->resolved_calls.items[i];
-        const CBMResolvedCall *b = &r->resolved_calls.items[i];
-        same = pyparity_str("caller", i, a->caller_qn, b->caller_qn) &&
-               pyparity_str("callee", i, a->callee_qn, b->callee_qn) &&
-               pyparity_str("strategy", i, a->strategy, b->strategy) &&
-               pyparity_str("reason", i, a->reason, b->reason) &&
-               pyparity_str("callee_sig", i, a->callee_sig, b->callee_sig) &&
-               pyparity_int("confidence", i, (long long)(a->confidence * 1000.0f),
-                            (long long)(b->confidence * 1000.0f)) &&
-               pyparity_int("kind", i, a->kind, b->kind) &&
-               pyparity_int("site_start", i, a->site_start_byte, b->site_start_byte) &&
-               pyparity_int("site_end", i, a->site_end_byte, b->site_end_byte);
-    }
-    same = same && pyparity_int("calls.count", 0, c->calls.count, r->calls.count);
-    for (int i = 0; same && i < c->calls.count; i++) {
-        const CBMCall *a = &c->calls.items[i];
-        const CBMCall *b = &r->calls.items[i];
-        same = pyparity_str("call.callee", i, a->callee_name, b->callee_name) &&
-               pyparity_str("call.caller", i, a->enclosing_func_qn, b->enclosing_func_qn) &&
-               pyparity_int("call.site", i, a->site_start_byte, b->site_start_byte);
-    }
-    same = same && pyparity_int("usages.count", 0, c->usages.count, r->usages.count);
-    for (int i = 0; same && i < c->usages.count; i++) {
-        const CBMUsage *a = &c->usages.items[i];
-        const CBMUsage *b = &r->usages.items[i];
-        same = pyparity_str("usage.name", i, a->ref_name, b->ref_name) &&
-               pyparity_str("usage.caller", i, a->enclosing_func_qn, b->enclosing_func_qn) &&
-               pyparity_int("usage.kind", i, a->kind, b->kind) &&
-               pyparity_int("usage.site", i, a->site_start_byte, b->site_start_byte);
-    }
-    return same && pyparity_int("has_error", 0, c->has_error, r->has_error);
-}
-
-static CBMFileResult *extract_py(const char *source) {
-    cbm_py_lsp_test_use_c_reference(true);
-    CBMFileResult *c = extract_py_once(source);
-    cbm_py_lsp_test_use_c_reference(false);
-    CBMFileResult *r = extract_py_once(source);
-    if (!c != !r || (c && !pyparity_same(c, r))) {
-        printf("  parity mismatch for source:\n%s\n", source);
-        cbm_free_result(r);
-        r = NULL;
-    }
-    cbm_free_result(c);
-    return r;
-}
-#else
-static CBMFileResult *extract_py(const char *source) {
-    return extract_py_once(source);
-}
-#endif
 
 static int find_resolved(const CBMFileResult *r, const char *callerSub, const char *calleeSub) {
     for (int i = 0; i < r->resolved_calls.count; i++) {
@@ -5322,7 +5246,7 @@ TEST(pylsp_range_wildcard_and_scratch_failures_keep_exact_later_calls) {
     PASS();
 }
 
-/* ── Inheritance parity: C reference vs python_mro.rs ──────────────── */
+/* ── Inheritance and super() lookup cases (python_mro.rs) ─────────── */
 
 static const char **pympro_list(CBMArena *a, const char *const *names, int count) {
     const char **out = cbm_arena_alloc(a, (size_t)(count + 1) * sizeof(*out));
@@ -5434,28 +5358,88 @@ static const char *const PYMRO_CLASSES[] = {
 static const char *const PYMRO_MEMBERS[] = {"work", "__init__", "go", "own", "deep", "mid",
                                             "missing"};
 
-static bool pymro_same(const char *c_out, const char *rust_out) {
-    return c_out == rust_out || (c_out && rust_out && strcmp(c_out, rust_out) == 0);
+/* Every (class, member) pair with a lookup or super() target, as the C
+ * reference resolved them before its removal. Other pairs resolve to none. */
+typedef struct {
+    const char *cls;
+    const char *member;
+    const char *lookup;
+    const char *super_target;
+} PyMroExpected;
+
+static const PyMroExpected PYMRO_EXPECTED[] = {
+    {"m.Root", "work", "m.Root.work", NULL},
+    {"m.Root", "__init__", "m.Root.__init__", NULL},
+    {"m.Left", "work", "m.Root.work", "m.Root.work"},
+    {"m.Left", "__init__", "m.Root.__init__", "m.Root.__init__"},
+    {"m.Right", "work", "m.Right.work", "m.Root.work"},
+    {"m.Right", "__init__", "m.Root.__init__", "m.Root.__init__"},
+    {"m.Child", "work", "m.Right.work", "m.Right.work"},
+    {"m.Child", "__init__", "m.Root.__init__", "m.Root.__init__"},
+    {"m.Child", "own", "m.Child.own", NULL},
+    {"m.Base", "go", "m.Base.go", NULL},
+    {"m.Sub", "__init__", NULL, "m.Base.__init__"},
+    {"m.Sub", "go", "m.Base.go", "m.Base.go"},
+    {"m.A", "work", "m.A.work", NULL},
+    {"m.First", "work", "m.A.work", "m.A.work"},
+    {"m.First", "__init__", "m.B.__init__", "m.B.__init__"},
+    {"m.Second", "work", "m.B.work", "m.B.work"},
+    {"m.Second", "__init__", "m.B.__init__", "m.B.__init__"},
+    {"m.Bad", "work", "m.A.work", "m.A.work"},
+    {"m.Bad", "__init__", "m.B.__init__", "m.B.__init__"},
+    {"m.Alias", "work", "m.Right.work", NULL},
+    {"m.Alias", "__init__", "m.Root.__init__", NULL},
+    {"m.AliasChild", "work", "m.Right.work", "m.Right.work"},
+    {"m.AliasChild", "__init__", "m.Root.__init__", "m.Root.__init__"},
+    {"m.Cyc", "__init__", NULL, "m.Cyc2.__init__"},
+    {"m.Ext", "__init__", NULL, "ext.Mixin.__init__"},
+    {"m.Ext", "go", "m.Base.go", "m.Base.go"},
+    {"m.D0", "__init__", NULL, "m.D1.__init__"},
+    {"m.D0", "mid", "m.D10.mid", "m.D10.mid"},
+    {"m.D3", "__init__", NULL, "m.D4.__init__"},
+    {"m.D3", "deep", NULL, "m.D20.deep"},
+    {"m.D3", "mid", "m.D10.mid", "m.D10.mid"},
+    {"m.D10", "__init__", NULL, "m.D11.__init__"},
+    {"m.D10", "deep", "m.D20.deep", "m.D20.deep"},
+    {"m.D10", "mid", "m.D10.mid", NULL},
+    {"m.Wide63", "work", "w.W62.work", "w.W62.work"},
+    {"m.Wide63", "__init__", NULL, "w.W0.__init__"},
+    {"m.Wide64", "work", "w.W62.work", "w.W62.work"},
+    {"m.Wide64", "__init__", NULL, "w.W0.__init__"},
+    {"m.Wide62Deep", "__init__", NULL, "w.W0.__init__"},
+    {"m.Wide62Deep", "go", "m.Base.go", "m.Base.go"},
+};
+
+static const PyMroExpected *pymro_expected(const char *cls, const char *member) {
+    for (size_t i = 0; i < sizeof(PYMRO_EXPECTED) / sizeof(PYMRO_EXPECTED[0]); i++) {
+        if (strcmp(PYMRO_EXPECTED[i].cls, cls) == 0 &&
+            strcmp(PYMRO_EXPECTED[i].member, member) == 0)
+            return &PYMRO_EXPECTED[i];
+    }
+    return NULL;
 }
 
-static int pymro_compare(PyLSPContext *c_ctx, PyLSPContext *rust_ctx) {
+static bool pymro_same(const char *expected, const char *actual) {
+    return expected == actual || (expected && actual && strcmp(expected, actual) == 0);
+}
+
+static int pymro_check(PyLSPContext *ctx) {
     int mismatches = 0;
     for (size_t i = 0; i < sizeof(PYMRO_CLASSES) / sizeof(PYMRO_CLASSES[0]); i++) {
         for (size_t j = 0; j < sizeof(PYMRO_MEMBERS) / sizeof(PYMRO_MEMBERS[0]); j++) {
             const char *cls = PYMRO_CLASSES[i];
             const char *member = PYMRO_MEMBERS[j];
-            const CBMRegisteredFunc *cf = cbm_py_mro_test_lookup(c_ctx, cls, member, true);
-            const CBMRegisteredFunc *rf = cbm_py_mro_test_lookup(rust_ctx, cls, member, false);
-            if (cf != rf) {
-                printf("  lookup(%s, %s): C=%s Rust=%s\n", cls, member,
-                       cf ? cf->qualified_name : "(null)", rf ? rf->qualified_name : "(null)");
-                mismatches++;
-            }
-            const char *cs = cbm_py_mro_test_super(c_ctx, cls, member, true);
-            const char *rs = cbm_py_mro_test_super(rust_ctx, cls, member, false);
-            if (!pymro_same(cs, rs)) {
-                printf("  super(%s, %s): C=%s Rust=%s\n", cls, member, cs ? cs : "(null)",
-                       rs ? rs : "(null)");
+            const PyMroExpected *want = pymro_expected(cls, member);
+            const CBMRegisteredFunc *f = cbm_py_mro_test_lookup(ctx, cls, member);
+            const char *lookup = f ? f->qualified_name : NULL;
+            const char *super_target = cbm_py_mro_test_super(ctx, cls, member);
+            const char *want_lookup = want ? want->lookup : NULL;
+            const char *want_super = want ? want->super_target : NULL;
+            if (!pymro_same(want_lookup, lookup) || !pymro_same(want_super, super_target)) {
+                printf("  %s.%s: lookup=%s (want %s) super=%s (want %s)\n", cls, member,
+                       lookup ? lookup : "(null)", want_lookup ? want_lookup : "(null)",
+                       super_target ? super_target : "(null)",
+                       want_super ? want_super : "(null)");
                 mismatches++;
             }
         }
@@ -5463,31 +5447,17 @@ static int pymro_compare(PyLSPContext *c_ctx, PyLSPContext *rust_ctx) {
     return mismatches;
 }
 
-TEST(pylsp_inheritance_matches_c_reference) {
+TEST(pylsp_inheritance_lookup_cases) {
     CBMArena a;
     cbm_arena_init(&a);
     CBMTypeRegistry reg;
     cbm_registry_init(&reg, &a);
     pympro_registry(&a, &reg);
-    PyLSPContext c_ctx;
-    PyLSPContext rust_ctx;
-    py_lsp_init(&c_ctx, &a, "", 0, &reg, "m", NULL);
-    py_lsp_init(&rust_ctx, &a, "", 0, &reg, "m", NULL);
+    PyLSPContext ctx;
+    py_lsp_init(&ctx, &a, "", 0, &reg, "m", NULL);
     /* The second round reads the orders the first one cached. */
-    int mismatches = pymro_compare(&c_ctx, &rust_ctx);
-    mismatches += pymro_compare(&c_ctx, &rust_ctx);
-    /* Spot-check the shared answers, so a shared wrong answer still fails. */
-    const CBMRegisteredFunc *f = cbm_py_mro_test_lookup(&rust_ctx, "m.Child", "work", false);
-    ASSERT_NOT_NULL(f);
-    ASSERT_STR_EQ(f->qualified_name, "m.Right.work");
-    ASSERT_STR_EQ(cbm_py_mro_test_super(&rust_ctx, "m.Child", "work", false), "m.Right.work");
-    ASSERT_STR_EQ(cbm_py_mro_test_super(&rust_ctx, "m.Bad", "work", false), "m.A.work");
-    ASSERT_STR_EQ(cbm_py_mro_test_super(&rust_ctx, "m.Sub", "__init__", false),
-                  "m.Base.__init__");
-    ASSERT_NULL(cbm_py_mro_test_lookup(&rust_ctx, "m.D0", "deep", false));
-    f = cbm_py_mro_test_lookup(&rust_ctx, "m.D0", "mid", false);
-    ASSERT_NOT_NULL(f);
-    ASSERT_STR_EQ(f->qualified_name, "m.D10.mid");
+    int mismatches = pymro_check(&ctx);
+    mismatches += pymro_check(&ctx);
     cbm_arena_destroy(&a);
     ASSERT_EQ(mismatches, 0);
     PASS();
@@ -5574,7 +5544,7 @@ SUITE(py_lsp) {
     RUN_TEST(pylsp_super_call);
     RUN_TEST(pylsp_multi_inheritance_first_base);
     RUN_TEST(pylsp_c3_diamond_and_super_use_same_order);
-    RUN_TEST(pylsp_inheritance_matches_c_reference);
+    RUN_TEST(pylsp_inheritance_lookup_cases);
     RUN_TEST(pylsp_pep695_generic_class);
     /* Phase 9 — cross-file + batch */
     RUN_TEST(pylsp_crossfile_method_dispatch);

@@ -1559,207 +1559,6 @@ static void py_mro_cache_put(PyLSPContext *ctx, const char *qn, uint32_t h, cons
     ctx->mro_cache_count++;
 }
 
-#ifdef CBM_ENABLE_TEST_SEAMS
-/* ── C reference for python_mro.rs, kept for the parity test ───────── */
-
-/* Routes inheritance and super() lookups through the C below instead of
- * python_mro.rs (cbm_py_lsp_test_use_c_reference). */
-static bool py_test_c_reference;
-
-void cbm_py_lsp_test_use_c_reference(bool enabled) {
-    py_test_c_reference = enabled;
-}
-
-static const CBMRegisteredFunc *py_c_lookup_attribute_depth(PyLSPContext *ctx,
-                                                            const char *type_qn,
-                                                            const char *member_name, int depth) {
-    if (!ctx || !type_qn || !member_name)
-        return NULL;
-    if (depth > CBM_LSP_MAX_LOOKUP_DEPTH)
-        return NULL;
-
-    const CBMRegisteredFunc *f = cbm_registry_lookup_method(ctx->registry, type_qn, member_name);
-    if (f)
-        return f;
-
-    const CBMRegisteredType *rt = cbm_registry_lookup_type(ctx->registry, type_qn);
-    if (rt) {
-        if (rt->alias_of) {
-            f = py_c_lookup_attribute_depth(ctx, rt->alias_of, member_name, depth + 1);
-            if (f)
-                return f;
-        }
-        if (rt->embedded_types) {
-            for (int i = 0; rt->embedded_types[i]; i++) {
-                f = py_c_lookup_attribute_depth(ctx, rt->embedded_types[i], member_name,
-                                                depth + 1);
-                if (f)
-                    return f;
-            }
-        }
-    }
-    return NULL;
-}
-
-static bool py_c3_in_tail(const char *qn, const char *const *seq, int head, int len) {
-    for (int k = head + 1; k < len; k++) {
-        if (strcmp(seq[k], qn) == 0)
-            return true;
-    }
-    return false;
-}
-
-static const char *py_c3_pick(const char *const *const *seqs, const int *lens, const int *heads,
-                              int nseq) {
-    for (int s = 0; s < nseq; s++) {
-        if (heads[s] >= lens[s])
-            continue;
-        const char *cand = seqs[s][heads[s]];
-        bool blocked = false;
-        for (int t = 0; t < nseq && !blocked; t++) {
-            blocked = heads[t] < lens[t] && py_c3_in_tail(cand, seqs[t], heads[t], lens[t]);
-        }
-        if (!blocked)
-            return cand;
-    }
-    return NULL;
-}
-
-static int py_c3_merge(const char *const *const *seqs, const int *lens, int *heads, int nseq,
-                       const char **mro) {
-    int n = 1;
-    for (;;) {
-        bool pending = false;
-        for (int s = 0; s < nseq && !pending; s++) {
-            pending = heads[s] < lens[s];
-        }
-        if (!pending)
-            return n;
-        const char *pick = py_c3_pick(seqs, lens, heads, nseq);
-        if (!pick || n >= PY_C3_MAX)
-            return -1;
-        mro[n++] = pick;
-        for (int s = 0; s < nseq; s++) {
-            if (heads[s] < lens[s] && strcmp(seqs[s][heads[s]], pick) == 0)
-                heads[s]++;
-        }
-    }
-}
-
-static int py_c3_linearize(PyLSPContext *ctx, const char *type_qn, const char *const **out,
-                           int depth) {
-    uint32_t h = py_mro_hash(type_qn);
-    const CBMPyMroCacheEntry *hit = py_mro_cache_find(ctx, type_qn, h);
-    if (hit) {
-        *out = hit->mro;
-        return hit->len;
-    }
-    int n = -1;
-    const char **mro = NULL;
-    const char *const *linearized = NULL;
-    const CBMRegisteredType *rt =
-        depth <= CBM_LSP_MAX_LOOKUP_DEPTH ? cbm_registry_lookup_type(ctx->registry, type_qn) : NULL;
-    const char **bases = rt ? rt->embedded_types : NULL;
-    int nb = 0;
-    while (bases && bases[nb])
-        nb++;
-    if (depth > CBM_LSP_MAX_LOOKUP_DEPTH || nb >= PY_C3_MAX) {
-        n = -1;
-    } else if (rt && rt->alias_of) {
-        n = py_c3_linearize(ctx, rt->alias_of, &linearized, depth + 1);
-    } else {
-        const char *const **seqs = (const char *const **)cbm_arena_alloc(
-            ctx->arena, (size_t)(nb + 1) * sizeof(const char *const *));
-        int *lens = (int *)cbm_arena_alloc(ctx->arena, (size_t)(nb + 1) * 2 * sizeof(int));
-        mro = (const char **)cbm_arena_alloc(ctx->arena, PY_C3_MAX * sizeof(const char *));
-        bool ok = seqs && lens && mro;
-        int *heads = lens ? lens + nb + 1 : NULL;
-        for (int b = 0; ok && b < nb; b++) {
-            lens[b] = py_c3_linearize(ctx, bases[b], &seqs[b], depth + 1);
-            heads[b] = 0;
-            ok = lens[b] >= 0;
-        }
-        if (ok) {
-            seqs[nb] = (const char *const *)bases;
-            lens[nb] = nb;
-            heads[nb] = 0;
-            mro[0] = cbm_arena_strdup(ctx->arena, type_qn);
-            n = mro[0] ? py_c3_merge(seqs, lens, heads, nb + 1, mro) : -1;
-        }
-        linearized = mro;
-    }
-    if (n >= 0 || depth == 0)
-        py_mro_cache_put(ctx, type_qn, h, n >= 0 ? linearized : NULL, n);
-    *out = n >= 0 ? linearized : NULL;
-    return n;
-}
-
-static const CBMRegisteredFunc *py_c_lookup_attribute(PyLSPContext *ctx, const char *type_qn,
-                                                      const char *member_name) {
-    if (!ctx || !type_qn || !member_name)
-        return NULL;
-    const CBMRegisteredFunc *f = cbm_registry_lookup_method(ctx->registry, type_qn, member_name);
-    if (f)
-        return f;
-    const char *const *mro = NULL;
-    int n = py_c3_linearize(ctx, type_qn, &mro, 0);
-    if (n < 0)
-        return py_c_lookup_attribute_depth(ctx, type_qn, member_name, 0);
-    for (int i = strcmp(mro[0], type_qn) == 0 ? 1 : 0; i < n; i++) {
-        f = cbm_registry_lookup_method(ctx->registry, mro[i], member_name);
-        if (f)
-            return f;
-    }
-    return NULL;
-}
-
-static const CBMRegisteredFunc *py_c_lookup_super_attribute(PyLSPContext *ctx,
-                                                            const char *class_qn,
-                                                            const char *member, bool *have_mro) {
-    *have_mro = false;
-    if (!ctx || !class_qn || !member)
-        return NULL;
-    const char *const *mro = NULL;
-    int n = py_c3_linearize(ctx, class_qn, &mro, 0);
-    if (n < 0)
-        return NULL;
-    *have_mro = true;
-    for (int i = 1; i < n; i++) {
-        const CBMRegisteredFunc *f = cbm_registry_lookup_method(ctx->registry, mro[i], member);
-        if (f)
-            return f;
-    }
-    return NULL;
-}
-
-/* The removed C body of super().attr resolution in py_emit_call_for: the
- * emitted target QN, or NULL when it emitted nothing. */
-static const char *py_c_super_target(PyLSPContext *ctx, const char *class_qn,
-                                     const char *attr_name) {
-    const CBMRegisteredType *enclosing = cbm_registry_lookup_type(ctx->registry, class_qn);
-    if (!enclosing || !enclosing->embedded_types)
-        return NULL;
-    bool have_mro = false;
-    const CBMRegisteredFunc *sf = py_c_lookup_super_attribute(ctx, class_qn, attr_name, &have_mro);
-    if (sf)
-        return sf->qualified_name;
-    for (int i = 0; enclosing->embedded_types[i]; i++) {
-        if (strcmp(attr_name, "__init__") == 0) {
-            const CBMRegisteredFunc *fi =
-                py_c_lookup_attribute(ctx, enclosing->embedded_types[i], attr_name);
-            return fi ? fi->qualified_name
-                      : cbm_arena_sprintf(ctx->arena, "%s.__init__",
-                                          enclosing->embedded_types[i]);
-        }
-        const CBMRegisteredFunc *f =
-            py_c_lookup_attribute(ctx, enclosing->embedded_types[i], attr_name);
-        if (f)
-            return f->qualified_name;
-    }
-    return NULL;
-}
-
-#endif /* CBM_ENABLE_TEST_SEAMS */
 
 typedef struct {
     const char *const *bases;
@@ -1834,10 +1633,6 @@ static const CBMRegisteredFunc *py_lookup_attribute(PyLSPContext *ctx, const cha
                                                     const char *member) {
     if (!ctx || !type_qn || !member)
         return NULL;
-#ifdef CBM_ENABLE_TEST_SEAMS
-    if (py_test_c_reference)
-        return py_c_lookup_attribute(ctx, type_qn, member);
-#endif
     return mori_py_lookup_inherited(ctx, &py_mro_native, type_qn, member,
                                       CBM_LSP_MAX_LOOKUP_DEPTH);
 }
@@ -1846,10 +1641,6 @@ static const CBMRegisteredFunc *py_lookup_attribute(PyLSPContext *ctx, const cha
  * undeclared `__init__` the first base's constructor QN. NULL: no target. */
 static const char *py_super_target(PyLSPContext *ctx, const char *class_qn,
                                    const char *attr_name) {
-#ifdef CBM_ENABLE_TEST_SEAMS
-    if (py_test_c_reference)
-        return py_c_super_target(ctx, class_qn, attr_name);
-#endif
     PySuperTarget target = mori_py_lookup_super(ctx, &py_mro_native, class_qn, attr_name,
                                                 CBM_LSP_MAX_LOOKUP_DEPTH);
     if (target.method)
@@ -1861,23 +1652,12 @@ static const char *py_super_target(PyLSPContext *ctx, const char *class_qn,
 
 #ifdef CBM_ENABLE_TEST_SEAMS
 const CBMRegisteredFunc *cbm_py_mro_test_lookup(PyLSPContext *ctx, const char *type_qn,
-                                                const char *member, bool c_reference) {
-    return c_reference ? py_c_lookup_attribute(ctx, type_qn, member)
-                       : mori_py_lookup_inherited(ctx, &py_mro_native, type_qn, member,
-                                                  CBM_LSP_MAX_LOOKUP_DEPTH);
+                                                const char *member) {
+    return py_lookup_attribute(ctx, type_qn, member);
 }
 
-const char *cbm_py_mro_test_super(PyLSPContext *ctx, const char *class_qn, const char *member,
-                                  bool c_reference) {
-    if (!ctx || !class_qn || !member)
-        return NULL;
-    if (c_reference)
-        return py_c_super_target(ctx, class_qn, member);
-    bool saved = py_test_c_reference;
-    py_test_c_reference = false;
-    const char *qn = py_super_target(ctx, class_qn, member);
-    py_test_c_reference = saved;
-    return qn;
+const char *cbm_py_mro_test_super(PyLSPContext *ctx, const char *class_qn, const char *member) {
+    return ctx && class_qn && member ? py_super_target(ctx, class_qn, member) : NULL;
 }
 #endif
 
