@@ -659,6 +659,23 @@ TEST(pylsp_super_call) {
     PASS();
 }
 
+TEST(pylsp_c3_diamond_and_super_use_same_order) {
+    CBMFileResult *r = extract_py(
+        "class Root:\n"
+        "    def work(self): pass\n"
+        "class Left(Root): pass\n"
+        "class Right(Root):\n"
+        "    def work(self): pass\n"
+        "class Child(Left, Right):\n"
+        "    def direct(self): self.work()\n"
+        "    def via_super(self): super().work()\n");
+    ASSERT_NOT_NULL(r);
+    ASSERT_GTE(find_resolved(r, "Child.direct", "Right.work"), 0);
+    ASSERT_GTE(find_resolved(r, "Child.via_super", "Right.work"), 0);
+    cbm_free_result(r);
+    PASS();
+}
+
 TEST(pylsp_multi_inheritance_first_base) {
     CBMFileResult *r = extract_py(
         "class A:\n"
@@ -5309,6 +5326,7 @@ SUITE(py_lsp) {
     RUN_TEST(pylsp_dataclass_constructor);
     RUN_TEST(pylsp_super_call);
     RUN_TEST(pylsp_multi_inheritance_first_base);
+    RUN_TEST(pylsp_c3_diamond_and_super_use_same_order);
     RUN_TEST(pylsp_pep695_generic_class);
     /* Phase 9 — cross-file + batch */
     RUN_TEST(pylsp_crossfile_method_dispatch);

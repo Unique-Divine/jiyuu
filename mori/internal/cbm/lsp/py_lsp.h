@@ -40,14 +40,14 @@ typedef struct {
     const CBMType *result; // full-fidelity result, never NULL in a live entry
 } CBMPyTypeCacheEntry;
 
-// A class's C3 method resolution order (py_c3_linearize), computed once per
+// A class's C3 method resolution order, computed once per
 // class and file. The registry is complete before the walk starts, so an entry
 // never goes stale.
 typedef struct {
     const char *qn;   // class QN; NULL marks an empty slot
     uint32_t hash;    // hash of qn
     int len;          // entries in mro; -1 = the class has no C3 order
-    const char **mro; // arena-allocated, mro[0] is the class (or its alias target)
+    const char *const *mro; // arena-allocated, mro[0] is the class (or its alias target)
 } CBMPyMroCacheEntry;
 
 // PyLSPContext holds state for one Python file's type evaluation.
@@ -216,6 +216,16 @@ bool cbm_py_lsp_test_register_defs(CBMArena *arena, CBMTypeRegistry *reg, CBMLSP
                                    int def_count);
 const CBMType *cbm_py_lsp_test_eval(PyLSPContext *ctx, TSNode node);
 void cbm_py_lsp_test_bind_external_classes(PyLSPContext *ctx, TSNode root);
+/* Routes inheritance and super() lookups through the C reference kept for
+ * comparison instead of python_mro.rs. */
+void cbm_py_lsp_test_use_c_reference(bool enabled);
+/* Attribute lookup along a class's method resolution order, and the target
+ * QN super().member reaches from inside class_qn, through python_mro.rs or
+ * the C reference. */
+const CBMRegisteredFunc *cbm_py_mro_test_lookup(PyLSPContext *ctx, const char *type_qn,
+                                                const char *member, bool c_reference);
+const char *cbm_py_mro_test_super(PyLSPContext *ctx, const char *class_qn, const char *member,
+                                  bool c_reference);
 #endif
 
 // --- Cross-file LSP resolution ---

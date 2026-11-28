@@ -378,6 +378,10 @@ mod source_publish;
 #[path = "pipeline/stage_publish.rs"]
 mod stage_publish;
 
+#[cfg(any(feature = "native-engine-abi", test))]
+#[path = "../internal/cbm/lsp/python_mro.rs"]
+mod python_mro;
+
 #[cfg(feature = "c-backend")]
 #[path = "../internal/cbm/python_imports.rs"]
 mod python_imports;
