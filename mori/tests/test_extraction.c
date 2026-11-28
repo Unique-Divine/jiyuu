@@ -1235,6 +1235,32 @@ TEST(ruby_ancestry_resolved_occurrences) {
     PASS();
 }
 
+TEST(ruby_include_in_scoped_class_with_pipe_comment) {
+    /* The C resolver split the packed reference at the comment's '|' and
+     * lost the mixin. */
+    const char *source = "module Greetable\n"
+                         "  def greet; end\n"
+                         "end\n"
+                         "class Admin:: # | scope\n"
+                         "  Widget\n"
+                         "  include Greetable\n"
+                         "  def probe\n"
+                         "    self.greet\n"
+                         "  end\n"
+                         "end\n";
+    CBMFileResult *result = extract(source, CBM_LANG_RUBY, "t", "main.rb");
+    ASSERT_NOT_NULL(result);
+    ASSERT_EQ(result->resolved_calls.count, 1);
+    const CBMResolvedCall *row = &result->resolved_calls.items[0];
+    ASSERT_STR_EQ(row->callee_qn, "t.main.Greetable.greet");
+    const char *site = strstr(source, "self.greet");
+    ASSERT_NOT_NULL(site);
+    ASSERT_EQ(row->site_start_byte, (uint32_t)(site - source));
+    ASSERT_EQ(row->site_end_byte, (uint32_t)(site - source + strlen("self.greet")));
+    cbm_free_result(result);
+    PASS();
+}
+
 static const char *ruby_ancestry_test_type(const void *registry, const char *path) {
     const CBMRegisteredType *type = cbm_registry_lookup_type(registry, path);
     return type ? type->qualified_name : NULL;
@@ -16124,6 +16150,7 @@ SUITE(extraction) {
     RUN_TEST(ruby_module);
     RUN_TEST(ruby_constructor_callee_is_constant_path);
     RUN_TEST(ruby_ancestry_resolved_occurrences);
+    RUN_TEST(ruby_include_in_scoped_class_with_pipe_comment);
     RUN_TEST(ruby_ancestry_lookup_boundaries);
     RUN_TEST(csharp_class);
     RUN_TEST(csharp_interface);
