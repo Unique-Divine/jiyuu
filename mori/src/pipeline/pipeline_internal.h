@@ -1658,15 +1658,7 @@ extern _Atomic uint64_t g_importance_name_visits;
 extern _Atomic uint64_t g_importance_store_rows;
 
 #if defined(CBM_ENABLE_TEST_SEAMS) && CBM_ENABLE_TEST_SEAMS
-/* The C references for the TESTS and importance passes (pass_tests.c,
- * pass_importance.c), kept for the Rust parity suite. */
-bool cbm_node_is_test_c_ref(const cbm_gbuf_node_t *n);
-bool cbm_pipeline_caller_is_test_c_ref(const cbm_gbuf_node_t *source, const char *rel,
-                                       CBMLanguage lang);
-bool cbm_is_test_path_c_ref(const char *path);
-bool cbm_is_test_func_name_c_ref(const char *name);
-int cbm_pipeline_pass_tests_c_ref(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t *files,
-                                  int file_count);
+/* The C importance reference for the Rust parity suite. */
 void cbm_pipeline_pass_importance_c_ref(cbm_pipeline_ctx_t *ctx);
 double cbm_pipeline_importance_score_c_ref(const cbm_importance_inputs_t *in);
 char *cbm_pipeline_importance_set_prop_c_ref(const char *json, double score);

@@ -20413,9 +20413,9 @@ TEST(testdetect_is_test_function) {
     PASS();
 }
 
-/* ── TESTS pass parity: Rust (test_edges.rs) against the C reference ── */
+/* ── TESTS pass regression cases (test_edges.rs) ── */
 
-/* Fingerprint the C results for regression tests after the reference is removed. */
+/* Fingerprint sorted graph rows and test detection verdicts. */
 #define PT_FNV_SEED UINT64_C(14695981039346656037)
 
 static uint64_t pt_fnv(uint64_t hash, const void *data, size_t size) {
@@ -20457,57 +20457,68 @@ static void pt_random_text(uint32_t *state, const char *const *pieces, int piece
     }
 }
 
-/* The rules agree on hand-picked and generated paths, names, nodes and
- * callers. */
-TEST(testdetect_rules_rust_match_c) {
-    static const char *const paths[] = {
-        "",
-        "foo_test.go",
-        "test_handler.py",
-        "handler.test.js",
-        "Component.spec.tsx",
-        "OrderSpec.scala",
-        "__tests__/Component.js",
-        "tests/test_main.py",
-        "spec/handler_spec.rb",
-        "src/tests",
-        "contest.go",
-        "latest.py",
-        "testdata/x.go",
-        "dir/mytest_x.go",
-        "/foo_test.go",
-        "x_test.go_test.go",
+/* Hand-picked verdicts of the test rules, then a digest of their verdicts on
+ * generated paths, names, nodes and callers. */
+TEST(testdetect_rules_regression) {
+    static const struct {
+        const char *path;
+        bool test;
+    } paths[] = {
+        {"", false},
+        {"foo_test.go", true},
+        {"test_handler.py", true},
+        {"handler.test.js", true},
+        {"Component.spec.tsx", true},
+        {"OrderSpec.scala", true},
+        {"__tests__/Component.js", true},
+        {"tests/test_main.py", true},
+        {"spec/handler_spec.rb", true},
+        {"src/tests", false},
+        {"contest.go", false},
+        {"latest.py", false},
+        {"testdata/x.go", false},
+        {"dir/mytest_x.go", false},
+        {"/foo_test.go", true},
+        {"x_test.go_test.go", true},
     };
     for (size_t i = 0; i < sizeof(paths) / sizeof(paths[0]); i++) {
-        ASSERT_EQ(cbm_is_test_path(paths[i]), cbm_is_test_path_c_ref(paths[i]));
+        ASSERT_EQ(cbm_is_test_path(paths[i].path), paths[i].test);
     }
-    static const char *const names[] = {
-        "",        "Test",       "TestCreate", "Testable", "Benchmark", "Benchmarking",
-        "Example", "ExampleUse", "Examples",   "test",     "tests",     "testing",
-        "testX",   "test_",      "it",         "its",      "@test",     "@testset",
-        "@tests",  "beforeAll",  "afterEach",  "describe", "Describe",
+    static const struct {
+        const char *name;
+        bool test;
+    } names[] = {
+        {"", false},         {"Test", true},          {"TestCreate", true}, {"Testable", false},
+        {"Benchmark", true}, {"Benchmarking", false}, {"Example", true},    {"ExampleUse", true},
+        {"Examples", false}, {"test", true},          {"tests", false},     {"testing", false},
+        {"testX", true},     {"test_", true},         {"it", true},         {"its", false},
+        {"@test", true},     {"@testset", true},      {"@tests", false},    {"beforeAll", true},
+        {"afterEach", true}, {"describe", true},      {"Describe", false},
     };
     for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
-        ASSERT_EQ(cbm_is_test_func_name(names[i]), cbm_is_test_func_name_c_ref(names[i]));
+        ASSERT_EQ(cbm_is_test_func_name(names[i].name), names[i].test);
     }
-    ASSERT_EQ(cbm_is_test_path(NULL), cbm_is_test_path_c_ref(NULL));
-    ASSERT_EQ(cbm_is_test_func_name(NULL), cbm_is_test_func_name_c_ref(NULL));
-    ASSERT_EQ(cbm_node_is_test(NULL), cbm_node_is_test_c_ref(NULL));
+    ASSERT_FALSE(cbm_is_test_path(NULL));
+    ASSERT_FALSE(cbm_is_test_func_name(NULL));
+    ASSERT_FALSE(cbm_node_is_test(NULL));
 
-    static const char *const props[] = {
-        "{}",
-        "{\"is_test\":true}",
-        "{\"is_test\": true}",
-        "{\"a\":1,\"is_test\":true}",
-        "{\"is_test\":false}",
+    static const struct {
+        const char *props;
+        bool test;
+    } props[] = {
+        {"{}", false},
+        {"{\"is_test\":true}", true},
+        {"{\"is_test\": true}", false},
+        {"{\"a\":1,\"is_test\":true}", true},
+        {"{\"is_test\":false}", false},
     };
     cbm_gbuf_node_t node = {.id = 1, .label = "Function", .name = "f"};
     for (size_t i = 0; i < sizeof(props) / sizeof(props[0]); i++) {
-        node.properties_json = (char *)props[i];
-        ASSERT_EQ(cbm_node_is_test(&node), cbm_node_is_test_c_ref(&node));
+        node.properties_json = (char *)props[i].props;
+        ASSERT_EQ(cbm_node_is_test(&node), props[i].test);
     }
     node.properties_json = NULL;
-    ASSERT_EQ(cbm_node_is_test(&node), cbm_node_is_test_c_ref(&node));
+    ASSERT_FALSE(cbm_node_is_test(&node));
 
     uint32_t state = 0x7e575eedU;
     char text[CBM_SZ_256];
@@ -20516,27 +20527,18 @@ TEST(testdetect_rules_rust_match_c) {
         pt_random_text(&state, pt_path_pieces,
                        (int)(sizeof(pt_path_pieces) / sizeof(pt_path_pieces[0])), text,
                        sizeof(text));
-        if (cbm_is_test_path(text) != cbm_is_test_path_c_ref(text)) {
-            printf("  path differs: %s\n", text);
-        }
         unsigned char verdicts[3];
-        verdicts[0] = cbm_is_test_path_c_ref(text);
-        ASSERT_EQ(cbm_is_test_path(text), verdicts[0]);
-        node.properties_json = (char *)props[pt_next(&state) % 5];
+        verdicts[0] = cbm_is_test_path(text);
+        node.properties_json = (char *)props[pt_next(&state) % 5].props;
         CBMLanguage lang = (CBMLanguage)(pt_next(&state) % CBM_LANG_COUNT);
-        verdicts[1] = cbm_pipeline_caller_is_test_c_ref(&node, text, lang);
-        ASSERT_EQ(cbm_pipeline_caller_is_test(&node, text, lang), verdicts[1]);
+        verdicts[1] = cbm_pipeline_caller_is_test(&node, text, lang);
         pt_random_text(&state, pt_name_pieces,
                        (int)(sizeof(pt_name_pieces) / sizeof(pt_name_pieces[0])), text,
                        sizeof(text));
-        if (cbm_is_test_func_name(text) != cbm_is_test_func_name_c_ref(text)) {
-            printf("  name differs: %s\n", text);
-        }
-        verdicts[2] = cbm_is_test_func_name_c_ref(text);
-        ASSERT_EQ(cbm_is_test_func_name(text), verdicts[2]);
+        verdicts[2] = cbm_is_test_func_name(text);
         digest = pt_fnv(digest, verdicts, sizeof(verdicts));
     }
-    printf("  TESTS rules C digest %016llx\n", (unsigned long long)digest);
+    ASSERT_EQ(digest, UINT64_C(0x3784aec1c03a9877));
     PASS();
 }
 
@@ -20737,64 +20739,49 @@ static int pt_count_prefix(const pt_lines_t *lines, const char *prefix) {
     return n;
 }
 
-/* The Rust pass writes the same edges as the C reference on the same graph:
- * the fixed fixture under several generated tangles. Edge order in the buffer
- * is not part of the contract, so the comparison sorts. */
-TEST(tests_pass_rust_matches_c) {
-    for (uint32_t seed = 1; seed <= 12; seed++) {
-        cbm_gbuf_t *c_graph = cbm_gbuf_new(PT_PROJECT, "/tmp/pt");
-        cbm_gbuf_t *rust_graph = cbm_gbuf_new(PT_PROJECT, "/tmp/pt");
-        ASSERT_NOT_NULL(c_graph);
-        ASSERT_NOT_NULL(rust_graph);
-        pt_build(c_graph, seed * 2654435761U);
-        pt_build(rust_graph, seed * 2654435761U);
+/* Sorted node and edge rows captured from the C pass on each seed. */
+TEST(tests_pass_regression) {
+    static const struct {
+        uint64_t node_digest;
+        int edge_count;
+        uint64_t edge_digest;
+    } expected[] = {
+        {UINT64_C(0x7dd94c0dacd550f6), 990, UINT64_C(0xf0fe86aa53748d82)},
+        {UINT64_C(0x8b0abadb84cc7b3a), 988, UINT64_C(0x4b5bef88e413e505)},
+        {UINT64_C(0x81f70943999c5d0f), 994, UINT64_C(0x076f87d4152340e8)},
+        {UINT64_C(0x8066e5551f9e0542), 991, UINT64_C(0x9cd3ec89042d9786)},
+        {UINT64_C(0xf1e6133e03941673), 993, UINT64_C(0xe37cc9fb2ba9c84c)},
+        {UINT64_C(0x4e4bf86c0d228b4e), 990, UINT64_C(0xc8c210102331eece)},
+        {UINT64_C(0x914c9f48413aba9a), 985, UINT64_C(0xad47924b73929715)},
+        {UINT64_C(0xa481182ebf963dcd), 999, UINT64_C(0x89d5a3acf575ced8)},
+        {UINT64_C(0xee0129794492d12d), 992, UINT64_C(0x1f6764de5c08fe94)},
+        {UINT64_C(0x85b37f3e9a256909), 1007, UINT64_C(0x9785cc4c2c75c572)},
+        {UINT64_C(0x1ca97939c3c3e052), 996, UINT64_C(0x6cc06dee1489dd15)},
+        {UINT64_C(0x52aa657e17b36418), 1004, UINT64_C(0xe7822ceb8f1614b3)},
+    };
+    for (size_t i = 0; i < sizeof(expected) / sizeof(expected[0]); i++) {
+        uint32_t seed = (uint32_t)i + 1;
+        cbm_gbuf_t *graph = cbm_gbuf_new(PT_PROJECT, "/tmp/pt");
+        ASSERT_NOT_NULL(graph);
+        pt_build(graph, seed * 2654435761U);
+        ASSERT_EQ(mori_pipeline_pass_tests(graph, PT_PROJECT), 0);
 
-        atomic_int cancelled = 0;
-        cbm_pipeline_ctx_t ctx = {
-            .project_name = PT_PROJECT,
-            .repo_path = "/tmp/pt",
-            .gbuf = c_graph,
-            .cancelled = &cancelled,
-        };
-        ASSERT_EQ(cbm_pipeline_pass_tests_c_ref(&ctx, NULL, 0), 0);
-        ASSERT_EQ(mori_pipeline_pass_tests(rust_graph, PT_PROJECT), 0);
-
-        pt_lines_t c_edges;
-        pt_lines_t rust_edges;
-        pt_edges(c_graph, &c_edges);
-        pt_edges(rust_graph, &rust_edges);
-        /* Non-vacuous: both edge kinds were written. */
-        ASSERT_GT(pt_count_prefix(&c_edges, "TESTS "), 5);
-        ASSERT_GT(pt_count_prefix(&c_edges, "TESTS_FILE "), 5);
-        ASSERT_EQ(rust_edges.count, c_edges.count);
-        for (int i = 0; i < c_edges.count; i++) {
-            if (strcmp(c_edges.lines[i], rust_edges.lines[i]) != 0) {
-                printf("  seed %u edge %d: c=%s rust=%s\n", seed, i, c_edges.lines[i],
-                       rust_edges.lines[i]);
-            }
-            ASSERT_STR_EQ(c_edges.lines[i], rust_edges.lines[i]);
-        }
-        pt_lines_t c_nodes;
-        pt_lines_t rust_nodes;
-        pt_nodes(c_graph, &c_nodes);
-        pt_nodes(rust_graph, &rust_nodes);
-        ASSERT_EQ(rust_nodes.count, c_nodes.count);
-        for (int i = 0; i < c_nodes.count; i++) {
-            ASSERT_STR_EQ(c_nodes.lines[i], rust_nodes.lines[i]);
-        }
-        printf("  TESTS C seed %u nodes %016llx edges %d %016llx\n", seed,
-               (unsigned long long)pt_lines_digest(&c_nodes), c_edges.count,
-               (unsigned long long)pt_lines_digest(&c_edges));
-        pt_lines_free(&c_nodes);
-        pt_lines_free(&rust_nodes);
-        pt_lines_free(&c_edges);
-        pt_lines_free(&rust_edges);
-        cbm_gbuf_free(c_graph);
-        cbm_gbuf_free(rust_graph);
+        pt_lines_t nodes;
+        pt_lines_t edges;
+        pt_nodes(graph, &nodes);
+        pt_edges(graph, &edges);
+        ASSERT_EQ(pt_lines_digest(&nodes), expected[i].node_digest);
+        ASSERT_GT(pt_count_prefix(&edges, "TESTS "), 5);
+        ASSERT_GT(pt_count_prefix(&edges, "TESTS_FILE "), 5);
+        ASSERT_EQ(edges.count, expected[i].edge_count);
+        ASSERT_EQ(pt_lines_digest(&edges), expected[i].edge_digest);
+        pt_lines_free(&nodes);
+        pt_lines_free(&edges);
+        cbm_gbuf_free(graph);
     }
 
-    /* An empty graph writes nothing either way. */
     cbm_gbuf_t *empty = cbm_gbuf_new(PT_PROJECT, "/tmp/pt");
+    ASSERT_NOT_NULL(empty);
     ASSERT_EQ(mori_pipeline_pass_tests(empty, PT_PROJECT), 0);
     ASSERT_EQ(cbm_gbuf_edge_count(empty), 0);
     cbm_gbuf_free(empty);
@@ -35878,8 +35865,8 @@ SUITE(pipeline) {
     /* Test detection */
     RUN_TEST(testdetect_is_test_file);
     RUN_TEST(testdetect_is_test_function);
-    RUN_TEST(testdetect_rules_rust_match_c);
-    RUN_TEST(tests_pass_rust_matches_c);
+    RUN_TEST(testdetect_rules_regression);
+    RUN_TEST(tests_pass_regression);
     /* Implements pass (graph buffer based) */
     RUN_TEST(implements_creates_override);
     RUN_TEST(implements_no_match);

@@ -414,7 +414,7 @@ bool cbm_is_test_file(const char *rel_path, CBMLanguage lang) {
      * directory is a test file regardless of its own basename (e.g.
      * tests/helpers/fixtures.c, which no per-language suffix/prefix rule
      * below would otherwise catch). Mirrors the directory set cbm_is_test_path
-     * (src/pipeline/pass_tests.c) already uses for TESTS-edge detection, so
+     * (src/pipeline/test_edges.rs) already uses for TESTS-edge detection, so
      * the extraction-time is_test_file flag agrees with it (#1294). */
     if (strstr(rel_path, "__tests__/") || strstr(rel_path, "/tests/") ||
         strstr(rel_path, "/test/") || strstr(rel_path, "/spec/") ||

@@ -314,7 +314,7 @@ double cbm_pipeline_importance_score_c_ref(const cbm_importance_inputs_t *in) {
     }
     const bool private_name = name_is_private(in->name);
     const bool distinctive_name = name_is_distinctive(in->name);
-    const bool test_scaffolding = cbm_is_test_path_c_ref(in->file_path) || in->tests_target;
+    const bool test_scaffolding = cbm_is_test_path(in->file_path) || in->tests_target;
     double score = sqrt((double)(in->num_refs > 0 ? in->num_refs : 0));
     if (private_name) {
         score *= CBM_IMPORTANCE_PRIV_MUL;

@@ -69,7 +69,6 @@ src/pipeline/pass_k8s.c	6
 src/pipeline/pass_lsp_cross.c	49
 src/pipeline/pass_parallel.c	31
 src/pipeline/pass_semantic.c	3
-src/pipeline/pass_tests.c	3
 src/pipeline/pass_usages.c	4
 src/pipeline/path_alias.c	1
 src/pipeline/pipeline.c	129
