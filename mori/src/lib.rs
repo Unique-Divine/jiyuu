@@ -382,6 +382,10 @@ mod stage_publish;
 #[path = "../internal/cbm/lsp/python_mro.rs"]
 mod python_mro;
 
+#[cfg(any(feature = "native-engine-abi", test))]
+#[path = "../internal/cbm/lsp/python_namespace.rs"]
+mod python_namespace;
+
 #[cfg(feature = "c-backend")]
 #[path = "../internal/cbm/python_imports.rs"]
 mod python_imports;

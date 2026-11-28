@@ -6384,22 +6384,11 @@ bool cbm_py_lsp_test_register_defs(CBMArena *arena, CBMTypeRegistry *reg, CBMLSP
 }
 #endif
 
-/* ── Module namespaces: package re-exports ────────────────────────────────
+#ifdef CBM_ENABLE_TEST_SEAMS
+/* ── C reference for python_namespace.rs, kept for the parity test ───────
  *
- * cbm_pxc_collect_all_defs carries each Python module's namespace records
- * (PyReexport / PyStarImport / PyAll, built from its ordered namespace facts)
- * next to its definitions. py_build_module_namespaces folds them into the
- * registry's export table ONCE, after the func/type indexes are finalized
- * (every probe below is a hashed lookup or a binary search) and before the
- * seal. Per module it computes the namespace its imports bind: a re-export
- * resolves its target through further re-exports (chains); a star copies the
- * source module's namespace, restricted to its literal `__all__` when it has
- * one and otherwise to names without a leading `_`; the module's own
- * definitions are never replaced. Modules are visited in sorted order and
- * records in source order; a module reached again while its own namespace is
- * being computed (an import cycle) contributes what it has so far, so every
- * cycle ends with the same answer on every run. PY_NS_MAX_DEPTH bounds only
- * the native recursion (no project re-exports through 64 modules in a row). */
+ * Seam builds run it next to the Rust build of every namespace table and
+ * count the tables that differ (cbm_py_namespace_parity_*). */
 enum { PY_NS_MAX_DEPTH = 64, PY_NS_MAP_MIN_CAP = 8 };
 
 typedef struct {
@@ -6803,8 +6792,8 @@ static void py_ns_publish(PyNsBuild *b, CBMTypeRegistry *reg) {
 
 /* Build reg's module set and export table from defs[]. reg must be
  * finalized and not yet sealed. check_lang: defs[] is mixed-language. */
-static void py_build_module_namespaces(CBMTypeRegistry *reg, CBMLSPDef *defs, int def_count,
-                                       bool check_lang) {
+static void py_c_build_module_namespaces(CBMTypeRegistry *reg, CBMLSPDef *defs, int def_count,
+                                         bool check_lang) {
     if (!reg || !defs || def_count <= 0 || reg->read_only)
         return;
     CBMArena scratch;
@@ -6829,6 +6818,164 @@ static void py_build_module_namespaces(CBMTypeRegistry *reg, CBMLSPDef *defs, in
     }
     cbm_ht_free(b.by_suffix);
     cbm_arena_destroy(&scratch);
+}
+
+_Atomic uint64_t cbm_py_namespace_parity_builds;
+_Atomic uint64_t cbm_py_namespace_parity_mismatches;
+
+static bool py_ns_same_str(const char *a, const char *b) {
+    return a == b || (a && b && strcmp(a, b) == 0);
+}
+
+/* Compares the module list and export table the C reference published into
+ * `c` with the ones python_namespace.rs published into `rust`. */
+static void py_ns_parity(const CBMTypeRegistry *c, const CBMTypeRegistry *rust) {
+    bool same = c->module_count == rust->module_count && c->export_count == rust->export_count;
+    for (int i = 0; same && i < c->module_count; i++)
+        same = py_ns_same_str(c->module_qns[i], rust->module_qns[i]);
+    for (int i = 0; same && i < c->export_count; i++)
+        same = py_ns_same_str(c->export_keys[i], rust->export_keys[i]) &&
+               py_ns_same_str(c->export_targets[i], rust->export_targets[i]);
+    atomic_fetch_add(&cbm_py_namespace_parity_builds, 1);
+    if (same)
+        return;
+    atomic_fetch_add(&cbm_py_namespace_parity_mismatches, 1);
+    fprintf(stderr, "py namespace parity: C modules=%d exports=%d, Rust modules=%d exports=%d\n",
+            c->module_count, c->export_count, rust->module_count, rust->export_count);
+    for (int i = 0; i < c->export_count || i < rust->export_count; i++) {
+        fprintf(stderr, "  [%d] C %s -> %s | Rust %s -> %s\n", i,
+                i < c->export_count ? c->export_keys[i] : "-",
+                i < c->export_count ? c->export_targets[i] : "-",
+                i < rust->export_count ? rust->export_keys[i] : "-",
+                i < rust->export_count ? rust->export_targets[i] : "-");
+    }
+}
+#endif /* CBM_ENABLE_TEST_SEAMS */
+
+/* Rust folds the ordered definition facts into the shared namespace before
+ * the registry is sealed. Native owns the definition rows and published arena. */
+typedef struct {
+    CBMTypeRegistry *registry;
+    const CBMLSPDef *defs;
+    bool check_lang;
+} PyNamespaceBuild;
+
+typedef struct {
+    const char *module;
+    size_t scope_len;
+    const char *qualified;
+    const char *name;
+    const char *source;
+    const char *member;
+    const char *label;
+} PyNamespaceRow;
+
+typedef struct {
+    const uint8_t *data;
+    size_t len;
+} PyNamespaceBytes;
+
+typedef struct {
+    PyNamespaceBytes key;
+    const char *target;
+} PyNamespaceExport;
+
+typedef struct {
+    PyNamespaceRow (*row)(PyNamespaceBuild *, size_t);
+    const char *(*lookup)(PyNamespaceBuild *, const char *, size_t);
+    bool (*publish)(PyNamespaceBuild *, const PyNamespaceBytes *, size_t,
+                    const PyNamespaceExport *, size_t);
+} PyNamespaceNative;
+
+extern bool mori_py_build_namespaces(PyNamespaceBuild *, const PyNamespaceNative *, size_t);
+
+static PyNamespaceRow py_namespace_row(PyNamespaceBuild *build, size_t index) {
+    const CBMLSPDef *def = &build->defs[index];
+    if ((build->check_lang && def->lang != CBM_LANG_PYTHON) || !def->label ||
+        !def->qualified_name || !def->def_module_qn)
+        return (PyNamespaceRow){0};
+    return (PyNamespaceRow){
+        .module = def->def_module_qn,
+        .scope_len = cbm_fqn_symbol_scope_len(def->def_module_qn),
+        .qualified = def->qualified_name,
+        .name = def->short_name,
+        .source = def->receiver_type,
+        .member = def->method_names_str,
+        .label = def->label,
+    };
+}
+
+static const char *py_namespace_lookup(PyNamespaceBuild *build, const char *qn, size_t bytes) {
+    CBM_MSAN_WRITTEN(qn, bytes);
+    (void)bytes;
+    const CBMRegisteredFunc *f = cbm_registry_lookup_func(build->registry, qn);
+    if (f)
+        return f->qualified_name;
+    const CBMRegisteredType *type = cbm_registry_lookup_type(build->registry, qn);
+    return type ? type->qualified_name : NULL;
+}
+
+static const char *py_namespace_copy(CBMArena *arena, PyNamespaceBytes bytes) {
+    if (bytes.len == 0)
+        return cbm_arena_strdup(arena, "");
+    CBM_MSAN_WRITTEN(bytes.data, bytes.len);
+    return cbm_arena_strndup(arena, (const char *)bytes.data, bytes.len);
+}
+
+static bool py_namespace_publish(PyNamespaceBuild *build, const PyNamespaceBytes *scopes,
+                                 size_t scope_count, const PyNamespaceExport *exports,
+                                 size_t export_count) {
+    CBMTypeRegistry *reg = build->registry;
+    if (scope_count > INT_MAX || export_count > INT_MAX)
+        return false;
+    CBM_MSAN_WRITTEN(scopes, scope_count * sizeof(*scopes));
+    if (export_count)
+        CBM_MSAN_WRITTEN(exports, export_count * sizeof(*exports));
+    const char **modules = cbm_arena_alloc(reg->arena, (scope_count + 1) * sizeof(*modules));
+    const char **keys = cbm_arena_alloc(reg->arena, (export_count + 1) * sizeof(*keys));
+    const char **targets = cbm_arena_alloc(reg->arena, (export_count + 1) * sizeof(*targets));
+    if (!modules || !keys || !targets)
+        return false;
+
+    for (size_t i = 0; i < scope_count; i++) {
+        modules[i] = py_namespace_copy(reg->arena, scopes[i]);
+        if (!modules[i])
+            return false;
+    }
+    for (size_t i = 0; i < export_count; i++) {
+        keys[i] = py_namespace_copy(reg->arena, exports[i].key);
+        if (!keys[i])
+            return false;
+        targets[i] = exports[i].target;
+    }
+    reg->module_qns = modules;
+    reg->module_count = (int)scope_count;
+    reg->export_keys = keys;
+    reg->export_targets = targets;
+    reg->export_count = (int)export_count;
+    return true;
+}
+
+static bool py_build_module_namespaces(CBMTypeRegistry *reg, const CBMLSPDef *defs, int def_count,
+                                       bool check_lang) {
+    if (!reg || !defs || def_count <= 0 || reg->read_only)
+        return true;
+    static const PyNamespaceNative native = {
+        .row = py_namespace_row,
+        .lookup = py_namespace_lookup,
+        .publish = py_namespace_publish,
+    };
+    PyNamespaceBuild build = {.registry = reg, .defs = defs, .check_lang = check_lang};
+#ifdef CBM_ENABLE_TEST_SEAMS
+    CBMTypeRegistry c_reference = *reg;
+    py_c_build_module_namespaces(&c_reference, (CBMLSPDef *)defs, def_count, check_lang);
+    bool built = mori_py_build_namespaces(&build, &native, (size_t)def_count);
+    if (built)
+        py_ns_parity(&c_reference, reg);
+    return built;
+#else
+    return mori_py_build_namespaces(&build, &native, (size_t)def_count);
+#endif
 }
 
 bool cbm_run_py_lsp_cross(CBMArena *arena, const char *source, int source_len,
@@ -6886,7 +7033,10 @@ CBMLSPStatus cbm_run_py_lsp_cross_status(CBMArena *arena, const char *source, in
     /* Finalize registry — O(1) lookups. See go_lsp.c "3c. Finalize"
      * comment for the rationale. */
     cbm_registry_finalize_into(&reg, &idx_arena);
-    py_build_module_namespaces(&reg, defs, def_count, false);
+    if (!py_build_module_namespaces(&reg, defs, def_count, false)) {
+        ctx.eval_failure = CBM_LSP_SCOPE_FAILED;
+        goto cross_cleanup;
+    }
 
     ctx.syn_calls = synthetic_calls;
     for (int i = 0; i < import_count; i++) {
@@ -6942,7 +7092,8 @@ CBMTypeRegistry *cbm_py_build_cross_registry(CBMArena *arena, CBMLSPDef *defs, i
     cbm_registry_build_type_qn_order(reg, arena);
     cbm_registry_finalize(reg);
     /* Export table: after finalize (hashed probes), before the seal. */
-    py_build_module_namespaces(reg, defs, def_count, true);
+    if (!py_build_module_namespaces(reg, defs, def_count, true))
+        return NULL;
     reg->read_only = true; /* seal: shared Tier-2 registry is read-only during resolve */
     return reg;
 }

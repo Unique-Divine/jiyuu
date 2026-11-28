@@ -286,6 +286,10 @@ extern _Atomic uint64_t cbm_py_module_class_binds;
 extern _Atomic uint64_t cbm_py_module_class_bind_visits;
 extern _Atomic uint64_t cbm_py_wildcard_invalidations;
 extern _Atomic uint64_t cbm_py_wildcard_invalidation_visits;
+/* Namespace tables built by both python_namespace.rs and the C reference
+ * kept for comparison, and how many of them differed. */
+extern _Atomic uint64_t cbm_py_namespace_parity_builds;
+extern _Atomic uint64_t cbm_py_namespace_parity_mismatches;
 /* -1 disables; zero fails until reset; positive counts down attempts. */
 void cbm_py_test_module_scratch_fail_after(int successful_allocations);
 void cbm_py_test_module_prefix_fail_after(int successful_allocations);
