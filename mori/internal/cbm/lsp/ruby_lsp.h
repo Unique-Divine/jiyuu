@@ -6,46 +6,7 @@
 #include "type_registry.h"
 #include "../cbm.h"
 
-/* Ruby mixin kinds. Lookup order for an instance method on class C:
- *   prepended modules (last prepended first) → C's own methods →
- *   included modules (last included first) → superclass chain.
- * `extend` adds a module's instance methods to C's singleton (class-side). */
-typedef enum {
-    RUBY_MIXIN_INCLUDE = 0,
-    RUBY_MIXIN_PREPEND,
-    RUBY_MIXIN_EXTEND,
-} RubyMixinKind;
-
-/* One class/module discovered in the file (or, cross-file, in the project).
- * `path` is the dotted constant path used ONLY for constant lookup ("Admin.User"
- * for both `module Admin; class User` and `class Admin::User`). `qn` is the
- * graph QN built exactly the way the structural extractor builds it: each
- * declaration's raw name text appended to the enclosing class QN (or the
- * module QN at top level), so a compact `class Admin::User` yields
- * "<module_qn>.Admin::User" while the lexically nested form yields
- * "<module_qn>.Admin.User". Emitted rows must carry the extractor spelling
- * or the pipeline's exact-name join silently drops them. `superclass_qn` is
- * resolved against the class table + stdlib after collection; NULL when
- * unknown. */
-typedef struct {
-    const char *path;
-    const char *qn;
-    const char *superclass_ref; /* raw dotted superclass spelling, or NULL */
-    const char *superclass_qn;  /* resolved QN (table/stdlib), or NULL */
-    bool is_module;             /* `module` (mixin source) vs `class` */
-    /* Method-lookup visit marks: the stamp of the last walk that searched
-     * this class on the instance / singleton side (ruby_walk_seen). */
-    unsigned int seen_instance;
-    unsigned int seen_singleton;
-} RubyClassInfo;
-
-/* One `include`/`prepend`/`extend` record: owner class QN → module ref. */
-typedef struct {
-    const char *owner_qn;   /* class/module whose body held the call */
-    const char *module_ref; /* raw dotted module spelling */
-    const char *module_qn;  /* resolved QN, or NULL */
-    RubyMixinKind kind;
-} RubyMixinInfo;
+typedef struct RubyAncestry RubyAncestry;
 
 /* One inferred instance-variable type: (class QN, @name) → type QN.
  * `conflicted` latches when two assignments disagree — lookup then returns
@@ -65,7 +26,7 @@ typedef struct {
  *     resolve through the lexical nesting outward (A::B sees A's constants
  *     before top-level ones). `nesting` tracks the current dotted path.
  *   - Inheritance is `class C < Base`; mixins arrive via include/prepend/
- *     extend and participate in method lookup (see RubyMixinKind).
+ *     extend and participate in method lookup.
  *   - `Foo.new` constructs a Foo and dispatches to Foo#initialize.
  *   - `def m` defines an instance method; `def self.m` a singleton (class)
  *     method. Singleton methods are registered under the receiver key
@@ -88,15 +49,7 @@ typedef struct {
      * [A::B] only, so A's constants are NOT probed. */
     const char *nesting;
 
-    /* Class/module table (pass 1). */
-    RubyClassInfo *classes;
-    int class_count;
-    int class_cap;
-
-    /* Mixin table (pass 1). */
-    RubyMixinInfo *mixins;
-    int mixin_count;
-    int mixin_cap;
+    RubyAncestry *ancestry;
 
     /* Instance-variable type table (pass 1). */
     RubyIvarInfo *ivars;
@@ -133,33 +86,14 @@ typedef struct {
     int eval_depth;
     int walk_depth;
 
-    /* Stamp of the current method-lookup walk; each walk takes a fresh one
-     * so marks left by earlier walks never match. */
-    unsigned int lookup_stamp;
-
     /* Debug mode (CBM_LSP_DEBUG env). */
     bool debug;
 } RubyLSPContext;
 
-/* Initialize a RubyLSPContext for processing one file. */
-void ruby_lsp_init(RubyLSPContext *ctx, CBMArena *arena, const char *source, int source_len,
-                   const CBMTypeRegistry *registry, const char *module_qn,
-                   CBMResolvedCallArray *out);
-
 /* Resolve a dotted constant path (e.g. "Foo", "A.B") against the class
  * table using the current lexical nesting, then the stdlib. Returns the
- * resolved QN or NULL. */
+ * resolved QN or NULL. Borrowed until the ancestry is freed. */
 const char *ruby_resolve_constant(RubyLSPContext *ctx, const char *path);
-
-/* Look up an instance method on a class, walking prepends → own → includes →
- * superclass chain. Returns the resolved CBMRegisteredFunc or NULL. */
-const CBMRegisteredFunc *ruby_lookup_instance_method(RubyLSPContext *ctx, const char *class_qn,
-                                                     const char *method_name);
-
-/* Look up a singleton (class-side) method: own singleton methods →
- * `extend`ed modules' instance methods → superclass singleton chain. */
-const CBMRegisteredFunc *ruby_lookup_singleton_method(RubyLSPContext *ctx, const char *class_qn,
-                                                      const char *method_name);
 
 /* Evaluate a Ruby expression's type. May return CBM_TYPE_UNKNOWN. */
 const CBMType *ruby_eval_expr_type(RubyLSPContext *ctx, TSNode node);
