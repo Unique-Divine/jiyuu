@@ -2807,7 +2807,7 @@ fn unsupported_syntax_and_supported_storage_errors_are_distinct() {
 }
 
 #[test]
-fn graphql_field_extraction_matches_c_with_escaped_schema_text() {
+fn graphql_field_extraction_preserves_escaped_schema_text() {
     fn index(backend: Option<&str>) -> (Vec<(String, String)>, String) {
         let fixture = Fixture::new();
         let repo = fixture.0.join("schema");
@@ -2868,11 +2868,9 @@ extend type Query {
         (fields, logs)
     }
 
-    let (native, native_logs) = index(Some("c"));
     let (default, default_logs) = index(None);
     let (rust, rust_logs) = index(Some("rust"));
-    assert_eq!(default, native);
-    assert_eq!(rust, native);
+    assert_eq!(rust, default);
     assert_eq!(
         rust.iter().map(|row| row.0.as_str()).collect::<Vec<_>>(),
         ["cafe", "later", "old", "schema.graphqls"]
@@ -2885,14 +2883,12 @@ extend type Query {
     assert_eq!(module["graphql_schema_query"], "Query");
     assert_eq!(module["graphql_schema_mutation"], "Mutation");
     let field_marker = "extract.graphql_field_spans";
-    assert!(!native_logs.contains(field_marker), "{native_logs}");
     assert!(default_logs.contains(field_marker), "{default_logs}");
     assert!(rust_logs.contains(field_marker), "{rust_logs}");
     for marker in [
         "extract.graphql_schema_roots",
         "extract.graphql_parse_input",
     ] {
-        assert!(!native_logs.contains(marker), "{native_logs}");
         assert!(!default_logs.contains(marker), "{default_logs}");
         assert!(rust_logs.contains(marker), "{rust_logs}");
     }

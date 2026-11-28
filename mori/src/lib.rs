@@ -260,15 +260,12 @@ pub use staged_graph::native::register as mori_register_staged_graph_writer;
 #[path = "pipeline/index_manifest.rs"]
 mod index_manifest;
 
-#[cfg(feature = "c-backend")]
+#[cfg(feature = "native-engine-abi")]
 #[path = "../internal/cbm/graphql_extract.rs"]
 mod graphql_extract;
 
 #[cfg(feature = "c-backend")]
-pub use graphql_extract::{
-    register as mori_register_graphql_extractor,
-    register_field as mori_register_graphql_field_extractor,
-};
+pub use graphql_extract::register as mori_register_graphql_extractor;
 
 #[cfg(any(feature = "native-engine-abi", test))]
 #[path = "../internal/cbm/lsp/go_cross.rs"]

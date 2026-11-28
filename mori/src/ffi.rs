@@ -270,11 +270,10 @@ pub unsafe extern "C" fn main(argc: c_int, argv: *mut *mut c_char) -> c_int {
     // stays valid for the process lifetime, including each worker's own main.
     unsafe {
         jiyuu_mori::mori_register_graphql_callbacks();
-        let graphql_extract = std::env::var_os("MORI_IMPL_GRAPHQL_EXTRACT");
-        if graphql_extract.as_deref() == Some(OsStr::new("rust")) {
+        if std::env::var_os("MORI_IMPL_GRAPHQL_EXTRACT").as_deref()
+            == Some(OsStr::new("rust"))
+        {
             jiyuu_mori::mori_register_graphql_extractor();
-        } else if graphql_extract.as_deref() != Some(OsStr::new("c")) {
-            jiyuu_mori::mori_register_graphql_field_extractor();
         }
         #[cfg(unix)]
         jiyuu_mori::mori_register_staged_graph_writer();

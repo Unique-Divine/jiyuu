@@ -9,9 +9,6 @@ use std::process::Command;
 use rusqlite::{Connection, OpenFlags};
 use serde_json::{Value, json};
 
-const SELECTORS: &[(&str, &str)] =
-    &[("MORI_IMPL_GRAPHQL_EXTRACT", "extract.graphql_field_spans")];
-
 struct Fixture(PathBuf);
 
 impl Fixture {
@@ -101,15 +98,11 @@ impl Fixture {
                 .create(self.0.join(&dir))
                 .expect("create isolated runtime paths");
         }
-        let mut command = self.command(side);
-        if side == "c" {
-            for (selector, _) in SELECTORS {
-                command.env(selector, "c");
-            }
-        }
         let arguments =
             json!({"repo_path": self.0.join("repo"), "name": "mixed"});
-        let output = command
+        let output = self
+            .command(side)
+            .env("MORI_IMPL_GRAPHQL_EXTRACT", side)
             .args(["cli", "--quiet", "index_repository", &arguments.to_string()])
             .output()
             .expect("index mixed fixture");
@@ -207,12 +200,10 @@ fn mixed_language_extraction_matches_native_graph_rows() {
     let ts_imports = "msg=extract.ts_static_import implementation=rust";
     assert!(native_logs.contains(ts_imports), "{native_logs}");
     assert!(rust_logs.contains(ts_imports), "{rust_logs}");
-    for (_, event) in SELECTORS {
-        let marker = format!("msg={event} implementation=rust");
-        assert!(
-            !native_logs.contains(&marker),
-            "unexpected native witness {marker}"
-        );
-        assert!(rust_logs.contains(&marker), "missing Rust witness {marker}");
-    }
+    let graphql_fields = "msg=extract.graphql_field_spans implementation=rust";
+    assert!(native_logs.contains(graphql_fields), "{native_logs}");
+    assert!(rust_logs.contains(graphql_fields), "{rust_logs}");
+    let graphql_roots = "msg=extract.graphql_schema_roots implementation=rust";
+    assert!(!native_logs.contains(graphql_roots), "{native_logs}");
+    assert!(rust_logs.contains(graphql_roots), "{rust_logs}");
 }

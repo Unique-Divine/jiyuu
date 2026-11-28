@@ -526,10 +526,9 @@ The log event `cross_repo.recovery_driver` identifies the backend.
 
 ### GraphQL SDL Extraction
 
-Rust reads GraphQL field spans by default in the linked daemon. Set
-`MORI_IMPL_GRAPHQL_EXTRACT=c` to compare with the C extractor. Set
-`MORI_IMPL_GRAPHQL_EXTRACT=rust` to also select Rust for operation roots and
-parser input escape masking. The worker logs record which callbacks ran.
+Rust reads GraphQL field spans. Set `MORI_IMPL_GRAPHQL_EXTRACT=rust` when
+starting the linked daemon to also use Rust for operation roots and parser
+input escape masking. The worker logs record which extractors ran.
 
 ### Markdown Section Extraction
 
