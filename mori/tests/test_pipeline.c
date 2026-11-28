@@ -20413,6 +20413,381 @@ TEST(testdetect_is_test_function) {
     PASS();
 }
 
+/* ── TESTS pass regression cases (test_edges.rs) ── */
+
+/* Fingerprint sorted graph rows and test detection verdicts. */
+#define PT_FNV_SEED UINT64_C(14695981039346656037)
+
+static uint64_t pt_fnv(uint64_t hash, const void *data, size_t size) {
+    const unsigned char *bytes = data;
+    for (size_t i = 0; i < size; i++) {
+        hash = (hash ^ bytes[i]) * UINT64_C(1099511628211);
+    }
+    return hash;
+}
+
+/* A fixed-seed generator so every run builds the same graphs. */
+static uint32_t pt_next(uint32_t *state) {
+    *state = *state * 1664525U + 1013904223U;
+    return *state >> 8;
+}
+
+/* Path and name pieces that hit every branch of the test rules: prefixes,
+ * suffixes, markers in the middle, leading and nested test directories. */
+static const char *const pt_path_pieces[] = {
+    "a",      "test",     "tests",      "_test",    ".go",  "test_",  ".py",    "/",
+    ".test.", ".spec.",   "ts",         "tsx",      "js",   "Test",   ".java",  "__tests__",
+    "spec",   "_spec.rb", "Spec.scala", ".kt",      ".cs",  ".php",   ".lua",   ".rs",
+    ".cpp",   "x",        "_test.go",   ".test.ts", "Spec", "/test/", "/spec/", "tests/",
+};
+static const char *const pt_name_pieces[] = {
+    "Test",  "test", "Benchmark", "Example", "_",     "A",   "a", "it",  "describe", "before",
+    "After", "All",  "Each",      "@",       "@test", "set", "X", "Zed", "able",     "ing",
+};
+
+static void pt_random_text(uint32_t *state, const char *const *pieces, int piece_count, char *out,
+                           size_t cap) {
+    int n = 1 + (int)(pt_next(state) % 6);
+    out[0] = '\0';
+    for (int i = 0; i < n; i++) {
+        const char *piece = pieces[pt_next(state) % (uint32_t)piece_count];
+        if (strlen(out) + strlen(piece) + 1 < cap) {
+            strcat(out, piece);
+        }
+    }
+}
+
+/* Hand-picked verdicts of the test rules, then a digest of their verdicts on
+ * generated paths, names, nodes and callers. */
+TEST(testdetect_rules_regression) {
+    static const struct {
+        const char *path;
+        bool test;
+    } paths[] = {
+        {"", false},
+        {"foo_test.go", true},
+        {"test_handler.py", true},
+        {"handler.test.js", true},
+        {"Component.spec.tsx", true},
+        {"OrderSpec.scala", true},
+        {"__tests__/Component.js", true},
+        {"tests/test_main.py", true},
+        {"spec/handler_spec.rb", true},
+        {"src/tests", false},
+        {"contest.go", false},
+        {"latest.py", false},
+        {"testdata/x.go", false},
+        {"dir/mytest_x.go", false},
+        {"/foo_test.go", true},
+        {"x_test.go_test.go", true},
+    };
+    for (size_t i = 0; i < sizeof(paths) / sizeof(paths[0]); i++) {
+        ASSERT_EQ(cbm_is_test_path(paths[i].path), paths[i].test);
+    }
+    static const struct {
+        const char *name;
+        bool test;
+    } names[] = {
+        {"", false},         {"Test", true},          {"TestCreate", true}, {"Testable", false},
+        {"Benchmark", true}, {"Benchmarking", false}, {"Example", true},    {"ExampleUse", true},
+        {"Examples", false}, {"test", true},          {"tests", false},     {"testing", false},
+        {"testX", true},     {"test_", true},         {"it", true},         {"its", false},
+        {"@test", true},     {"@testset", true},      {"@tests", false},    {"beforeAll", true},
+        {"afterEach", true}, {"describe", true},      {"Describe", false},
+    };
+    for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
+        ASSERT_EQ(cbm_is_test_func_name(names[i].name), names[i].test);
+    }
+    ASSERT_FALSE(cbm_is_test_path(NULL));
+    ASSERT_FALSE(cbm_is_test_func_name(NULL));
+    ASSERT_FALSE(cbm_node_is_test(NULL));
+
+    static const struct {
+        const char *props;
+        bool test;
+    } props[] = {
+        {"{}", false},
+        {"{\"is_test\":true}", true},
+        {"{\"is_test\": true}", false},
+        {"{\"a\":1,\"is_test\":true}", true},
+        {"{\"is_test\":false}", false},
+    };
+    cbm_gbuf_node_t node = {.id = 1, .label = "Function", .name = "f"};
+    for (size_t i = 0; i < sizeof(props) / sizeof(props[0]); i++) {
+        node.properties_json = (char *)props[i].props;
+        ASSERT_EQ(cbm_node_is_test(&node), props[i].test);
+    }
+    node.properties_json = NULL;
+    ASSERT_FALSE(cbm_node_is_test(&node));
+
+    uint32_t state = 0x7e575eedU;
+    char text[CBM_SZ_256];
+    uint64_t digest = PT_FNV_SEED;
+    for (int t = 0; t < 20000; t++) {
+        pt_random_text(&state, pt_path_pieces,
+                       (int)(sizeof(pt_path_pieces) / sizeof(pt_path_pieces[0])), text,
+                       sizeof(text));
+        unsigned char verdicts[3];
+        verdicts[0] = cbm_is_test_path(text);
+        node.properties_json = (char *)props[pt_next(&state) % 5].props;
+        CBMLanguage lang = (CBMLanguage)(pt_next(&state) % CBM_LANG_COUNT);
+        verdicts[1] = cbm_pipeline_caller_is_test(&node, text, lang);
+        pt_random_text(&state, pt_name_pieces,
+                       (int)(sizeof(pt_name_pieces) / sizeof(pt_name_pieces[0])), text,
+                       sizeof(text));
+        verdicts[2] = cbm_is_test_func_name(text);
+        digest = pt_fnv(digest, verdicts, sizeof(verdicts));
+    }
+    ASSERT_EQ(digest, UINT64_C(0x3784aec1c03a9877));
+    PASS();
+}
+
+#define PT_PROJECT "pt-proj"
+
+static void pt_file(cbm_gbuf_t *gb, const char *path) {
+    char *qn = cbm_pipeline_fqn_compute(PT_PROJECT, path, "__file__");
+    const char *slash = strrchr(path, '/');
+    cbm_gbuf_upsert_node(gb, "File", slash ? slash + 1 : path, qn, path, 1, 1, "{}");
+    free(qn);
+}
+
+static int64_t pt_def(cbm_gbuf_t *gb, const char *label, const char *name, const char *qn,
+                      const char *path, const char *props) {
+    return cbm_gbuf_upsert_node(gb, label, name, qn, path, 1, 2, props);
+}
+
+/* The fixture: File nodes for test files with and without production
+ * counterparts, Go/JS/Python tests that call production and test code,
+ * Python closures and test-local classes inside test functions, helpers
+ * nested in non-test functions, a scope that leaves the file, a qualified
+ * name past the scope limit, then a generated tangle of calls. */
+static void pt_build(cbm_gbuf_t *gb, uint32_t seed) {
+    static const char *const files[] = {
+        "pkg/foo.go",
+        "pkg/foo_test.go",
+        "a/test_mod.py",
+        "a/mod.py",
+        "src/x.test.ts",
+        "src/x.ts",
+        "src/y.spec.tsx",
+        "src/y.tsx",
+        "tests/util.go",
+        "OrderTest.java",
+        "Order.java",
+        "spec/m_spec.rb",
+        "/foo_test.go",
+        "foo.go",
+        "x_test.go_test.go",
+        "test_.py",
+        ".py",
+        "lib/__tests__/c.js",
+        "lib/c.js",
+        "a.test.b.spec.js",
+        "a.b.spec.js",
+        "app/tests/test_deep.py",
+        "app/tests/deep.py",
+        "orphan_test.go",
+    };
+    const int file_count = (int)(sizeof(files) / sizeof(files[0]));
+    for (int i = 0; i < file_count; i++) {
+        pt_file(gb, files[i]);
+    }
+
+    int64_t prod = pt_def(gb, "Function", "Run", "pt.pkg.Run", "pkg/foo.go", "{}");
+    int64_t prod_py = pt_def(gb, "Function", "work", "pt.a.mod.work", "a/mod.py", "{}");
+    int64_t marked =
+        pt_def(gb, "Function", "fixture", "pt.pkg.fixture", "pkg/foo.go", "{\"is_test\":true}");
+    int64_t go_test = pt_def(gb, "Function", "TestRun", "pt.pkg.TestRun", "pkg/foo_test.go", "{}");
+    int64_t go_helper = pt_def(gb, "Function", "setup", "pt.pkg.setup", "pkg/foo_test.go", "{}");
+    int64_t js_it = pt_def(gb, "Function", "it", "pt.src.x.it", "src/x.test.ts", "{}");
+    int64_t outer =
+        pt_def(gb, "Function", "test_outer", "pt.a.test_mod.test_outer", "a/test_mod.py", "{}");
+    int64_t inner =
+        pt_def(gb, "Function", "inner", "pt.a.test_mod.test_outer.inner", "a/test_mod.py", "{}");
+    int64_t deeper = pt_def(gb, "Method", "deeper", "pt.a.test_mod.test_outer.inner.K.deeper",
+                            "a/test_mod.py", "{}");
+    int64_t klass =
+        pt_def(gb, "Class", "Local", "pt.a.test_mod.test_outer.Local", "a/test_mod.py", "{}");
+    int64_t plain = pt_def(gb, "Function", "helper", "pt.a.test_mod.helper", "a/test_mod.py", "{}");
+    int64_t nested =
+        pt_def(gb, "Function", "nested", "pt.a.test_mod.helper.nested", "a/test_mod.py", "{}");
+    int64_t cross_outer =
+        pt_def(gb, "Function", "test_cross", "pt.a.test_mod.test_cross", "a/mod.py", "{}");
+    int64_t cross_inner =
+        pt_def(gb, "Function", "inner", "pt.a.test_mod.test_cross.inner", "a/test_mod.py", "{}");
+    int64_t go_closure =
+        pt_def(gb, "Function", "inner", "pt.pkg.TestRun.inner", "pkg/foo_test.go", "{}");
+    char long_qn[CBM_SZ_1K];
+    memset(long_qn, 0, sizeof(long_qn));
+    strcpy(long_qn, "pt.a.test_mod.test_outer.");
+    while (strlen(long_qn) < 600) {
+        strcat(long_qn, "x.");
+    }
+    strcat(long_qn, "inner");
+    int64_t too_long = pt_def(gb, "Function", "inner", long_qn, "a/test_mod.py", "{}");
+    int64_t no_name =
+        pt_def(gb, "Function", "", "pt.a.test_mod.test_outer.anon", "a/test_mod.py", "{}");
+
+    const int64_t sources[] = {go_test,    go_helper, js_it,   outer,  inner,
+                               deeper,     klass,     plain,   nested, cross_inner,
+                               go_closure, too_long,  no_name, marked, cross_outer};
+    const int64_t targets[] = {prod, prod_py, marked, go_helper, outer};
+    for (size_t s = 0; s < sizeof(sources) / sizeof(sources[0]); s++) {
+        for (size_t t = 0; t < sizeof(targets) / sizeof(targets[0]); t++) {
+            if (sources[s] != targets[t]) {
+                cbm_gbuf_insert_edge(gb, sources[s], targets[t], "CALLS", "{}");
+            }
+        }
+    }
+    /* A dangling CALLS edge: its target was never created. */
+    cbm_gbuf_insert_edge(gb, go_test, 999999, "CALLS", "{}");
+
+    static const char *const labels[] = {"Function", "Method", "Class", "Variable"};
+    static const char *const props[] = {"{}", "{\"is_test\":true}", "{\"is_test\":false}"};
+    uint32_t state = seed;
+    enum { PT_GEN_NODES = 160, PT_GEN_EDGES = 900 };
+    int64_t ids[PT_GEN_NODES];
+    char name[CBM_SZ_128];
+    char qn[CBM_SZ_512];
+    for (int i = 0; i < PT_GEN_NODES; i++) {
+        pt_random_text(&state, pt_name_pieces,
+                       (int)(sizeof(pt_name_pieces) / sizeof(pt_name_pieces[0])), name,
+                       sizeof(name));
+        const char *file = files[pt_next(&state) % (uint32_t)file_count];
+        /* Some generated defs nest under the fixed Python test scopes. */
+        uint32_t scope = pt_next(&state) % 4;
+        const char *prefix = scope == 0   ? "pt.a.test_mod.test_outer"
+                             : scope == 1 ? "pt.a.test_mod.helper"
+                                          : "pt.gen";
+        snprintf(qn, sizeof(qn), "%s.%s_%d", prefix, name, i);
+        const char *label = labels[pt_next(&state) % 4];
+        const char *properties = props[pt_next(&state) % 3];
+        ids[i] = pt_def(gb, label, name, qn, file, properties);
+    }
+    for (int e = 0; e < PT_GEN_EDGES; e++) {
+        int64_t a = ids[pt_next(&state) % PT_GEN_NODES];
+        int64_t b = ids[pt_next(&state) % PT_GEN_NODES];
+        cbm_gbuf_insert_edge(gb, a, b, pt_next(&state) % 5 == 0 ? "USAGE" : "CALLS", "{}");
+    }
+}
+
+typedef struct {
+    char **lines;
+    int count;
+    int cap;
+} pt_lines_t;
+
+static void pt_add_line(pt_lines_t *lines, const char *line) {
+    if (lines->count == lines->cap) {
+        lines->cap = lines->cap ? lines->cap * 2 : 256;
+        lines->lines = realloc(lines->lines, (size_t)lines->cap * sizeof(char *));
+    }
+    lines->lines[lines->count++] = strdup(line);
+}
+
+static void pt_collect_edge(const cbm_gbuf_edge_t *e, void *data) {
+    char line[CBM_SZ_256];
+    snprintf(line, sizeof(line), "%s %lld %lld %s", e->type, (long long)e->source_id,
+             (long long)e->target_id, e->properties_json ? e->properties_json : "(null)");
+    pt_add_line(data, line);
+}
+
+static void pt_collect_node(const cbm_gbuf_node_t *n, void *data) {
+    char line[2048];
+    snprintf(line, sizeof(line), "%lld %s %s %s %s %d %d %s", (long long)n->id,
+             n->label, n->name, n->qualified_name, n->file_path, n->start_line, n->end_line,
+             n->properties_json);
+    pt_add_line(data, line);
+}
+
+static int pt_cmp_line(const void *a, const void *b) {
+    return strcmp(*(char *const *)a, *(char *const *)b);
+}
+
+static void pt_edges(const cbm_gbuf_t *gb, pt_lines_t *out) {
+    memset(out, 0, sizeof(*out));
+    cbm_gbuf_foreach_edge(gb, pt_collect_edge, out);
+    qsort(out->lines, (size_t)out->count, sizeof(char *), pt_cmp_line);
+}
+
+static void pt_nodes(const cbm_gbuf_t *gb, pt_lines_t *out) {
+    memset(out, 0, sizeof(*out));
+    cbm_gbuf_foreach_node(gb, pt_collect_node, out);
+    qsort(out->lines, (size_t)out->count, sizeof(char *), pt_cmp_line);
+}
+
+static uint64_t pt_lines_digest(const pt_lines_t *lines) {
+    uint64_t digest = PT_FNV_SEED;
+    for (int i = 0; i < lines->count; i++) {
+        digest = pt_fnv(digest, lines->lines[i], strlen(lines->lines[i]) + 1);
+    }
+    return digest;
+}
+
+static void pt_lines_free(pt_lines_t *lines) {
+    for (int i = 0; i < lines->count; i++) {
+        free(lines->lines[i]);
+    }
+    free(lines->lines);
+}
+
+static int pt_count_prefix(const pt_lines_t *lines, const char *prefix) {
+    int n = 0;
+    for (int i = 0; i < lines->count; i++) {
+        n += strncmp(lines->lines[i], prefix, strlen(prefix)) == 0;
+    }
+    return n;
+}
+
+/* Sorted node and edge rows captured from the C pass on each seed. */
+TEST(tests_pass_regression) {
+    static const struct {
+        uint64_t node_digest;
+        int edge_count;
+        uint64_t edge_digest;
+    } expected[] = {
+        {UINT64_C(0x7dd94c0dacd550f6), 990, UINT64_C(0xf0fe86aa53748d82)},
+        {UINT64_C(0x8b0abadb84cc7b3a), 988, UINT64_C(0x4b5bef88e413e505)},
+        {UINT64_C(0x81f70943999c5d0f), 994, UINT64_C(0x076f87d4152340e8)},
+        {UINT64_C(0x8066e5551f9e0542), 991, UINT64_C(0x9cd3ec89042d9786)},
+        {UINT64_C(0xf1e6133e03941673), 993, UINT64_C(0xe37cc9fb2ba9c84c)},
+        {UINT64_C(0x4e4bf86c0d228b4e), 990, UINT64_C(0xc8c210102331eece)},
+        {UINT64_C(0x914c9f48413aba9a), 985, UINT64_C(0xad47924b73929715)},
+        {UINT64_C(0xa481182ebf963dcd), 999, UINT64_C(0x89d5a3acf575ced8)},
+        {UINT64_C(0xee0129794492d12d), 992, UINT64_C(0x1f6764de5c08fe94)},
+        {UINT64_C(0x85b37f3e9a256909), 1007, UINT64_C(0x9785cc4c2c75c572)},
+        {UINT64_C(0x1ca97939c3c3e052), 996, UINT64_C(0x6cc06dee1489dd15)},
+        {UINT64_C(0x52aa657e17b36418), 1004, UINT64_C(0xe7822ceb8f1614b3)},
+    };
+    for (size_t i = 0; i < sizeof(expected) / sizeof(expected[0]); i++) {
+        uint32_t seed = (uint32_t)i + 1;
+        cbm_gbuf_t *graph = cbm_gbuf_new(PT_PROJECT, "/tmp/pt");
+        ASSERT_NOT_NULL(graph);
+        pt_build(graph, seed * 2654435761U);
+        ASSERT_EQ(mori_pipeline_pass_tests(graph, PT_PROJECT), 0);
+
+        pt_lines_t nodes;
+        pt_lines_t edges;
+        pt_nodes(graph, &nodes);
+        pt_edges(graph, &edges);
+        ASSERT_EQ(pt_lines_digest(&nodes), expected[i].node_digest);
+        ASSERT_GT(pt_count_prefix(&edges, "TESTS "), 5);
+        ASSERT_GT(pt_count_prefix(&edges, "TESTS_FILE "), 5);
+        ASSERT_EQ(edges.count, expected[i].edge_count);
+        ASSERT_EQ(pt_lines_digest(&edges), expected[i].edge_digest);
+        pt_lines_free(&nodes);
+        pt_lines_free(&edges);
+        cbm_gbuf_free(graph);
+    }
+
+    cbm_gbuf_t *empty = cbm_gbuf_new(PT_PROJECT, "/tmp/pt");
+    ASSERT_NOT_NULL(empty);
+    ASSERT_EQ(mori_pipeline_pass_tests(empty, PT_PROJECT), 0);
+    ASSERT_EQ(cbm_gbuf_edge_count(empty), 0);
+    cbm_gbuf_free(empty);
+    PASS();
+}
+
 /* ── Implements pass tests (graph buffer based) ────────────────── */
 
 TEST(implements_creates_override) {
@@ -35276,6 +35651,8 @@ SUITE(pipeline) {
     /* Test detection */
     RUN_TEST(testdetect_is_test_file);
     RUN_TEST(testdetect_is_test_function);
+    RUN_TEST(testdetect_rules_regression);
+    RUN_TEST(tests_pass_regression);
     /* Implements pass (graph buffer based) */
     RUN_TEST(implements_creates_override);
     RUN_TEST(implements_no_match);

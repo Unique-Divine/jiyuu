@@ -2484,7 +2484,7 @@ static void predump_ensemble(cbm_pipeline_ctx_t *ctx) {
     cbm_pipeline_pass_ensemble_routing(ctx);
 }
 static void predump_importance(cbm_pipeline_ctx_t *ctx) {
-    cbm_pipeline_pass_importance(ctx);
+    mori_pipeline_pass_importance(ctx->gbuf);
 }
 
 /* Phase boundary for memory attribution. Two instruments, both already in
@@ -4445,7 +4445,7 @@ static int full_tests(cbm_full_build_t *run) {
     struct timespec t;
     cbm_clock_gettime(CLOCK_MONOTONIC, &t);
     CBM_PROF_START(t_tests);
-    int rc = cbm_pipeline_pass_tests(run->ctx, run->files, run->file_count);
+    int rc = mori_pipeline_pass_tests(run->ctx->gbuf, run->ctx->project_name);
     CBM_PROF_END_N("pipeline", "pass_tests", t_tests, run->file_count);
     cbm_log_info("pass.timing", "pass", "tests", "elapsed_ms", itoa_buf((int)elapsed_ms(t)));
     pipeline_phase_mark("tests");
