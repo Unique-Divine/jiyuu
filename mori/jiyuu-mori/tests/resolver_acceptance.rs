@@ -48,6 +48,7 @@ struct Call {
     target: String,
     target_label: String,
     callee: String,
+    edge: String,
 }
 
 fn write_fixtures(
@@ -57,19 +58,33 @@ fn write_fixtures(
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../tests/fixtures/resolver");
     let mut paths = BTreeSet::new();
     let mut calls = BTreeMap::new();
-    for row in EXPECTED.lines().filter(|row| !row.starts_with('#')) {
-        let columns: Vec<_> = row.split('\t').collect();
-        let [path, caller, target, target_label, spans, text, callee] =
-            columns[..]
-        else {
-            panic!("invalid resolver fixture row {row:?}");
-        };
+    let mut write = |path: &'static str| {
         let source = fs::read(fixtures.join(path)).unwrap();
         if paths.insert(path) {
             let destination = repo.join(path);
             fs::create_dir_all(destination.parent().unwrap()).unwrap();
             fs::write(destination, &source).unwrap();
         }
+        source
+    };
+    for row in EXPECTED.lines().filter(|row| !row.starts_with('#')) {
+        let columns: Vec<_> = row.split('\t').collect();
+        // A row with only a path adds a file that no expected call starts in.
+        if let [path] = columns[..] {
+            write(path);
+            continue;
+        }
+        // An optional last column names an edge type other than CALLS.
+        let (columns, edge) = match columns[..] {
+            [.., edge] if columns.len() == 8 => (&columns[..7], edge),
+            _ => (&columns[..], "CALLS"),
+        };
+        let [path, caller, target, target_label, spans, text, callee] =
+            columns[..]
+        else {
+            panic!("invalid resolver fixture row {row:?}");
+        };
+        let source = write(path);
         let module = path.split_once('/').unwrap().0;
         let qualified = |name: &str| {
             if name.is_empty() {
@@ -96,13 +111,29 @@ fn write_fixtures(
                     .count()
             })
             .collect();
+        // `file.py:name` names a target in another file of the fixture.
+        // Other colons belong to the name (Ruby `Admin::User`).
+        let other_file = target
+            .split_once(':')
+            .filter(|(file, _)| Path::new(file).extension().is_some());
+        let (target_file, target) = match other_file {
+            Some((file, name)) => (
+                format!("{module}/{file}"),
+                format!(
+                    "{PROJECT}.{module}.{}.{name}",
+                    file.trim_end_matches(".py").replace('/', ".")
+                ),
+            ),
+            None => (path.to_owned(), qualified(target)),
+        };
         let call = Call {
             caller_file: path.to_owned(),
             caller: qualified(caller),
-            target_file: path.to_owned(),
-            target: qualified(target),
+            target_file,
+            target,
             target_label: target_label.to_owned(),
             callee: callee.to_owned(),
+            edge: edge.to_owned(),
         };
         assert!(calls.insert(call, lines).is_none(), "duplicate row {row:?}");
     }
@@ -174,11 +205,13 @@ fn assert_calls(
             "SELECT caller.file_path, caller.qualified_name, target.file_path,
                     target.qualified_name, target.label,
                     json_extract(edge.properties, '$.callee'),
-                    json_extract(edge.properties, '$.line')
+                    json_extract(edge.properties, '$.line'), edge.type
              FROM edges AS edge
              JOIN nodes AS caller ON caller.id = edge.source_id
              JOIN nodes AS target ON target.id = edge.target_id
-             WHERE edge.type = 'CALLS'",
+             WHERE edge.type = 'CALLS'
+                OR (edge.type = 'CALL_REFERENCE'
+                    AND caller.file_path LIKE '%.py')",
         )
         .unwrap();
     // Both baselines emit the Perl fixture edges in sequential indexing only.
@@ -199,9 +232,12 @@ fn assert_calls(
                 target: row.get(3).unwrap(),
                 target_label: row.get(4).unwrap(),
                 callee: row.get(5).unwrap(),
+                edge: row.get(7).unwrap(),
             };
-            let line = usize::try_from(row.get::<_, i64>(6).unwrap()).unwrap();
-            if let Some(lines) = expected.get(&call) {
+            // CALL_REFERENCE edges carry no line.
+            let line = row.get::<_, Option<i64>>(6).unwrap();
+            let line = line.map(|line| usize::try_from(line).unwrap());
+            if let (Some(line), Some(lines)) = (line, expected.get(&call)) {
                 assert!(
                     lines.contains(&line),
                     "{call:?}: line {line}, expected {lines:?}"
