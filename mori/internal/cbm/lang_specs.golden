@@ -1,0 +1,3157 @@
+lang -1000: grammar_symbols=none conditional_block_types=NULL
+  spec NULL
+lang -2: grammar_symbols=none conditional_block_types=NULL
+  spec NULL
+lang -1: grammar_symbols=none conditional_block_types=NULL
+  spec NULL
+lang 0: grammar_symbols=219 conditional_block_types=NULL
+  language 0
+  function_node_types [function_declaration method_declaration method_elem func_literal]
+  class_node_types [type_spec type_alias type_declaration]
+  field_node_types [field_declaration]
+  module_node_types [source_file]
+  call_node_types [call_expression]
+  import_node_types [import_declaration import]
+  import_from_types [import_declaration import]
+  branching_node_types [if_statement for_statement expression_switch_statement type_switch_statement select_statement expression_case type_case communication_case default_case defer_statement go_statement]
+  variable_node_types [var_declaration const_declaration]
+  assignment_node_types [assignment_statement short_var_declaration]
+  throw_node_types []
+  decorator_node_types []
+  env_access_functions [os.Getenv os.LookupEnv]
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 1: grammar_symbols=274 conditional_block_types=NULL
+  language 1
+  function_node_types [function_definition]
+  class_node_types [class_definition]
+  field_node_types []
+  module_node_types [module]
+  call_node_types [call]
+  import_node_types [import_statement import]
+  import_from_types [import_from_statement future_import_statement]
+  branching_node_types [if_statement for_statement while_statement try_statement except_clause with_statement elif_clause]
+  variable_node_types [assignment augmented_assignment]
+  assignment_node_types [assignment augmented_assignment]
+  throw_node_types [raise_statement]
+  decorator_node_types [decorator]
+  env_access_functions [os.getenv os.environ.get]
+  env_access_member_patterns [os.environ]
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 2: grammar_symbols=269 conditional_block_types=NULL
+  language 2
+  function_node_types [function_declaration generator_function_declaration function_expression arrow_function method_definition]
+  class_node_types [class_declaration class]
+  field_node_types []
+  module_node_types [program]
+  call_node_types [call_expression new_expression]
+  import_node_types [import_statement export_statement import extends require]
+  import_from_types [import_statement export_statement import extends require]
+  branching_node_types [if_statement for_statement for_in_statement while_statement switch_statement switch_case switch_default try_statement catch_clause do_statement]
+  variable_node_types [lexical_declaration variable_declaration]
+  assignment_node_types [assignment_expression augmented_assignment_expression]
+  throw_node_types [throw_statement]
+  decorator_node_types []
+  env_access_functions NULL
+  env_access_member_patterns [process.env]
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 3: grammar_symbols=383 conditional_block_types=NULL
+  language 3
+  function_node_types [function_declaration generator_function_declaration function_expression arrow_function method_definition function_signature]
+  class_node_types [class_declaration class abstract_class_declaration enum_declaration interface_declaration type_alias_declaration internal_module]
+  field_node_types []
+  module_node_types [program]
+  call_node_types [call_expression new_expression]
+  import_node_types [import_statement export_statement import extends require]
+  import_from_types [import_statement export_statement import extends require]
+  branching_node_types [if_statement for_statement for_in_statement while_statement switch_statement switch_case switch_default try_statement catch_clause do_statement]
+  variable_node_types [lexical_declaration variable_declaration]
+  assignment_node_types [assignment_expression augmented_assignment_expression]
+  throw_node_types [throw_statement]
+  decorator_node_types [decorator]
+  env_access_functions NULL
+  env_access_member_patterns [process.env]
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 4: grammar_symbols=404 conditional_block_types=NULL
+  language 4
+  function_node_types [function_declaration generator_function_declaration function_expression arrow_function method_definition function_signature]
+  class_node_types [class_declaration class abstract_class_declaration enum_declaration interface_declaration type_alias_declaration internal_module]
+  field_node_types []
+  module_node_types [program]
+  call_node_types [call_expression new_expression]
+  import_node_types [import_statement export_statement import extends require]
+  import_from_types [import_statement export_statement import extends require]
+  branching_node_types [if_statement for_statement for_in_statement while_statement switch_statement switch_case switch_default try_statement catch_clause do_statement]
+  variable_node_types [lexical_declaration variable_declaration]
+  assignment_node_types [assignment_expression augmented_assignment_expression]
+  throw_node_types [throw_statement]
+  decorator_node_types [decorator]
+  env_access_functions NULL
+  env_access_member_patterns [process.env]
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 5: grammar_symbols=355 conditional_block_types=NULL
+  language 5
+  function_node_types [function_item function_signature_item closure_expression]
+  class_node_types [struct_item enum_item union_item trait_item type_item impl_item]
+  field_node_types [field_declaration]
+  module_node_types [source_file mod_item]
+  call_node_types [call_expression macro_invocation]
+  import_node_types [use_declaration extern_crate_declaration]
+  import_from_types [use_declaration]
+  branching_node_types [if_expression for_expression while_expression loop_expression match_expression match_arm]
+  variable_node_types [static_item const_item]
+  assignment_node_types [assignment_expression compound_assignment_expr]
+  throw_node_types []
+  decorator_node_types [attribute_item]
+  env_access_functions [env::var std::env::var]
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 6: grammar_symbols=321 conditional_block_types=NULL
+  language 6
+  function_node_types [method_declaration constructor_declaration lambda_expression]
+  class_node_types [class_declaration interface_declaration enum_declaration annotation_type_declaration record_declaration module_declaration package_declaration]
+  field_node_types [field_declaration]
+  module_node_types [program]
+  call_node_types [method_invocation object_creation_expression]
+  import_node_types [import_declaration extends import]
+  import_from_types [import_declaration extends import]
+  branching_node_types [if_statement for_statement enhanced_for_statement while_statement switch_expression switch_block_statement_group try_statement catch_clause]
+  variable_node_types [field_declaration local_variable_declaration]
+  assignment_node_types [assignment_expression]
+  throw_node_types [throw_statement]
+  decorator_node_types [marker_annotation annotation]
+  env_access_functions [System.getenv System.getProperty]
+  env_access_member_patterns NULL
+  throws_clause_field "throws"
+  ts_factory true
+  embedded_imports NULL
+lang 7: grammar_symbols=575 conditional_block_types=[preproc_if preproc_ifdef preproc_else preproc_elif preproc_elifdef]
+  language 7
+  function_node_types [function_definition declaration field_declaration template_declaration lambda_expression]
+  class_node_types [class_specifier struct_specifier union_specifier enum_specifier type_definition]
+  field_node_types [field_declaration]
+  module_node_types [translation_unit namespace_definition linkage_specification declaration]
+  call_node_types [call_expression new_expression]
+  import_node_types [preproc_include]
+  import_from_types [preproc_include]
+  branching_node_types [if_statement for_statement for_range_loop while_statement switch_statement case_statement try_statement catch_clause]
+  variable_node_types [declaration]
+  assignment_node_types [assignment_expression]
+  throw_node_types [throw_statement]
+  decorator_node_types []
+  env_access_functions [getenv std::getenv]
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 8: grammar_symbols=533 conditional_block_types=[preproc_if preproc_ifdef preproc_else preproc_elif preproc_elifdef]
+  language 8
+  function_node_types [destructor_declaration local_function_statement function_pointer_type constructor_declaration anonymous_method_expression lambda_expression method_declaration operator_declaration]
+  class_node_types [class_declaration struct_declaration enum_declaration interface_declaration record_declaration type_declaration]
+  field_node_types [field_declaration property_declaration]
+  module_node_types [compilation_unit]
+  call_node_types [invocation_expression object_creation_expression]
+  import_node_types [using_directive namespace_use_declaration using_statement namespace_declaration]
+  import_from_types [using_directive namespace_use_declaration using_statement namespace_declaration]
+  branching_node_types [if_statement for_statement foreach_statement while_statement switch_statement case_switch_label try_statement catch_clause]
+  variable_node_types [field_declaration local_declaration_statement]
+  assignment_node_types [assignment_expression postfix_unary_expression prefix_unary_expression]
+  throw_node_types [throw_statement throw_expression]
+  decorator_node_types [attribute]
+  env_access_functions [Environment.GetEnvironmentVariable]
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 9: grammar_symbols=427 conditional_block_types=NULL
+  language 9
+  function_node_types [function_static_declaration anonymous_function function_definition arrow_function method_declaration]
+  class_node_types [trait_declaration enum_declaration interface_declaration class_declaration]
+  field_node_types []
+  module_node_types [program]
+  call_node_types [member_call_expression scoped_call_expression function_call_expression object_creation_expression nullsafe_member_call_expression]
+  import_node_types [extends include namespace_use_declaration require use_declaration]
+  import_from_types []
+  branching_node_types [if_statement for_statement foreach_statement while_statement switch_statement case_statement try_statement catch_clause]
+  variable_node_types [expression_statement]
+  assignment_node_types [assignment_expression]
+  throw_node_types [throw_expression]
+  decorator_node_types [attribute_group]
+  env_access_functions [getenv env]
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 10: grammar_symbols=143 conditional_block_types=NULL
+  language 10
+  function_node_types [function_declaration function_definition]
+  class_node_types []
+  field_node_types []
+  module_node_types [chunk]
+  call_node_types [function_call]
+  import_node_types [function_call]
+  import_from_types []
+  branching_node_types [if_statement for_statement for_in_statement while_statement repeat_statement]
+  variable_node_types [variable_declaration]
+  assignment_node_types [assignment_statement]
+  throw_node_types []
+  decorator_node_types []
+  env_access_functions [os.getenv]
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 11: grammar_symbols=358 conditional_block_types=NULL
+  language 11
+  function_node_types [function_definition function_declaration lambda_expression]
+  class_node_types [class_definition object_definition trait_definition enum_definition type_definition]
+  field_node_types []
+  module_node_types [compilation_unit]
+  call_node_types [call_expression infix_expression instance_expression]
+  import_node_types [import_declaration extends import using_directive]
+  import_from_types [import_declaration extends import using_directive]
+  branching_node_types [if_expression for_expression while_expression match_expression case_clause try_expression catch_clause]
+  variable_node_types [val_definition var_definition val_declaration var_declaration]
+  assignment_node_types [assignment_expression]
+  throw_node_types [throw_expression]
+  decorator_node_types [annotation]
+  env_access_functions [sys.env System.getenv System.getProperty]
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 12: grammar_symbols=375 conditional_block_types=NULL
+  language 12
+  function_node_types [function_declaration secondary_constructor anonymous_function]
+  class_node_types [class_declaration object_declaration companion_object type_alias]
+  field_node_types []
+  module_node_types [source_file]
+  call_node_types [call_expression]
+  import_node_types [import]
+  import_from_types [import]
+  branching_node_types [if_expression for_statement while_statement when_expression when_entry try_expression catch_block]
+  variable_node_types [property_declaration]
+  assignment_node_types [assignment directly_assignable_expression]
+  throw_node_types [throw_expression]
+  decorator_node_types [annotation]
+  env_access_functions [System.getenv System.getProperty]
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 13: grammar_symbols=351 conditional_block_types=NULL
+  language 13
+  function_node_types [method singleton_method]
+  class_node_types [class module]
+  field_node_types []
+  module_node_types [program]
+  call_node_types [call]
+  import_node_types [call]
+  import_from_types []
+  branching_node_types [if unless while until for case when rescue elsif]
+  variable_node_types [assignment]
+  assignment_node_types [assignment operator_assignment]
+  throw_node_types []
+  decorator_node_types []
+  env_access_functions NULL
+  env_access_member_patterns [ENV]
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 14: grammar_symbols=363 conditional_block_types=[preproc_if preproc_ifdef preproc_else preproc_elif preproc_elifdef]
+  language 14
+  function_node_types [function_definition]
+  class_node_types [struct_specifier enum_specifier union_specifier type_definition]
+  field_node_types [field_declaration]
+  module_node_types [translation_unit]
+  call_node_types [call_expression]
+  import_node_types [preproc_include]
+  import_from_types []
+  branching_node_types [if_statement for_statement while_statement do_statement switch_statement case_statement]
+  variable_node_types [declaration]
+  assignment_node_types [assignment_expression update_expression]
+  throw_node_types []
+  decorator_node_types []
+  env_access_functions [getenv]
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 15: grammar_symbols=280 conditional_block_types=NULL
+  language 15
+  function_node_types [function_definition]
+  class_node_types []
+  field_node_types []
+  module_node_types [program]
+  call_node_types [command]
+  import_node_types [command]
+  import_from_types []
+  branching_node_types [if_statement while_statement for_statement case_statement elif_clause]
+  variable_node_types [variable_assignment]
+  assignment_node_types [variable_assignment]
+  throw_node_types []
+  decorator_node_types []
+  env_access_functions NULL
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 16: grammar_symbols=274 conditional_block_types=NULL
+  language 16
+  function_node_types [function_declaration test_declaration function_signature]
+  class_node_types [struct_declaration enum_declaration union_declaration]
+  field_node_types [container_field]
+  module_node_types [source_file]
+  call_node_types [call_expression builtin_function]
+  import_node_types [builtin_function]
+  import_from_types []
+  branching_node_types [if_statement for_statement while_statement switch_expression]
+  variable_node_types [variable_declaration]
+  assignment_node_types [assignment_expression]
+  throw_node_types []
+  decorator_node_types []
+  env_access_functions [std.os.getenv]
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 17: grammar_symbols=235 conditional_block_types=NULL
+  language 17
+  function_node_types [call anonymous_function]
+  class_node_types []
+  field_node_types []
+  module_node_types [source]
+  call_node_types [call binary_operator]
+  import_node_types [call]
+  import_from_types []
+  branching_node_types [call]
+  variable_node_types [binary_operator]
+  assignment_node_types [binary_operator]
+  throw_node_types []
+  decorator_node_types []
+  env_access_functions [System.get_env]
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 18: grammar_symbols=552 conditional_block_types=NULL
+  language 18
+  function_node_types [function signature bind]
+  class_node_types [class data_type newtype]
+  field_node_types []
+  module_node_types [haskell]
+  call_node_types [infix apply]
+  import_node_types [import instance]
+  import_from_types []
+  branching_node_types [match guards if case do boolean]
+  variable_node_types [function]
+  assignment_node_types [function]
+  throw_node_types []
+  decorator_node_types []
+  env_access_functions [lookupEnv getEnv]
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 19: grammar_symbols=444 conditional_block_types=NULL
+  language 19
+  function_node_types [value_definition constructor_declaration method_definition]
+  class_node_types [type_definition class_definition module_definition exception_definition record_declaration]
+  field_node_types []
+  module_node_types [compilation_unit]
+  call_node_types [application_expression infix_expression method_invocation module_application new_expression]
+  import_node_types [open_module include]
+  import_from_types []
+  branching_node_types [match_expression if_expression match_case]
+  variable_node_types [value_definition]
+  assignment_node_types [value_definition]
+  throw_node_types []
+  decorator_node_types []
+  env_access_functions [Sys.getenv]
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 20: grammar_symbols=588 conditional_block_types=[preproc_if preproc_ifdef preproc_else preproc_elif preproc_elifdef]
+  language 20
+  function_node_types [function_definition method_definition method_declaration]
+  class_node_types [class_interface class_implementation protocol_declaration class_declaration enum_specifier struct_declaration struct_specifier type_definition union_specifier]
+  field_node_types [property_declaration]
+  module_node_types [translation_unit]
+  call_node_types [call_expression message_expression]
+  import_node_types [preproc_import preproc_include]
+  import_from_types []
+  branching_node_types [if_statement for_statement while_statement switch_statement]
+  variable_node_types [declaration]
+  assignment_node_types [assignment_expression]
+  throw_node_types []
+  decorator_node_types []
+  env_access_functions NULL
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 21: grammar_symbols=552 conditional_block_types=NULL
+  language 21
+  function_node_types [function_declaration protocol_function_declaration macro_declaration init_declaration deinit_declaration]
+  class_node_types [class_declaration protocol_declaration struct_declaration enum_declaration]
+  field_node_types [property_declaration]
+  module_node_types [source_file]
+  call_node_types [call_expression constructor_expression macro_invocation]
+  import_node_types [import_declaration import]
+  import_from_types []
+  branching_node_types [if_statement guard_statement for_statement while_statement switch_statement]
+  variable_node_types [property_declaration]
+  assignment_node_types [assignment]
+  throw_node_types [throw_statement]
+  decorator_node_types [attribute]
+  env_access_functions NULL
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 22: grammar_symbols=526 conditional_block_types=NULL
+  language 22
+  function_node_types [function_signature method_signature lambda_expression]
+  class_node_types [class_definition enum_declaration mixin_declaration extension_declaration type_alias]
+  field_node_types [declaration]
+  module_node_types [program]
+  call_node_types [selector new_expression]
+  import_node_types [import_or_export extends import]
+  import_from_types []
+  branching_node_types [if_statement for_statement while_statement switch_statement]
+  variable_node_types [declaration]
+  assignment_node_types [assignment_expression]
+  throw_node_types [throw_expression]
+  decorator_node_types [annotation]
+  env_access_functions NULL
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 23: grammar_symbols=595 conditional_block_types=NULL
+  language 23
+  function_node_types [subroutine_declaration_statement]
+  class_node_types []
+  field_node_types []
+  module_node_types [source_file]
+  call_node_types [ambiguous_function_call_expression function_call_expression func1op_call_expression method_call_expression]
+  import_node_types [use_statement require_statement require]
+  import_from_types []
+  branching_node_types [if_statement unless_statement for_statement foreach_statement while_statement]
+  variable_node_types [variable_declaration expression_statement]
+  assignment_node_types [assignment_expression]
+  throw_node_types []
+  decorator_node_types []
+  env_access_functions [$ENV]
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 24: grammar_symbols=254 conditional_block_types=NULL
+  language 24
+  function_node_types [function_definition function_declaration]
+  class_node_types [class_definition]
+  field_node_types []
+  module_node_types [source_file]
+  call_node_types [function_call juxt_function_call]
+  import_node_types [groovy_import extends import]
+  import_from_types []
+  branching_node_types [if_statement for_statement while_statement switch_statement]
+  variable_node_types [declaration]
+  assignment_node_types [assignment]
+  throw_node_types [throw_statement]
+  decorator_node_types [annotation]
+  env_access_functions NULL
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 25: grammar_symbols=338 conditional_block_types=NULL
+  language 25
+  function_node_types [function_clause]
+  class_node_types [type_alias]
+  field_node_types []
+  module_node_types [source_file]
+  call_node_types [call]
+  import_node_types [module_attribute import include]
+  import_from_types []
+  branching_node_types [if_expression case_expression receive_expression]
+  variable_node_types [pp_define record_decl]
+  assignment_node_types [match_expression]
+  throw_node_types [call]
+  decorator_node_types []
+  env_access_functions NULL
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 26: grammar_symbols=135 conditional_block_types=NULL
+  language 26
+  function_node_types [function_definition]
+  class_node_types []
+  field_node_types []
+  module_node_types [program]
+  call_node_types [call]
+  import_node_types [call]
+  import_from_types []
+  branching_node_types [if_statement for_statement while_statement]
+  variable_node_types [binary_operator]
+  assignment_node_types [binary_operator]
+  throw_node_types []
+  decorator_node_types []
+  env_access_functions [Sys.getenv]
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 27: grammar_symbols=41 conditional_block_types=NULL
+  language 27
+  function_node_types []
+  class_node_types []
+  field_node_types []
+  module_node_types [document]
+  call_node_types []
+  import_node_types []
+  import_from_types []
+  branching_node_types []
+  variable_node_types []
+  assignment_node_types []
+  throw_node_types []
+  decorator_node_types []
+  env_access_functions NULL
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports "script_element" "raw_text" -> 2;
+lang 28: grammar_symbols=151 conditional_block_types=NULL
+  language 28
+  function_node_types []
+  class_node_types []
+  field_node_types []
+  module_node_types [stylesheet]
+  call_node_types [call_expression]
+  import_node_types [import_statement]
+  import_from_types []
+  branching_node_types []
+  variable_node_types []
+  assignment_node_types []
+  throw_node_types []
+  decorator_node_types []
+  env_access_functions NULL
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 29: grammar_symbols=179 conditional_block_types=NULL
+  language 29
+  function_node_types [mixin_statement function_statement]
+  class_node_types []
+  field_node_types []
+  module_node_types [stylesheet]
+  call_node_types [call_expression include_statement]
+  import_node_types [import_statement use_statement include_statement]
+  import_from_types []
+  branching_node_types [if_statement]
+  variable_node_types [declaration]
+  assignment_node_types []
+  throw_node_types []
+  decorator_node_types []
+  env_access_functions NULL
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 30: grammar_symbols=301 conditional_block_types=NULL
+  language 30
+  function_node_types []
+  class_node_types []
+  field_node_types []
+  module_node_types [stream]
+  call_node_types []
+  import_node_types []
+  import_from_types []
+  branching_node_types []
+  variable_node_types [block_mapping_pair]
+  assignment_node_types []
+  throw_node_types []
+  decorator_node_types []
+  env_access_functions NULL
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 31: grammar_symbols=66 conditional_block_types=NULL
+  language 31
+  function_node_types []
+  class_node_types [table table_array_element]
+  field_node_types []
+  module_node_types [document]
+  call_node_types []
+  import_node_types []
+  import_from_types []
+  branching_node_types []
+  variable_node_types [pair]
+  assignment_node_types []
+  throw_node_types []
+  decorator_node_types []
+  env_access_functions NULL
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 32: grammar_symbols=121 conditional_block_types=NULL
+  language 32
+  function_node_types []
+  class_node_types [block]
+  field_node_types []
+  module_node_types [config_file]
+  call_node_types [function_call]
+  import_node_types []
+  import_from_types []
+  branching_node_types []
+  variable_node_types [attribute]
+  assignment_node_types []
+  throw_node_types []
+  decorator_node_types []
+  env_access_functions NULL
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 33: grammar_symbols=784 conditional_block_types=NULL
+  language 33
+  function_node_types [create_function function_declaration create_procedure]
+  class_node_types [custom_type create_table create_view create_materialized_view]
+  field_node_types [column_definition]
+  module_node_types [program]
+  call_node_types [invocation]
+  import_node_types []
+  import_from_types []
+  branching_node_types [if_statement case_expression]
+  variable_node_types []
+  assignment_node_types []
+  throw_node_types []
+  decorator_node_types []
+  env_access_functions NULL
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 34: grammar_symbols=164 conditional_block_types=NULL
+  language 34
+  function_node_types []
+  class_node_types []
+  field_node_types []
+  module_node_types [source_file]
+  call_node_types []
+  import_node_types []
+  import_from_types []
+  branching_node_types []
+  variable_node_types [env_instruction arg_instruction]
+  assignment_node_types []
+  throw_node_types []
+  decorator_node_types []
+  env_access_functions NULL
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 35: grammar_symbols=73 conditional_block_types=NULL
+  language 35
+  function_node_types [list_lit]
+  class_node_types []
+  field_node_types []
+  module_node_types [source]
+  call_node_types [list_lit]
+  import_node_types []
+  import_from_types []
+  branching_node_types []
+  variable_node_types []
+  assignment_node_types []
+  throw_node_types []
+  decorator_node_types []
+  env_access_functions NULL
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 36: grammar_symbols=451 conditional_block_types=NULL
+  language 36
+  function_node_types [function_declaration value_declaration function_or_value_defn]
+  class_node_types [type_definition exception_definition]
+  field_node_types []
+  module_node_types [file]
+  call_node_types [application_expression]
+  import_node_types [import_decl open_expression instance]
+  import_from_types []
+  branching_node_types [if_expression for_expression while_expression match_expression elif_expression]
+  variable_node_types [value_declaration]
+  assignment_node_types [value_declaration]
+  throw_node_types []
+  decorator_node_types []
+  env_access_functions [Environment.GetEnvironmentVariable]
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 37: grammar_symbols=244 conditional_block_types=NULL
+  language 37
+  function_node_types [function_definition short_function_definition assignment]
+  class_node_types [struct_definition abstract_definition primitive_definition]
+  field_node_types []
+  module_node_types [source_file]
+  call_node_types [call_expression broadcast_call_expression]
+  import_node_types [import_statement using_statement export_statement import]
+  import_from_types []
+  branching_node_types [if_statement for_statement while_statement try_statement]
+  variable_node_types [const_statement assignment]
+  assignment_node_types [assignment compound_assignment_expression]
+  throw_node_types [throw_statement]
+  decorator_node_types []
+  env_access_functions [ENV]
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 38: grammar_symbols=926 conditional_block_types=NULL
+  language 38
+  function_node_types [function_definition function_declaration lambda_expression]
+  class_node_types []
+  field_node_types []
+  module_node_types [script_file]
+  call_node_types [call_expression call command]
+  import_node_types [include]
+  import_from_types []
+  branching_node_types [if_statement for_statement while_statement try_statement]
+  variable_node_types [let_statement]
+  assignment_node_types [let_statement]
+  throw_node_types []
+  decorator_node_types []
+  env_access_functions NULL
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 39: grammar_symbols=108 conditional_block_types=NULL
+  language 39
+  function_node_types [function_expression]
+  class_node_types []
+  field_node_types []
+  module_node_types [source_expression]
+  call_node_types [apply_expression]
+  import_node_types []
+  import_from_types []
+  branching_node_types [if_expression]
+  variable_node_types [binding]
+  assignment_node_types [binding]
+  throw_node_types []
+  decorator_node_types []
+  env_access_functions [builtins.getEnv]
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 40: grammar_symbols=182 conditional_block_types=NULL
+  language 40
+  function_node_types [defun]
+  class_node_types []
+  field_node_types []
+  module_node_types [source]
+  call_node_types [list_lit]
+  import_node_types [with_clause]
+  import_from_types []
+  branching_node_types []
+  variable_node_types []
+  assignment_node_types []
+  throw_node_types []
+  decorator_node_types []
+  env_access_functions NULL
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 41: grammar_symbols=203 conditional_block_types=NULL
+  language 41
+  function_node_types [value_declaration function_declaration]
+  class_node_types [type_declaration type_alias_declaration module_declaration]
+  field_node_types []
+  module_node_types [file]
+  call_node_types [function_call_expr]
+  import_node_types [import]
+  import_from_types []
+  branching_node_types [case_of_expr if_else_expr]
+  variable_node_types []
+  assignment_node_types []
+  throw_node_types []
+  decorator_node_types []
+  env_access_functions NULL
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 42: grammar_symbols=691 conditional_block_types=NULL
+  language 42
+  function_node_types [function subroutine function_statement subroutine_statement]
+  class_node_types [derived_type_definition enum_statement]
+  field_node_types []
+  module_node_types [translation_unit]
+  call_node_types [call_expression subroutine_call]
+  import_node_types [use_statement include_statement extends import import_statement include open_statement preproc_include]
+  import_from_types []
+  branching_node_types [if_statement do_loop_statement where_statement select_case_statement]
+  variable_node_types [variable_declaration]
+  assignment_node_types [assignment_statement]
+  throw_node_types []
+  decorator_node_types []
+  env_access_functions [get_environment_variable]
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 43: grammar_symbols=560 conditional_block_types=[preproc_if preproc_ifdef preproc_else preproc_elif preproc_elifdef]
+  language 43
+  function_node_types [function_definition declaration field_declaration template_declaration lambda_expression]
+  class_node_types [class_specifier struct_specifier union_specifier enum_specifier type_definition]
+  field_node_types [field_declaration]
+  module_node_types [translation_unit namespace_definition linkage_specification declaration]
+  call_node_types [call_expression new_expression]
+  import_node_types [preproc_include]
+  import_from_types [preproc_include]
+  branching_node_types [if_statement for_statement for_range_loop while_statement switch_statement case_statement try_statement catch_clause]
+  variable_node_types [declaration]
+  assignment_node_types [assignment_expression]
+  throw_node_types [throw_statement]
+  decorator_node_types []
+  env_access_functions [getenv std::getenv]
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 44: grammar_symbols=1215 conditional_block_types=NULL
+  language 44
+  function_node_types [program_definition]
+  class_node_types []
+  field_node_types []
+  module_node_types [source_file]
+  call_node_types [call_statement]
+  import_node_types [open_statement use_statement with_clause]
+  import_from_types []
+  branching_node_types [if_statement evaluate_statement perform_statement]
+  variable_node_types [data_description_entry]
+  assignment_node_types []
+  throw_node_types []
+  decorator_node_types []
+  env_access_functions NULL
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 45: grammar_symbols=1231 conditional_block_types=NULL
+  language 45
+  function_node_types [function_declaration task_declaration function_body_declaration function_statement]
+  class_node_types [module_declaration class_declaration interface_declaration package_declaration type_declaration]
+  field_node_types []
+  module_node_types [source_file]
+  call_node_types [system_tf_call subroutine_call function_subroutine_call method_call]
+  import_node_types [extends import package_import_declaration]
+  import_from_types []
+  branching_node_types [conditional_statement case_statement loop_statement]
+  variable_node_types [net_declaration data_declaration]
+  assignment_node_types [blocking_assignment nonblocking_assignment]
+  throw_node_types []
+  decorator_node_types []
+  env_access_functions NULL
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 46: grammar_symbols=82 conditional_block_types=NULL
+  language 46
+  function_node_types [function_definition macro_definition]
+  class_node_types []
+  field_node_types []
+  module_node_types [source_file]
+  call_node_types [list]
+  import_node_types []
+  import_from_types []
+  branching_node_types []
+  variable_node_types []
+  assignment_node_types []
+  throw_node_types []
+  decorator_node_types []
+  env_access_functions NULL
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 47: grammar_symbols=25 conditional_block_types=NULL
+  language 47
+  function_node_types []
+  class_node_types []
+  field_node_types []
+  module_node_types [document]
+  call_node_types []
+  import_node_types []
+  import_from_types []
+  branching_node_types []
+  variable_node_types [pair]
+  assignment_node_types []
+  throw_node_types []
+  decorator_node_types []
+  env_access_functions NULL
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 48: grammar_symbols=143 conditional_block_types=NULL
+  language 48
+  function_node_types []
+  class_node_types [element]
+  field_node_types []
+  module_node_types [document]
+  call_node_types []
+  import_node_types []
+  import_from_types []
+  branching_node_types []
+  variable_node_types []
+  assignment_node_types []
+  throw_node_types []
+  decorator_node_types []
+  env_access_functions NULL
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 49: grammar_symbols=207 conditional_block_types=NULL
+  language 49
+  function_node_types []
+  class_node_types [atx_heading setext_heading]
+  field_node_types []
+  module_node_types [document]
+  call_node_types []
+  import_node_types []
+  import_from_types []
+  branching_node_types []
+  variable_node_types []
+  assignment_node_types []
+  throw_node_types []
+  decorator_node_types []
+  env_access_functions NULL
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 50: grammar_symbols=188 conditional_block_types=NULL
+  language 50
+  function_node_types [rule recipe]
+  class_node_types []
+  field_node_types []
+  module_node_types [makefile]
+  call_node_types [function_call call shell_function]
+  import_node_types [include_directive include]
+  import_from_types []
+  branching_node_types []
+  variable_node_types [variable_assignment]
+  assignment_node_types []
+  throw_node_types []
+  decorator_node_types []
+  env_access_functions NULL
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 51: grammar_symbols=96 conditional_block_types=NULL
+  language 51
+  function_node_types [function_def macro_def]
+  class_node_types []
+  field_node_types []
+  module_node_types [source_file]
+  call_node_types [normal_command]
+  import_node_types [include include_directive]
+  import_from_types []
+  branching_node_types []
+  variable_node_types []
+  assignment_node_types []
+  throw_node_types []
+  decorator_node_types []
+  env_access_functions NULL
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 52: grammar_symbols=119 conditional_block_types=NULL
+  language 52
+  function_node_types [rpc]
+  class_node_types [message enum service]
+  field_node_types [field map_field oneof_field]
+  module_node_types [source_file]
+  call_node_types []
+  import_node_types [import]
+  import_from_types []
+  branching_node_types []
+  variable_node_types []
+  assignment_node_types []
+  throw_node_types []
+  decorator_node_types []
+  env_access_functions NULL
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 53: grammar_symbols=142 conditional_block_types=NULL
+  language 53
+  function_node_types []
+  class_node_types [object_type_definition input_object_type_definition enum_type_definition interface_type_definition union_type_definition scalar_type_definition type_definition object_type_extension]
+  field_node_types [field_definition input_value_definition]
+  module_node_types [document]
+  call_node_types []
+  import_node_types []
+  import_from_types []
+  branching_node_types []
+  variable_node_types []
+  assignment_node_types []
+  throw_node_types []
+  decorator_node_types []
+  env_access_functions NULL
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 54: grammar_symbols=67 conditional_block_types=NULL
+  language 54
+  function_node_types []
+  class_node_types []
+  field_node_types []
+  module_node_types [document]
+  call_node_types []
+  import_node_types []
+  import_from_types []
+  branching_node_types []
+  variable_node_types []
+  assignment_node_types []
+  throw_node_types []
+  decorator_node_types []
+  env_access_functions NULL
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports "script_element" "raw_text" -> 2;
+lang 55: grammar_symbols=118 conditional_block_types=NULL
+  language 55
+  function_node_types []
+  class_node_types []
+  field_node_types []
+  module_node_types [document]
+  call_node_types []
+  import_node_types []
+  import_from_types []
+  branching_node_types [if_statement each_statement await_statement]
+  variable_node_types []
+  assignment_node_types []
+  throw_node_types []
+  decorator_node_types []
+  env_access_functions NULL
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports "script_element" "raw_text" -> 2;
+lang 56: grammar_symbols=78 conditional_block_types=NULL
+  language 56
+  function_node_types [function_expression]
+  class_node_types []
+  field_node_types []
+  module_node_types [source_file]
+  call_node_types [normal_command]
+  import_node_types []
+  import_from_types []
+  branching_node_types [if_statement foreach_statement]
+  variable_node_types [assignment_statement]
+  assignment_node_types [assignment_statement]
+  throw_node_types []
+  decorator_node_types []
+  env_access_functions NULL
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 57: grammar_symbols=410 conditional_block_types=[preproc_if preproc_ifdef preproc_else preproc_elif preproc_elifdef]
+  language 57
+  function_node_types [function_definition]
+  class_node_types [struct_specifier enum_specifier union_specifier type_definition]
+  field_node_types [field_declaration]
+  module_node_types [translation_unit]
+  call_node_types [call_expression]
+  import_node_types [preproc_include]
+  import_from_types []
+  branching_node_types [if_statement for_statement while_statement do_statement switch_statement case_statement]
+  variable_node_types [declaration]
+  assignment_node_types [assignment_expression update_expression]
+  throw_node_types []
+  decorator_node_types []
+  env_access_functions NULL
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 58: grammar_symbols=19 conditional_block_types=NULL
+  language 58
+  function_node_types []
+  class_node_types [section]
+  field_node_types []
+  module_node_types [document]
+  call_node_types []
+  import_node_types []
+  import_from_types []
+  branching_node_types []
+  variable_node_types [setting]
+  assignment_node_types []
+  throw_node_types []
+  decorator_node_types []
+  env_access_functions NULL
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 59: grammar_symbols=229 conditional_block_types=NULL
+  language 59
+  function_node_types [function_definition function_signature]
+  class_node_types [class_definition]
+  field_node_types []
+  module_node_types [source_file]
+  call_node_types [function_call command]
+  import_node_types []
+  import_from_types []
+  branching_node_types [if_statement for_statement while_statement switch_statement try_statement]
+  variable_node_types [assignment]
+  assignment_node_types [assignment]
+  throw_node_types []
+  decorator_node_types []
+  env_access_functions NULL
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 60: grammar_symbols=371 conditional_block_types=NULL
+  language 60
+  function_node_types [def theorem instance abbrev]
+  class_node_types [structure class_inductive inductive]
+  field_node_types []
+  module_node_types [module]
+  call_node_types [apply]
+  import_node_types [import extends instance]
+  import_from_types []
+  branching_node_types [if match do]
+  variable_node_types []
+  assignment_node_types []
+  throw_node_types []
+  decorator_node_types []
+  env_access_functions NULL
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 61: grammar_symbols=142 conditional_block_types=NULL
+  language 61
+  function_node_types [procedure_definition]
+  class_node_types []
+  field_node_types []
+  module_node_types [source_file]
+  call_node_types [call_statement]
+  import_node_types [include_directive]
+  import_from_types []
+  branching_node_types [if_statement repeat_statement do_loop]
+  variable_node_types [declaration_statement]
+  assignment_node_types [substitution_statement]
+  throw_node_types []
+  decorator_node_types []
+  env_access_functions NULL
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 62: grammar_symbols=148 conditional_block_types=NULL
+  language 62
+  function_node_types [function_definition procedure_definition intrinsic_definition anonymous_function]
+  class_node_types []
+  field_node_types []
+  module_node_types [source_file]
+  call_node_types [call_expression]
+  import_node_types [load_statement require require_statement]
+  import_from_types []
+  branching_node_types [if_statement for_statement while_statement repeat_statement case_statement]
+  variable_node_types [assignment_statement]
+  assignment_node_types [assignment_statement]
+  throw_node_types []
+  decorator_node_types []
+  env_access_functions NULL
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 63: grammar_symbols=429 conditional_block_types=NULL
+  language 63
+  function_node_types [set_delayed_top set_top set_delayed set]
+  class_node_types []
+  field_node_types []
+  module_node_types [source_file]
+  call_node_types [apply]
+  import_node_types [get_top]
+  import_from_types []
+  branching_node_types []
+  variable_node_types []
+  assignment_node_types []
+  throw_node_types []
+  decorator_node_types []
+  env_access_functions NULL
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 64: grammar_symbols=531 conditional_block_types=NULL
+  language 64
+  function_node_types [function_definition constructor_definition modifier_definition fallback_receive_definition]
+  class_node_types [contract_declaration interface_declaration library_declaration struct_declaration enum_declaration type_alias]
+  field_node_types [state_variable_declaration struct_member]
+  module_node_types [source_file]
+  call_node_types [call_expression call new_expression]
+  import_node_types [import_directive import using_directive]
+  import_from_types []
+  branching_node_types [if_statement for_statement while_statement do_while_statement try_statement]
+  variable_node_types [variable_declaration_statement state_variable_declaration]
+  assignment_node_types [assignment_expression augmented_assignment_expression]
+  throw_node_types [revert_statement emit_statement]
+  decorator_node_types [modifier_invocation]
+  env_access_functions NULL
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 65: grammar_symbols=220 conditional_block_types=NULL
+  language 65
+  function_node_types [lambda let]
+  class_node_types []
+  field_node_types []
+  module_node_types [source_file]
+  call_node_types [call]
+  import_node_types [import include]
+  import_from_types []
+  branching_node_types [if for while]
+  variable_node_types [let]
+  assignment_node_types [assign set]
+  throw_node_types []
+  decorator_node_types []
+  env_access_functions NULL
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 66: grammar_symbols=216 conditional_block_types=NULL
+  language 66
+  function_node_types [function_definition constructor_definition lambda]
+  class_node_types [class_definition enum_definition]
+  field_node_types [variable_statement export_variable_statement onready_variable_statement signal_statement]
+  module_node_types [source_file]
+  call_node_types [call attribute_call base_call]
+  import_node_types [extends_statement class_name_statement extends]
+  import_from_types []
+  branching_node_types [if_statement for_statement while_statement match_statement]
+  variable_node_types [variable_statement const_statement]
+  assignment_node_types [assignment augmented_assignment]
+  throw_node_types []
+  decorator_node_types [annotation]
+  env_access_functions NULL
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 67: grammar_symbols=285 conditional_block_types=NULL
+  language 67
+  function_node_types [function anonymous_function external_function]
+  class_node_types [type_definition type_alias custom_type]
+  field_node_types [field]
+  module_node_types [source_file]
+  call_node_types [function_call]
+  import_node_types [import unqualified_import]
+  import_from_types []
+  branching_node_types [case case_clause]
+  variable_node_types [let constant]
+  assignment_node_types [let_assert]
+  throw_node_types []
+  decorator_node_types []
+  env_access_functions NULL
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 68: grammar_symbols=415 conditional_block_types=NULL
+  language 68
+  function_node_types [function_statement]
+  class_node_types [class_statement enum_statement type_spec]
+  field_node_types []
+  module_node_types [program]
+  call_node_types [invokation_expression command]
+  import_node_types [using_statement]
+  import_from_types []
+  branching_node_types [if_statement for_statement foreach_statement while_statement do_statement switch_statement try_statement catch_clause]
+  variable_node_types [variable]
+  assignment_node_types [assignment_expression]
+  throw_node_types [throw]
+  decorator_node_types []
+  env_access_functions NULL
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 69: grammar_symbols=371 conditional_block_types=NULL
+  language 69
+  function_node_types [defProc declProc]
+  class_node_types [declClass declIntf declHelper declObject declRecord]
+  field_node_types [declField declProp]
+  module_node_types [source_file]
+  call_node_types [exprCall]
+  import_node_types [declUses]
+  import_from_types []
+  branching_node_types [if ifElse while repeat for foreach try case]
+  variable_node_types [declVar declConst]
+  assignment_node_types [assignment]
+  throw_node_types [raise]
+  decorator_node_types []
+  env_access_functions NULL
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 70: grammar_symbols=476 conditional_block_types=NULL
+  language 70
+  function_node_types [function_declaration constructor destructor]
+  class_node_types [class_declaration struct_declaration interface_declaration union_declaration enum_declaration module_declaration module_def]
+  field_node_types [variable_declaration]
+  module_node_types [source_file]
+  call_node_types [call_expression new_expression]
+  import_node_types [import_declaration import]
+  import_from_types []
+  branching_node_types [if_statement for_statement foreach_statement while_statement do_statement switch_statement try_statement catch_statement]
+  variable_node_types [auto_declaration variable_declaration]
+  assignment_node_types [assignment_expression]
+  throw_node_types [throw_expression]
+  decorator_node_types []
+  env_access_functions NULL
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 71: grammar_symbols=none conditional_block_types=NULL
+  spec NULL
+lang 72: grammar_symbols=56 conditional_block_types=NULL
+  language 72
+  function_node_types [list]
+  class_node_types []
+  field_node_types []
+  module_node_types [program]
+  call_node_types [list]
+  import_node_types []
+  import_from_types []
+  branching_node_types []
+  variable_node_types [symbol]
+  assignment_node_types []
+  throw_node_types []
+  decorator_node_types []
+  env_access_functions NULL
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 73: grammar_symbols=122 conditional_block_types=NULL
+  language 73
+  function_node_types [fn lambda hashfn]
+  class_node_types []
+  field_node_types []
+  module_node_types [program]
+  call_node_types [list]
+  import_node_types []
+  import_from_types []
+  branching_node_types [each for match]
+  variable_node_types [symbol]
+  assignment_node_types [set var local global let]
+  throw_node_types []
+  decorator_node_types []
+  env_access_functions NULL
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 74: grammar_symbols=106 conditional_block_types=NULL
+  language 74
+  function_node_types [function_definition]
+  class_node_types []
+  field_node_types []
+  module_node_types [program]
+  call_node_types [command]
+  import_node_types []
+  import_from_types []
+  branching_node_types [if_statement switch_statement while_statement for_statement]
+  variable_node_types [variable]
+  assignment_node_types []
+  throw_node_types []
+  decorator_node_types []
+  env_access_functions NULL
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 75: grammar_symbols=216 conditional_block_types=NULL
+  language 75
+  function_node_types [func_def]
+  class_node_types []
+  field_node_types []
+  module_node_types [program]
+  call_node_types [func_call]
+  import_node_types []
+  import_from_types []
+  branching_node_types [if_statement for_statement for_in_statement while_statement do_while_statement switch_statement]
+  variable_node_types [identifier]
+  assignment_node_types [assignment_exp update_exp]
+  throw_node_types []
+  decorator_node_types []
+  env_access_functions NULL
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 76: grammar_symbols=283 conditional_block_types=NULL
+  language 76
+  function_node_types [function_definition]
+  class_node_types []
+  field_node_types []
+  module_node_types [program]
+  call_node_types [command call_expression]
+  import_node_types []
+  import_from_types []
+  branching_node_types [if_statement case_statement while_statement for_statement]
+  variable_node_types [variable_name]
+  assignment_node_types [variable_assignment]
+  throw_node_types []
+  decorator_node_types []
+  env_access_functions NULL
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 77: grammar_symbols=120 conditional_block_types=NULL
+  language 77
+  function_node_types [procedure]
+  class_node_types [namespace]
+  field_node_types []
+  module_node_types [source_file]
+  call_node_types [command]
+  import_node_types []
+  import_from_types []
+  branching_node_types [if while foreach try catch]
+  variable_node_types [variable_substitution]
+  assignment_node_types []
+  throw_node_types []
+  decorator_node_types []
+  env_access_functions NULL
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 78: grammar_symbols=457 conditional_block_types=NULL
+  language 78
+  function_node_types [subprogram_declaration subprogram_body entry_declaration expression_function_declaration]
+  class_node_types [type_declaration full_type_declaration package_declaration protected_type_declaration task_type_declaration component_declaration object_declaration record_type_definition]
+  field_node_types [component_declaration]
+  module_node_types [compilation]
+  call_node_types [function_call procedure_call_statement]
+  import_node_types [with_clause use_clause]
+  import_from_types []
+  branching_node_types [if_statement for_loop_statement loop_statement while_loop_statement case_statement select_statement]
+  variable_node_types [object_declaration number_declaration]
+  assignment_node_types [assignment_statement]
+  throw_node_types [raise_statement]
+  decorator_node_types []
+  env_access_functions NULL
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 79: grammar_symbols=228 conditional_block_types=NULL
+  language 79
+  function_node_types [function]
+  class_node_types [data record]
+  field_node_types []
+  module_node_types [source_file]
+  call_node_types [module_application expr]
+  import_node_types [import open import_directive instance]
+  import_from_types []
+  branching_node_types [lambda match do]
+  variable_node_types [typed_binding]
+  assignment_node_types []
+  throw_node_types []
+  decorator_node_types []
+  env_access_functions NULL
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 80: grammar_symbols=80 conditional_block_types=NULL
+  language 80
+  function_node_types [list]
+  class_node_types [structure]
+  field_node_types []
+  module_node_types [program]
+  call_node_types [list]
+  import_node_types []
+  import_from_types []
+  branching_node_types []
+  variable_node_types [symbol]
+  assignment_node_types []
+  throw_node_types []
+  decorator_node_types []
+  env_access_functions NULL
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 81: grammar_symbols=272 conditional_block_types=NULL
+  language 81
+  function_node_types [procedure_declaration overloaded_procedure_declaration]
+  class_node_types [struct_declaration enum_declaration union_declaration package_declaration]
+  field_node_types [field_declaration]
+  module_node_types [source_file]
+  call_node_types [call_expression selector_call_expression]
+  import_node_types [import_declaration import using_statement]
+  import_from_types []
+  branching_node_types [if_statement for_statement switch_statement when_statement]
+  variable_node_types [variable_declaration const_declaration]
+  assignment_node_types [assignment_statement]
+  throw_node_types []
+  decorator_node_types []
+  env_access_functions NULL
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 82: grammar_symbols=342 conditional_block_types=NULL
+  language 82
+  function_node_types [function]
+  class_node_types [module_declaration type_declaration]
+  field_node_types []
+  module_node_types [source_file]
+  call_node_types [call_expression]
+  import_node_types [open_statement include_statement include]
+  import_from_types []
+  branching_node_types [if_expression switch_expression try_expression]
+  variable_node_types [let_binding]
+  assignment_node_types [let_declaration mutation_expression]
+  throw_node_types [exception_declaration]
+  decorator_node_types [decorator]
+  env_access_functions NULL
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 83: grammar_symbols=314 conditional_block_types=NULL
+  language 83
+  function_node_types [function]
+  class_node_types [class_declaration data newtype type_alias]
+  field_node_types []
+  module_node_types [module]
+  call_node_types [exp_apply]
+  import_node_types [import import_item instance]
+  import_from_types []
+  branching_node_types [exp_if exp_case exp_do]
+  variable_node_types [signature]
+  assignment_node_types []
+  throw_node_types []
+  decorator_node_types []
+  env_access_functions NULL
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 84: grammar_symbols=174 conditional_block_types=NULL
+  language 84
+  function_node_types [fun_expr]
+  class_node_types []
+  field_node_types []
+  module_node_types [source_file]
+  call_node_types [applicative]
+  import_node_types [import include]
+  import_from_types []
+  branching_node_types [if match]
+  variable_node_types [let]
+  assignment_node_types []
+  throw_node_types []
+  decorator_node_types []
+  env_access_functions NULL
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 85: grammar_symbols=528 conditional_block_types=NULL
+  language 85
+  function_node_types [method_def abstract_method_def]
+  class_node_types [class_def struct_def module_def enum_def annotation_def type_declaration]
+  field_node_types [instance_var class_var]
+  module_node_types [program]
+  call_node_types [call command implicit_object_call]
+  import_node_types [require]
+  import_from_types []
+  branching_node_types [if unless case while until begin_block rescue_block]
+  variable_node_types [assign multi_assign]
+  assignment_node_types [assign operator_assign]
+  throw_node_types []
+  decorator_node_types [annotation]
+  env_access_functions NULL
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 86: grammar_symbols=192 conditional_block_types=NULL
+  language 86
+  function_node_types [function_statement anon_function function_signature]
+  class_node_types [record_declaration interface_declaration enum_declaration type_declaration]
+  field_node_types []
+  module_node_types [program]
+  call_node_types [function_call]
+  import_node_types []
+  import_from_types []
+  branching_node_types [if_statement while_statement repeat_statement for_statement generic_for_statement]
+  variable_node_types [var_declaration]
+  assignment_node_types [var_assignment]
+  throw_node_types []
+  decorator_node_types []
+  env_access_functions NULL
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 87: grammar_symbols=225 conditional_block_types=NULL
+  language 87
+  function_node_types [function_declaration]
+  class_node_types [type_declaration]
+  field_node_types []
+  module_node_types [source_file]
+  call_node_types [call_expression]
+  import_node_types [use_statement]
+  import_from_types []
+  branching_node_types [if_statement for_statement switch_expression match_expression]
+  variable_node_types [let_declaration const_declaration]
+  assignment_node_types [assignment_expression]
+  throw_node_types []
+  decorator_node_types []
+  env_access_functions NULL
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 88: grammar_symbols=260 conditional_block_types=NULL
+  language 88
+  function_node_types [method constructor ffi_method lambda_expression]
+  class_node_types [actor_definition class_definition struct_definition trait_definition interface_definition primitive_definition type_alias]
+  field_node_types []
+  module_node_types [source_file]
+  call_node_types [call_expression]
+  import_node_types [use_statement]
+  import_from_types []
+  branching_node_types [if_statement match_statement for_statement while_statement repeat_statement try_statement]
+  variable_node_types [variable_declaration]
+  assignment_node_types [assignment_expression]
+  throw_node_types []
+  decorator_node_types []
+  env_access_functions NULL
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 89: grammar_symbols=197 conditional_block_types=NULL
+  language 89
+  function_node_types [function_declaration function_definition]
+  class_node_types [type_definition]
+  field_node_types []
+  module_node_types [program]
+  call_node_types [function_call]
+  import_node_types []
+  import_from_types []
+  branching_node_types [if_statement while_statement repeat_statement for_statement]
+  variable_node_types [variable_declaration]
+  assignment_node_types [assignment_statement]
+  throw_node_types []
+  decorator_node_types []
+  env_access_functions NULL
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 90: grammar_symbols=45 conditional_block_types=NULL
+  language 90
+  function_node_types []
+  class_node_types []
+  field_node_types []
+  module_node_types [source]
+  call_node_types []
+  import_node_types []
+  import_from_types []
+  branching_node_types []
+  variable_node_types []
+  assignment_node_types []
+  throw_node_types []
+  decorator_node_types []
+  env_access_functions NULL
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 91: grammar_symbols=306 conditional_block_types=NULL
+  language 91
+  function_node_types [function_item closure_expression function_signature_item]
+  class_node_types [struct_item enum_item trait_item impl_item abi_item]
+  field_node_types []
+  module_node_types [source_file]
+  call_node_types [call_expression abi_call_expression]
+  import_node_types [use_declaration]
+  import_from_types []
+  branching_node_types [if_expression match_expression while_expression for_expression]
+  variable_node_types [let_declaration const_item]
+  assignment_node_types [assignment_expression]
+  throw_node_types []
+  decorator_node_types []
+  env_access_functions NULL
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 92: grammar_symbols=646 conditional_block_types=NULL
+  language 92
+  function_node_types [label preproc_def preproc_multiline_macro]
+  class_node_types [struc_declaration]
+  field_node_types []
+  module_node_types [source_file]
+  call_node_types [call_syntax_expression actual_instruction]
+  import_node_types [preproc_include]
+  import_from_types []
+  branching_node_types []
+  variable_node_types [label]
+  assignment_node_types []
+  throw_node_types []
+  decorator_node_types []
+  env_access_functions NULL
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 93: grammar_symbols=65 conditional_block_types=NULL
+  language 93
+  function_node_types [label]
+  class_node_types []
+  field_node_types []
+  module_node_types [program]
+  call_node_types []
+  import_node_types []
+  import_from_types []
+  branching_node_types []
+  variable_node_types [label]
+  assignment_node_types []
+  throw_node_types []
+  decorator_node_types []
+  env_access_functions NULL
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 94: grammar_symbols=59 conditional_block_types=NULL
+  language 94
+  function_node_types []
+  class_node_types []
+  field_node_types []
+  module_node_types [document]
+  call_node_types []
+  import_node_types []
+  import_from_types []
+  branching_node_types []
+  variable_node_types []
+  assignment_node_types []
+  throw_node_types []
+  decorator_node_types []
+  env_access_functions NULL
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports "frontmatter" "frontmatter_js_block" -> 3; "script_element" "raw_text" -> 3;
+lang 95: grammar_symbols=294 conditional_block_types=NULL
+  language 95
+  function_node_types []
+  class_node_types []
+  field_node_types []
+  module_node_types [document]
+  call_node_types []
+  import_node_types []
+  import_from_types []
+  branching_node_types []
+  variable_node_types []
+  assignment_node_types []
+  throw_node_types []
+  decorator_node_types []
+  env_access_functions NULL
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 96: grammar_symbols=120 conditional_block_types=NULL
+  language 96
+  function_node_types [recipe]
+  class_node_types []
+  field_node_types []
+  module_node_types [source_file]
+  call_node_types [function_call dependency]
+  import_node_types [import]
+  import_from_types []
+  branching_node_types [if_expression]
+  variable_node_types []
+  assignment_node_types [assignment]
+  throw_node_types []
+  decorator_node_types []
+  env_access_functions NULL
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 97: grammar_symbols=91 conditional_block_types=NULL
+  language 97
+  function_node_types [define_action]
+  class_node_types []
+  field_node_types []
+  module_node_types [template]
+  call_node_types [function_call method_call template_action]
+  import_node_types []
+  import_from_types []
+  branching_node_types []
+  variable_node_types []
+  assignment_node_types []
+  throw_node_types []
+  decorator_node_types []
+  env_access_functions NULL
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 98: grammar_symbols=315 conditional_block_types=NULL
+  language 98
+  function_node_types [function_declaration method_declaration method_elem]
+  class_node_types [component_declaration type_alias type_declaration type_spec]
+  field_node_types []
+  module_node_types [source_file]
+  call_node_types [call_expression]
+  import_node_types [import import_declaration]
+  import_from_types []
+  branching_node_types []
+  variable_node_types []
+  assignment_node_types []
+  throw_node_types []
+  decorator_node_types []
+  env_access_functions NULL
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 99: grammar_symbols=199 conditional_block_types=NULL
+  language 99
+  function_node_types []
+  class_node_types []
+  field_node_types []
+  module_node_types [template]
+  call_node_types []
+  import_node_types [include include_statement]
+  import_from_types []
+  branching_node_types []
+  variable_node_types []
+  assignment_node_types []
+  throw_node_types []
+  decorator_node_types []
+  env_access_functions NULL
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 100: grammar_symbols=44 conditional_block_types=NULL
+  language 100
+  function_node_types []
+  class_node_types []
+  field_node_types []
+  module_node_types [source_file]
+  call_node_types []
+  import_node_types []
+  import_from_types []
+  branching_node_types []
+  variable_node_types []
+  assignment_node_types []
+  throw_node_types []
+  decorator_node_types []
+  env_access_functions NULL
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 101: grammar_symbols=80 conditional_block_types=NULL
+  language 101
+  function_node_types []
+  class_node_types [model_declaration enum_declaration type_declaration generator_declaration datasource_declaration view_declaration]
+  field_node_types [column_declaration]
+  module_node_types [program]
+  call_node_types [call_expression]
+  import_node_types []
+  import_from_types []
+  branching_node_types []
+  variable_node_types []
+  assignment_node_types []
+  throw_node_types []
+  decorator_node_types []
+  env_access_functions NULL
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 102: grammar_symbols=94 conditional_block_types=NULL
+  language 102
+  function_node_types []
+  class_node_types []
+  field_node_types []
+  module_node_types [source_file]
+  call_node_types []
+  import_node_types []
+  import_from_types []
+  branching_node_types []
+  variable_node_types []
+  assignment_node_types []
+  throw_node_types []
+  decorator_node_types []
+  env_access_functions NULL
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 103: grammar_symbols=28 conditional_block_types=NULL
+  language 103
+  function_node_types []
+  class_node_types []
+  field_node_types []
+  module_node_types [source_file]
+  call_node_types []
+  import_node_types []
+  import_from_types []
+  branching_node_types []
+  variable_node_types []
+  assignment_node_types []
+  throw_node_types []
+  decorator_node_types []
+  env_access_functions NULL
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 104: grammar_symbols=64 conditional_block_types=NULL
+  language 104
+  function_node_types []
+  class_node_types []
+  field_node_types []
+  module_node_types [source]
+  call_node_types []
+  import_node_types []
+  import_from_types []
+  branching_node_types []
+  variable_node_types []
+  assignment_node_types []
+  throw_node_types []
+  decorator_node_types []
+  env_access_functions NULL
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 105: grammar_symbols=211 conditional_block_types=NULL
+  language 105
+  function_node_types [function_declaration]
+  class_node_types [struct_declaration type_alias_declaration type_declaration]
+  field_node_types []
+  module_node_types [translation_unit]
+  call_node_types [type_constructor_or_function_call_expression]
+  import_node_types [enable_directive]
+  import_from_types []
+  branching_node_types [if_statement switch_statement for_statement while_statement loop_statement]
+  variable_node_types [variable_declaration]
+  assignment_node_types [assignment_statement]
+  throw_node_types []
+  decorator_node_types []
+  env_access_functions NULL
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 106: grammar_symbols=131 conditional_block_types=NULL
+  language 106
+  function_node_types []
+  class_node_types []
+  field_node_types []
+  module_node_types [document]
+  call_node_types []
+  import_node_types []
+  import_from_types []
+  branching_node_types []
+  variable_node_types []
+  assignment_node_types []
+  throw_node_types []
+  decorator_node_types []
+  env_access_functions NULL
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 107: grammar_symbols=21 conditional_block_types=NULL
+  language 107
+  function_node_types []
+  class_node_types []
+  field_node_types []
+  module_node_types [document]
+  call_node_types []
+  import_node_types []
+  import_from_types []
+  branching_node_types []
+  variable_node_types []
+  assignment_node_types []
+  throw_node_types []
+  decorator_node_types []
+  env_access_functions NULL
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 108: grammar_symbols=120 conditional_block_types=NULL
+  language 108
+  function_node_types [anonymous_function bind]
+  class_node_types []
+  field_node_types []
+  module_node_types [document]
+  call_node_types [functioncall]
+  import_node_types [import importstr]
+  import_from_types []
+  branching_node_types [conditional]
+  variable_node_types [local_bind]
+  assignment_node_types []
+  throw_node_types []
+  decorator_node_types []
+  env_access_functions NULL
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 109: grammar_symbols=51 conditional_block_types=NULL
+  language 109
+  function_node_types []
+  class_node_types []
+  field_node_types []
+  module_node_types [source_file]
+  call_node_types []
+  import_node_types []
+  import_from_types []
+  branching_node_types []
+  variable_node_types []
+  assignment_node_types []
+  throw_node_types []
+  decorator_node_types []
+  env_access_functions NULL
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 110: grammar_symbols=210 conditional_block_types=NULL
+  language 110
+  function_node_types [function_definition service_definition]
+  class_node_types [struct_definition union_definition enum_definition exception_definition interaction_definition package_declaration service_definition]
+  field_node_types [field]
+  module_node_types [document]
+  call_node_types []
+  import_node_types [include_statement extends include namespace_declaration]
+  import_from_types []
+  branching_node_types []
+  variable_node_types [const_definition]
+  assignment_node_types []
+  throw_node_types []
+  decorator_node_types []
+  env_access_functions NULL
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 111: grammar_symbols=174 conditional_block_types=NULL
+  language 111
+  function_node_types [method]
+  class_node_types [struct enum interface]
+  field_node_types [field]
+  module_node_types [source]
+  call_node_types []
+  import_node_types [import extends using_directive]
+  import_from_types []
+  branching_node_types []
+  variable_node_types [const]
+  assignment_node_types []
+  throw_node_types []
+  decorator_node_types []
+  env_access_functions NULL
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 112: grammar_symbols=37 conditional_block_types=NULL
+  language 112
+  function_node_types []
+  class_node_types []
+  field_node_types []
+  module_node_types [file source_file]
+  call_node_types []
+  import_node_types []
+  import_from_types []
+  branching_node_types []
+  variable_node_types [property]
+  assignment_node_types []
+  throw_node_types []
+  decorator_node_types []
+  env_access_functions NULL
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 113: grammar_symbols=375 conditional_block_types=NULL
+  language 113
+  function_node_types []
+  class_node_types []
+  field_node_types []
+  module_node_types [source_file]
+  call_node_types []
+  import_node_types []
+  import_from_types []
+  branching_node_types []
+  variable_node_types []
+  assignment_node_types []
+  throw_node_types []
+  decorator_node_types []
+  env_access_functions NULL
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 114: grammar_symbols=39 conditional_block_types=NULL
+  language 114
+  function_node_types []
+  class_node_types []
+  field_node_types []
+  module_node_types [document]
+  call_node_types []
+  import_node_types []
+  import_from_types []
+  branching_node_types []
+  variable_node_types []
+  assignment_node_types []
+  throw_node_types []
+  decorator_node_types []
+  env_access_functions NULL
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 115: grammar_symbols=247 conditional_block_types=NULL
+  language 115
+  function_node_types [function_definition lambda]
+  class_node_types []
+  field_node_types []
+  module_node_types [module]
+  call_node_types [call]
+  import_node_types [with_clause]
+  import_from_types []
+  branching_node_types [if_statement for_statement]
+  variable_node_types [identifier]
+  assignment_node_types [assignment augmented_assignment]
+  throw_node_types []
+  decorator_node_types []
+  env_access_functions NULL
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 116: grammar_symbols=155 conditional_block_types=NULL
+  language 116
+  function_node_types [user_defined_function lambda_expression]
+  class_node_types [resource_declaration type_declaration module_declaration]
+  field_node_types []
+  module_node_types [program]
+  call_node_types [call_expression]
+  import_node_types [import_statement module_declaration import using_statement]
+  import_from_types []
+  branching_node_types []
+  variable_node_types [variable_declaration parameter_declaration output_declaration]
+  assignment_node_types []
+  throw_node_types []
+  decorator_node_types []
+  env_access_functions NULL
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 117: grammar_symbols=18 conditional_block_types=NULL
+  language 117
+  function_node_types []
+  class_node_types []
+  field_node_types []
+  module_node_types [document]
+  call_node_types []
+  import_node_types []
+  import_from_types []
+  branching_node_types []
+  variable_node_types []
+  assignment_node_types []
+  throw_node_types []
+  decorator_node_types []
+  env_access_functions NULL
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 118: grammar_symbols=95 conditional_block_types=NULL
+  language 118
+  function_node_types []
+  class_node_types []
+  field_node_types []
+  module_node_types [file]
+  call_node_types []
+  import_node_types []
+  import_from_types []
+  branching_node_types []
+  variable_node_types []
+  assignment_node_types []
+  throw_node_types []
+  decorator_node_types []
+  env_access_functions NULL
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 119: grammar_symbols=584 conditional_block_types=[preproc_if preproc_ifdef preproc_else preproc_elif preproc_elifdef]
+  language 119
+  function_node_types [function_definition lambda_expression]
+  class_node_types [class_specifier struct_specifier enum_specifier module_declaration type_definition union_specifier]
+  field_node_types []
+  module_node_types [translation_unit]
+  call_node_types [call_expression new_expression]
+  import_node_types [preproc_include import import_declaration]
+  import_from_types []
+  branching_node_types [if_statement for_statement while_statement do_statement switch_statement]
+  variable_node_types [declaration]
+  assignment_node_types [assignment_expression]
+  throw_node_types []
+  decorator_node_types []
+  env_access_functions NULL
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 120: grammar_symbols=613 conditional_block_types=NULL
+  language 120
+  function_node_types [subprogram_declaration subprogram_definition]
+  class_node_types [entity_declaration architecture_definition component_declaration interface_declaration package_declaration protected_type_declaration record_type_definition type_declaration]
+  field_node_types []
+  module_node_types [design_file]
+  call_node_types [function_call procedure_call_statement component_instantiation_statement parenthesis_group]
+  import_node_types [library_clause use_clause]
+  import_from_types []
+  branching_node_types [if_statement case_statement loop_statement]
+  variable_node_types [variable_declaration signal_declaration constant_declaration]
+  assignment_node_types [variable_assignment signal_assignment]
+  throw_node_types []
+  decorator_node_types []
+  env_access_functions NULL
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 121: grammar_symbols=1351 conditional_block_types=NULL
+  language 121
+  function_node_types [function_declaration task_declaration function_body_declaration function_statement]
+  class_node_types [class_declaration module_declaration interface_declaration library_declaration package_declaration type_declaration]
+  field_node_types []
+  module_node_types [source_file]
+  call_node_types [function_subroutine_call system_tf_call method_call]
+  import_node_types [package_import_declaration extends import include include_statement instance use_clause]
+  import_from_types []
+  branching_node_types [case_statement if]
+  variable_node_types [parameter localparam]
+  assignment_node_types []
+  throw_node_types []
+  decorator_node_types []
+  env_access_functions NULL
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 122: grammar_symbols=139 conditional_block_types=NULL
+  language 122
+  function_node_types []
+  class_node_types []
+  field_node_types []
+  module_node_types [document]
+  call_node_types [call_expression]
+  import_node_types [dtsi_include preproc_include]
+  import_from_types []
+  branching_node_types []
+  variable_node_types []
+  assignment_node_types []
+  throw_node_types []
+  decorator_node_types []
+  env_access_functions NULL
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 123: grammar_symbols=112 conditional_block_types=NULL
+  language 123
+  function_node_types []
+  class_node_types []
+  field_node_types []
+  module_node_types [linkerscript]
+  call_node_types [call_expression]
+  import_node_types []
+  import_from_types []
+  branching_node_types []
+  variable_node_types []
+  assignment_node_types []
+  throw_node_types []
+  decorator_node_types []
+  env_access_functions NULL
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 124: grammar_symbols=63 conditional_block_types=NULL
+  language 124
+  function_node_types []
+  class_node_types []
+  field_node_types []
+  module_node_types [source_file]
+  call_node_types [call_expression]
+  import_node_types [import_statement import]
+  import_from_types []
+  branching_node_types [if_statement foreach_statement]
+  variable_node_types []
+  assignment_node_types [assignment_statement]
+  throw_node_types []
+  decorator_node_types []
+  env_access_functions NULL
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 125: grammar_symbols=103 conditional_block_types=NULL
+  language 125
+  function_node_types []
+  class_node_types [config menuconfig choice type_definition]
+  field_node_types []
+  module_node_types [source]
+  call_node_types []
+  import_node_types [source]
+  import_from_types []
+  branching_node_types [if]
+  variable_node_types []
+  assignment_node_types []
+  throw_node_types []
+  decorator_node_types []
+  env_access_functions NULL
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 126: grammar_symbols=321 conditional_block_types=NULL
+  language 126
+  function_node_types [function_definition anonymous_python_function]
+  class_node_types []
+  field_node_types []
+  module_node_types [source_file]
+  call_node_types [call]
+  import_node_types [export_statement import import_from_statement import_statement include include_directive require with_clause]
+  import_from_types []
+  branching_node_types []
+  variable_node_types [variable_assignment]
+  assignment_node_types []
+  throw_node_types []
+  decorator_node_types []
+  env_access_functions NULL
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 127: grammar_symbols=441 conditional_block_types=NULL
+  language 127
+  function_node_types [method_definition]
+  class_node_types [class_definition]
+  field_node_types [field_definition]
+  module_node_types [source_file]
+  call_node_types []
+  import_node_types [super_directive implements_directive]
+  import_from_types []
+  branching_node_types []
+  variable_node_types []
+  assignment_node_types []
+  throw_node_types []
+  decorator_node_types []
+  env_access_functions NULL
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 128: grammar_symbols=167 conditional_block_types=NULL
+  language 128
+  function_node_types [def multiclass defm]
+  class_node_types [class]
+  field_node_types []
+  module_node_types [source_file]
+  call_node_types []
+  import_node_types [include include_directive]
+  import_from_types []
+  branching_node_types []
+  variable_node_types []
+  assignment_node_types []
+  throw_node_types []
+  decorator_node_types []
+  env_access_functions NULL
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 129: grammar_symbols=389 conditional_block_types=[preproc_if preproc_ifdef preproc_else preproc_elif preproc_elifdef]
+  language 129
+  function_node_types [function_definition]
+  class_node_types [struct_specifier enum_specifier type_definition union_specifier]
+  field_node_types []
+  module_node_types [translation_unit]
+  call_node_types [call_expression new_expression]
+  import_node_types [preproc_include]
+  import_from_types []
+  branching_node_types [if_statement switch_statement while_statement]
+  variable_node_types [declaration]
+  assignment_node_types [assignment_expression]
+  throw_node_types []
+  decorator_node_types []
+  env_access_functions NULL
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 130: grammar_symbols=314 conditional_block_types=NULL
+  language 130
+  function_node_types [function_definition function_signature]
+  class_node_types [struct_definition enum_item trait_item impl_item struct_item type_definition]
+  field_node_types []
+  module_node_types [source_file]
+  call_node_types [call_expression call]
+  import_node_types [use_declaration import import_statement]
+  import_from_types []
+  branching_node_types [if_expression match_expression loop_expression]
+  variable_node_types [let_declaration const_item]
+  assignment_node_types [assignment_expression]
+  throw_node_types []
+  decorator_node_types []
+  env_access_functions NULL
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 131: grammar_symbols=167 conditional_block_types=NULL
+  language 131
+  function_node_types [function_item]
+  class_node_types []
+  field_node_types []
+  module_node_types [source_file]
+  call_node_types [call_expression]
+  import_node_types [use_declaration]
+  import_from_types []
+  branching_node_types [if_expression while_expression loop_expression]
+  variable_node_types [let const]
+  assignment_node_types [assignment_expression]
+  throw_node_types []
+  decorator_node_types []
+  env_access_functions NULL
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 132: grammar_symbols=165 conditional_block_types=NULL
+  language 132
+  function_node_types [function_declaration anonymous_function lambda_expression]
+  class_node_types [class_declaration enum_declaration]
+  field_node_types []
+  module_node_types [source_file]
+  call_node_types [call_expression]
+  import_node_types [extends]
+  import_from_types []
+  branching_node_types [if_statement switch_statement while_statement]
+  variable_node_types [local_declaration]
+  assignment_node_types [assignment_expression]
+  throw_node_types []
+  decorator_node_types []
+  env_access_functions NULL
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 133: grammar_symbols=201 conditional_block_types=NULL
+  language 133
+  function_node_types [function_definition]
+  class_node_types []
+  field_node_types []
+  module_node_types [source_file]
+  call_node_types [method_call function_application]
+  import_node_types [include_directive]
+  import_from_types []
+  branching_node_types []
+  variable_node_types []
+  assignment_node_types []
+  throw_node_types []
+  decorator_node_types []
+  env_access_functions NULL
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 134: grammar_symbols=78 conditional_block_types=NULL
+  language 134
+  function_node_types []
+  class_node_types []
+  field_node_types []
+  module_node_types [pattern]
+  call_node_types []
+  import_node_types []
+  import_from_types []
+  branching_node_types []
+  variable_node_types []
+  assignment_node_types []
+  throw_node_types []
+  decorator_node_types []
+  env_access_functions NULL
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 135: grammar_symbols=43 conditional_block_types=NULL
+  language 135
+  function_node_types []
+  class_node_types []
+  field_node_types []
+  module_node_types [document]
+  call_node_types []
+  import_node_types []
+  import_from_types []
+  branching_node_types []
+  variable_node_types []
+  assignment_node_types []
+  throw_node_types []
+  decorator_node_types []
+  env_access_functions NULL
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 136: grammar_symbols=120 conditional_block_types=NULL
+  language 136
+  function_node_types []
+  class_node_types []
+  field_node_types []
+  module_node_types [document]
+  call_node_types []
+  import_node_types []
+  import_from_types []
+  branching_node_types []
+  variable_node_types []
+  assignment_node_types []
+  throw_node_types []
+  decorator_node_types []
+  env_access_functions NULL
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 137: grammar_symbols=129 conditional_block_types=NULL
+  language 137
+  function_node_types []
+  class_node_types []
+  field_node_types []
+  module_node_types [file]
+  call_node_types []
+  import_node_types [include]
+  import_from_types []
+  branching_node_types []
+  variable_node_types []
+  assignment_node_types []
+  throw_node_types []
+  decorator_node_types []
+  env_access_functions NULL
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 138: grammar_symbols=392 conditional_block_types=NULL
+  language 138
+  function_node_types []
+  class_node_types []
+  field_node_types []
+  module_node_types [source_file]
+  call_node_types []
+  import_node_types []
+  import_from_types []
+  branching_node_types []
+  variable_node_types []
+  assignment_node_types []
+  throw_node_types []
+  decorator_node_types []
+  env_access_functions NULL
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 139: grammar_symbols=162 conditional_block_types=NULL
+  language 139
+  function_node_types [function_declaration lambda]
+  class_node_types [class_definition node_definition resource_declaration type_declaration]
+  field_node_types []
+  module_node_types [source_file]
+  call_node_types [function_call include_statement]
+  import_node_types [include_statement require_statement include require]
+  import_from_types []
+  branching_node_types [if_statement unless_statement case_statement]
+  variable_node_types [variable]
+  assignment_node_types [assignment]
+  throw_node_types []
+  decorator_node_types []
+  env_access_functions NULL
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 140: grammar_symbols=40 conditional_block_types=NULL
+  language 140
+  function_node_types []
+  class_node_types []
+  field_node_types []
+  module_node_types [source_file]
+  call_node_types []
+  import_node_types []
+  import_from_types []
+  branching_node_types []
+  variable_node_types []
+  assignment_node_types []
+  throw_node_types []
+  decorator_node_types []
+  env_access_functions NULL
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 141: grammar_symbols=74 conditional_block_types=NULL
+  language 141
+  function_node_types []
+  class_node_types []
+  field_node_types []
+  module_node_types [source]
+  call_node_types []
+  import_node_types []
+  import_from_types []
+  branching_node_types []
+  variable_node_types []
+  assignment_node_types []
+  throw_node_types []
+  decorator_node_types []
+  env_access_functions NULL
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 142: grammar_symbols=51 conditional_block_types=NULL
+  language 142
+  function_node_types []
+  class_node_types []
+  field_node_types []
+  module_node_types [document]
+  call_node_types []
+  import_node_types []
+  import_from_types []
+  branching_node_types []
+  variable_node_types []
+  assignment_node_types []
+  throw_node_types []
+  decorator_node_types []
+  env_access_functions NULL
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 143: grammar_symbols=620 conditional_block_types=[preproc_if preproc_ifdef preproc_else preproc_elif preproc_elifdef]
+  language 143
+  function_node_types [function_definition lambda_expression]
+  class_node_types [class_specifier enum_specifier module_declaration struct_specifier type_definition union_specifier]
+  field_node_types []
+  module_node_types [source_file]
+  call_node_types [call_expression new_expression]
+  import_node_types [import import_declaration import_statement preproc_include]
+  import_from_types []
+  branching_node_types []
+  variable_node_types []
+  assignment_node_types []
+  throw_node_types []
+  decorator_node_types []
+  env_access_functions NULL
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 144: grammar_symbols=524 conditional_block_types=NULL
+  language 144
+  function_node_types [function_header]
+  class_node_types []
+  field_node_types []
+  module_node_types [source_file]
+  call_node_types [call invoke instruction_call]
+  import_node_types []
+  import_from_types []
+  branching_node_types [br switch]
+  variable_node_types [local_var global_var]
+  assignment_node_types []
+  throw_node_types []
+  decorator_node_types []
+  env_access_functions NULL
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 145: grammar_symbols=152 conditional_block_types=NULL
+  language 145
+  function_node_types [operation_statement service_statement resource_statement]
+  class_node_types [structure_statement union_statement enum_statement]
+  field_node_types [shape_member]
+  module_node_types [source_file]
+  call_node_types []
+  import_node_types [use_statement]
+  import_from_types []
+  branching_node_types []
+  variable_node_types []
+  assignment_node_types []
+  throw_node_types []
+  decorator_node_types []
+  env_access_functions NULL
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 146: grammar_symbols=159 conditional_block_types=NULL
+  language 146
+  function_node_types [func_item resource_method export_item import_item]
+  class_node_types [record_item resource_item enum_items variant_items flags_items]
+  field_node_types [record_field]
+  module_node_types [source_file]
+  call_node_types []
+  import_node_types [import_item toplevel_use_item export_item import include include_item]
+  import_from_types []
+  branching_node_types []
+  variable_node_types []
+  assignment_node_types []
+  throw_node_types []
+  decorator_node_types []
+  env_access_functions NULL
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 147: grammar_symbols=662 conditional_block_types=NULL
+  language 147
+  function_node_types [operator_definition function_definition]
+  class_node_types []
+  field_node_types []
+  module_node_types [source_file]
+  call_node_types [function_evaluation call bound_op]
+  import_node_types [extends instance]
+  import_from_types []
+  branching_node_types [if_then_else case]
+  variable_node_types [variable_declaration]
+  assignment_node_types []
+  throw_node_types []
+  decorator_node_types []
+  env_access_functions NULL
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 148: grammar_symbols=277 conditional_block_types=NULL
+  language 148
+  function_node_types [classMethod objectMethod]
+  class_node_types [clazz typeAlias]
+  field_node_types []
+  module_node_types [module]
+  call_node_types [unqualifiedAccessExpr qualifiedAccessExpr newExpr]
+  import_node_types [importClause importGlobClause importExpr extendsOrAmendsClause extends import]
+  import_from_types []
+  branching_node_types [ifExpr whenGenerator forGenerator]
+  variable_node_types [classProperty objectProperty]
+  assignment_node_types []
+  throw_node_types [throwExpr]
+  decorator_node_types [annotation]
+  env_access_functions NULL
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 149: grammar_symbols=58 conditional_block_types=NULL
+  language 149
+  function_node_types []
+  class_node_types []
+  field_node_types []
+  module_node_types [source_file]
+  call_node_types []
+  import_node_types [require]
+  import_from_types []
+  branching_node_types []
+  variable_node_types [require_directive replace_directive]
+  assignment_node_types []
+  throw_node_types []
+  decorator_node_types []
+  env_access_functions NULL
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 150: grammar_symbols=521 conditional_block_types=NULL
+  language 150
+  function_node_types [method_declaration constructor_declaration trigger_declaration]
+  class_node_types [class_declaration interface_declaration enum_declaration]
+  field_node_types [field_declaration]
+  module_node_types [parser_output]
+  call_node_types [method_invocation]
+  import_node_types [extends with_clause]
+  import_from_types []
+  branching_node_types [if_statement for_statement while_statement do_statement switch_expression try_statement catch_clause enhanced_for_statement]
+  variable_node_types [local_variable_declaration]
+  assignment_node_types [assignment_expression]
+  throw_node_types [throw_statement]
+  decorator_node_types [annotation]
+  env_access_functions NULL
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 151: grammar_symbols=204 conditional_block_types=NULL
+  language 151
+  function_node_types []
+  class_node_types []
+  field_node_types []
+  module_node_types [source_file]
+  call_node_types []
+  import_node_types [with_clause]
+  import_from_types []
+  branching_node_types []
+  variable_node_types []
+  assignment_node_types []
+  throw_node_types []
+  decorator_node_types []
+  env_access_functions NULL
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 152: grammar_symbols=244 conditional_block_types=NULL
+  language 152
+  function_node_types []
+  class_node_types []
+  field_node_types []
+  module_node_types [source_file]
+  call_node_types []
+  import_node_types [with_clause]
+  import_from_types []
+  branching_node_types []
+  variable_node_types []
+  assignment_node_types []
+  throw_node_types []
+  decorator_node_types []
+  env_access_functions NULL
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 153: grammar_symbols=301 conditional_block_types=NULL
+  language 153
+  function_node_types [block_mapping_pair]
+  class_node_types []
+  field_node_types []
+  module_node_types [stream]
+  call_node_types []
+  import_node_types []
+  import_from_types []
+  branching_node_types []
+  variable_node_types []
+  assignment_node_types []
+  throw_node_types []
+  decorator_node_types []
+  env_access_functions NULL
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 154: grammar_symbols=301 conditional_block_types=NULL
+  language 154
+  function_node_types [block_mapping_pair]
+  class_node_types []
+  field_node_types []
+  module_node_types [stream]
+  call_node_types []
+  import_node_types []
+  import_from_types []
+  branching_node_types []
+  variable_node_types []
+  assignment_node_types []
+  throw_node_types []
+  decorator_node_types []
+  env_access_functions NULL
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 155: grammar_symbols=139 conditional_block_types=NULL
+  language 155
+  function_node_types [function_declaration_statement]
+  class_node_types [type_definition_statement]
+  field_node_types []
+  module_node_types [source_file]
+  call_node_types [call]
+  import_node_types []
+  import_from_types []
+  branching_node_types [if_statement switch_statement for_statement for_in_statement while_statement]
+  variable_node_types [variable_definition_statement tuple_declaration_statement]
+  assignment_node_types [reassignment_statement]
+  throw_node_types []
+  decorator_node_types []
+  env_access_functions NULL
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 156: grammar_symbols=425 conditional_block_types=NULL
+  language 156
+  function_node_types [function_declaration generator_function_declaration function_expression arrow_function method_definition function_signature]
+  class_node_types [class_declaration class abstract_class_declaration enum_declaration interface_declaration ui_inline_component]
+  field_node_types [ui_property ui_signal public_field_definition]
+  module_node_types [program]
+  call_node_types [call_expression new_expression]
+  import_node_types [import_statement import ui_import]
+  import_from_types [import_statement import ui_import]
+  branching_node_types [if_statement for_statement for_in_statement while_statement switch_statement switch_case switch_default try_statement catch_clause do_statement]
+  variable_node_types [lexical_declaration variable_declaration]
+  assignment_node_types [assignment_expression augmented_assignment_expression]
+  throw_node_types [throw_statement]
+  decorator_node_types [decorator]
+  env_access_functions NULL
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 157: grammar_symbols=320 conditional_block_types=NULL
+  language 157
+  function_node_types [function_declaration function_expression arrow_function method_definition]
+  class_node_types []
+  field_node_types [property_declaration]
+  module_node_types [program]
+  call_node_types [call_expression new_expression]
+  import_node_types [import_statement import]
+  import_from_types [import_statement import]
+  branching_node_types [if_statement for_statement for_in_statement while_statement switch_statement switch_case switch_default try_statement catch_clause do_statement]
+  variable_node_types [lexical_declaration variable_declaration]
+  assignment_node_types [assignment_expression augmented_assignment_expression]
+  throw_node_types [throw_statement]
+  decorator_node_types []
+  env_access_functions NULL
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 158: grammar_symbols=431 conditional_block_types=NULL
+  language 158
+  function_node_types [cf_function_tag function_declaration function_expression]
+  class_node_types []
+  field_node_types []
+  module_node_types [program component_file]
+  call_node_types [call_expression]
+  import_node_types []
+  import_from_types []
+  branching_node_types [cf_if_tag cf_elseif_tag cf_else_tag if_statement for_statement while_statement switch_statement]
+  variable_node_types []
+  assignment_node_types []
+  throw_node_types []
+  decorator_node_types []
+  env_access_functions NULL
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports "cf_script_tag" "cf_script_content" -> 157;
+lang 159: grammar_symbols=350 conditional_block_types=NULL
+  language 159
+  function_node_types [function_definition]
+  class_node_types [class_definition trait_definition]
+  field_node_types []
+  module_node_types [module]
+  call_node_types [call]
+  import_node_types [import_statement import_from_statement future_import_statement]
+  import_from_types [import_statement import_from_statement future_import_statement]
+  branching_node_types [if_statement match_statement for_statement while_statement try_statement with_statement]
+  variable_node_types [assignment]
+  assignment_node_types [assignment augmented_assignment]
+  throw_node_types []
+  decorator_node_types []
+  env_access_functions NULL
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 160: grammar_symbols=865 conditional_block_types=NULL
+  language 160
+  function_node_types [method classmethod query]
+  class_node_types [class_definition]
+  field_node_types [property parameter index trigger xdata storage foreignkey]
+  module_node_types [source_file]
+  call_node_types [class_method_call method_call relative_dot_method macro]
+  import_node_types []
+  import_from_types []
+  branching_node_types [command_if command_for command_while elseif_block catch_block]
+  variable_node_types []
+  assignment_node_types []
+  throw_node_types []
+  decorator_node_types []
+  env_access_functions NULL
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 161: grammar_symbols=576 conditional_block_types=NULL
+  language 161
+  function_node_types [procedure tag]
+  class_node_types []
+  field_node_types []
+  module_node_types [source_file]
+  call_node_types [extrinsic_function routine_tag_call]
+  import_node_types []
+  import_from_types []
+  branching_node_types []
+  variable_node_types []
+  assignment_node_types []
+  throw_node_types []
+  decorator_node_types []
+  env_access_functions NULL
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 162: grammar_symbols=none conditional_block_types=NULL
+  spec NULL
+lang 163: grammar_symbols=390 conditional_block_types=NULL
+  language 163
+  function_node_types [function_declaration generator_function_declaration function_expression arrow_function method_definition function_signature]
+  class_node_types [class_declaration class abstract_class_declaration struct_declaration enum_declaration interface_declaration type_alias_declaration internal_module]
+  field_node_types [public_field_definition]
+  module_node_types [program]
+  call_node_types [call_expression new_expression]
+  import_node_types [import_statement export_statement import extends require]
+  import_from_types [import_statement export_statement import extends require]
+  branching_node_types [if_statement for_statement for_in_statement while_statement switch_statement switch_case switch_default try_statement catch_clause do_statement]
+  variable_node_types [lexical_declaration variable_declaration]
+  assignment_node_types [assignment_expression augmented_assignment_expression]
+  throw_node_types [throw_statement]
+  decorator_node_types [decorator]
+  env_access_functions NULL
+  env_access_member_patterns [process.env]
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 164: grammar_symbols=839 conditional_block_types=NULL
+  language 164
+  function_node_types [create_function create_procedure function_definition procedure_definition function_declaration procedure_declaration]
+  class_node_types [create_package create_package_body create_type create_type_body create_trigger]
+  field_node_types []
+  module_node_types [source_file]
+  call_node_types [ref_call]
+  import_node_types []
+  import_from_types []
+  branching_node_types [if_statement case_statement basic_loop_statement for_loop_statement while_loop_statement exception_handler]
+  variable_node_types []
+  assignment_node_types [assignment_statement]
+  throw_node_types [raise_statement]
+  decorator_node_types []
+  env_access_functions NULL
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 165: grammar_symbols=14 conditional_block_types=NULL
+  language 165
+  function_node_types [list]
+  class_node_types []
+  field_node_types []
+  module_node_types [source_file]
+  call_node_types [list]
+  import_node_types []
+  import_from_types []
+  branching_node_types []
+  variable_node_types [symbol]
+  assignment_node_types []
+  throw_node_types []
+  decorator_node_types []
+  env_access_functions NULL
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 166: grammar_symbols=none conditional_block_types=NULL
+  spec NULL
+lang 167: grammar_symbols=none conditional_block_types=NULL
+  spec NULL
+lang 168: grammar_symbols=25 conditional_block_types=NULL
+  language 168
+  function_node_types []
+  class_node_types []
+  field_node_types []
+  module_node_types [document]
+  call_node_types []
+  import_node_types []
+  import_from_types []
+  branching_node_types []
+  variable_node_types []
+  assignment_node_types []
+  throw_node_types []
+  decorator_node_types []
+  env_access_functions NULL
+  env_access_member_patterns NULL
+  throws_clause_field NULL
+  ts_factory true
+  embedded_imports NULL
+lang 169: grammar_symbols=none conditional_block_types=NULL
+  spec NULL
+lang 170: grammar_symbols=none conditional_block_types=NULL
+  spec NULL
+lang 171: grammar_symbols=none conditional_block_types=NULL
+  spec NULL
+lang 100000: grammar_symbols=none conditional_block_types=NULL
+  spec NULL

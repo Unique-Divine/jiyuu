@@ -67,6 +67,9 @@ mod jvm_doc_links;
 #[path = "pipeline/kubernetes.rs"]
 mod kubernetes;
 #[cfg(feature = "native-engine-abi")]
+#[path = "../internal/cbm/lang_specs.rs"]
+mod lang_specs;
+#[cfg(feature = "native-engine-abi")]
 #[path = "mcp/impact_graph.rs"]
 mod mcp_impact_graph;
 #[cfg(feature = "native-engine-abi")]
