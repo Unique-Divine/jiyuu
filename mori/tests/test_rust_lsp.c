@@ -6768,6 +6768,256 @@ TEST(rustlsp_followup_b_pathological_no_hang) {
     cbm_free_result(r); PASS();
 }
 
+/* ── Scoped path parity: C reference vs rust_path.rs ─────────────── */
+
+extern const char *cbm_rust_path_normalize(CBMArena *arena, const char *path);
+extern const char *cbm_rust_path_leaf(const char *path);
+extern const char *cbm_rust_path_prelude(const char *name);
+extern void cbm_rust_path_strip_turbofish(char *path);
+extern void cbm_rust_path_strip_impl_args(char *path);
+
+static bool rustpath_same(const char *c_out, const char *rust_out) {
+    return c_out == rust_out || (c_out && rust_out && strcmp(c_out, rust_out) == 0);
+}
+
+static int rustpath_report(const char *what, const char *input, const char *c_out,
+                           const char *rust_out) {
+    printf("  %s(%s): C=%s Rust=%s\n", what, input ? input : "(null)",
+           c_out ? c_out : "(null)", rust_out ? rust_out : "(null)");
+    return 1;
+}
+
+/* Paths for every branch of expression and type resolution: Self, crate,
+ * super, use aliases (bare, as a head, empty), prelude names and heads,
+ * Cargo members and dependencies, declared-module relative types (child,
+ * parent, ambiguous, missing), primitives and malformed separators. */
+static const char *const RUSTPATH_PATHS[] = {
+    NULL,          "",
+    "Self",        "Self::new",
+    "Self::Inner::make", "Self::",
+    "crate::a::b", "crate::",
+    "super::x::y", "super::",
+    "Local",       "String",
+    "Some",        "HashMap",
+    "Map",         "Map::new",
+    "io::Read",    "io::",
+    "String::from", "Vec::new",
+    "Option::Some::x", "serde::Serialize",
+    "member_a::thing", "std::io::Read",
+    "util::Thing", "util::Missing",
+    "util::Thing::Deep", "both::T",
+    "up::T",       "a:::b",
+    "::abs::path", "x::",
+    "::",          ":",
+    "Empty",       "Empty::x",
+    "u8",          "util.Thing",
+};
+
+typedef struct {
+    const char *module_qn;
+    const char *self_type_qn;
+    bool registry;
+    bool manifest;
+    bool closed_arena;
+} RustPathScene;
+
+static const RustPathScene RUSTPATH_SCENES[] = {
+    {"proj.crate.foo.bar", "proj.crate.foo.bar.S", true, true, false},
+    {NULL, NULL, true, false, false},
+    {"proj", NULL, true, true, false},
+    {"proj.crate", "S", true, true, false},
+    {"proj.crate.foo.bar", "S", false, false, false},
+    {"proj.crate.foo.bar", "proj.crate.foo.bar.S", true, true, true},
+    {NULL, "S", false, true, true},
+};
+
+static void rustpath_add_type(CBMTypeRegistry *reg, const char *qn, const char *short_name) {
+    CBMRegisteredType t;
+    memset(&t, 0, sizeof(t));
+    t.qualified_name = qn;
+    t.short_name = short_name;
+    cbm_registry_add_type(reg, t);
+}
+
+static int rustpath_compare_scene(const RustPathScene *scene) {
+    CBMArena arena;
+    cbm_arena_init(&arena);
+    CBMArena closed;
+    memset(&closed, 0, sizeof(closed));
+
+    CBMTypeRegistry reg;
+    cbm_registry_init(&reg, &arena);
+    rustpath_add_type(&reg, "proj.crate.foo.bar.util.Thing", "Thing");
+    rustpath_add_type(&reg, "proj.crate.foo.bar.both.T", "T");
+    rustpath_add_type(&reg, "proj.crate.foo.both.T", "T");
+    rustpath_add_type(&reg, "proj.crate.foo.up.T", "T");
+    rustpath_add_type(&reg, "proj.crate.util.Thing", "Thing");
+    rustpath_add_type(&reg, "std.io.Read", "Read");
+    rustpath_add_type(&reg, "proj.crate.foo.bar.Local", "Local");
+
+    const char *toml = "[package]\n"
+                       "name = \"app\"\n"
+                       "[dependencies]\n"
+                       "serde = \"1.0\"\n"
+                       "[workspace]\n"
+                       "members = [\"crates/member_a\"]\n";
+    CBMCargoManifest manifest;
+    cbm_cargo_parse(&arena, toml, (int)strlen(toml), &manifest);
+
+    RustLSPContext ctx;
+    rust_lsp_init(&ctx, &arena, "", 0, scene->registry ? &reg : NULL, scene->module_qn, NULL);
+    ctx.self_type_qn = scene->self_type_qn;
+    ctx.cargo_manifest = scene->manifest ? &manifest : NULL;
+    rust_lsp_add_use(&ctx, "Map", "std::collections::HashMap");
+    rust_lsp_add_use(&ctx, "HashMap", "std::collections::HashMap");
+    rust_lsp_add_use(&ctx, "io", "std::io");
+    rust_lsp_add_use(&ctx, "Empty", "");
+    const char *modules[] = {"util", "both", "up"};
+    for (size_t i = 0; i < sizeof(modules) / sizeof(modules[0]); i++) {
+        cbm_idxmemo_put_if_absent(&ctx.declared_modules, &arena, modules[i], 1);
+    }
+    if (scene->closed_arena) {
+        ctx.arena = &closed;
+    }
+
+    int mismatches = 0;
+    size_t count = sizeof(RUSTPATH_PATHS) / sizeof(RUSTPATH_PATHS[0]);
+    for (size_t i = 0; i < count; i++) {
+        const char *path = RUSTPATH_PATHS[i];
+        for (int type_path = 0; type_path < 2; type_path++) {
+            const char *c_out = cbm_rust_path_test_resolve(&ctx, path, type_path, true);
+            const char *rust_out = cbm_rust_path_test_resolve(&ctx, path, type_path, false);
+            if (!rustpath_same(c_out, rust_out)) {
+                printf("  scene module=%s self=%s registry=%d manifest=%d closed=%d\n",
+                       scene->module_qn ? scene->module_qn : "(null)",
+                       scene->self_type_qn ? scene->self_type_qn : "(null)", scene->registry,
+                       scene->manifest, scene->closed_arena);
+                mismatches += rustpath_report(type_path ? "type" : "expr", path, c_out, rust_out);
+            }
+        }
+    }
+    cbm_arena_destroy(&arena);
+    return mismatches;
+}
+
+TEST(rustlsp_scoped_path_resolution_matches_c_reference) {
+    int mismatches = 0;
+    size_t count = sizeof(RUSTPATH_SCENES) / sizeof(RUSTPATH_SCENES[0]);
+    for (size_t i = 0; i < count; i++) {
+        mismatches += rustpath_compare_scene(&RUSTPATH_SCENES[i]);
+    }
+    for (int type_path = 0; type_path < 2; type_path++) {
+        const char *c_out = cbm_rust_path_test_resolve(NULL, "a::b", type_path, true);
+        const char *rust_out = cbm_rust_path_test_resolve(NULL, "a::b", type_path, false);
+        if (!rustpath_same(c_out, rust_out)) {
+            mismatches += rustpath_report("null context", "a::b", c_out, rust_out);
+        }
+    }
+    ASSERT_EQ(0, mismatches);
+    PASS();
+}
+
+static const char *const RUSTPATH_TEXTS[] = {
+    "",
+    "plain",
+    "a::b",
+    "std::io::Read",
+    "Vec::<i32>::new",
+    "parse::<u32>",
+    "a::<B<C>>::d",
+    "a::<b>::<c>",
+    "x::<unterminated",
+    "x::<a<b>",
+    "::<>",
+    "Gen<T>",
+    "<T as Trait>::X",
+    "foo::Bar<'a, T>",
+    ":",
+    "::",
+    ":::",
+    "a:::b",
+    "a::",
+    "::a",
+    "x<",
+    "<",
+    "a.b::c",
+};
+
+TEST(rustlsp_scoped_path_helpers_match_c_reference) {
+    CBMArena arena;
+    cbm_arena_init(&arena);
+    CBMArena closed;
+    memset(&closed, 0, sizeof(closed));
+    int mismatches = 0;
+    size_t count = sizeof(RUSTPATH_TEXTS) / sizeof(RUSTPATH_TEXTS[0]);
+    for (size_t i = 0; i < count; i++) {
+        const char *text = RUSTPATH_TEXTS[i];
+        const char *c_out = cbm_rust_path_c_normalize(&arena, text);
+        const char *rust_out = cbm_rust_path_normalize(&arena, text);
+        if (!rustpath_same(c_out, rust_out)) {
+            mismatches += rustpath_report("normalize", text, c_out, rust_out);
+        }
+        /* An arena that cannot allocate returns the input spelling. */
+        c_out = cbm_rust_path_c_normalize(&closed, text);
+        rust_out = cbm_rust_path_normalize(&closed, text);
+        if (c_out != text || rust_out != text) {
+            mismatches += rustpath_report("normalize(closed)", text, c_out, rust_out);
+        }
+        /* The leaf aliases into the input: compare addresses, not text. */
+        if (cbm_rust_path_c_leaf(text) != cbm_rust_path_leaf(text)) {
+            mismatches += rustpath_report("leaf", text, cbm_rust_path_c_leaf(text),
+                                          cbm_rust_path_leaf(text));
+        }
+        char c_buf[64];
+        char rust_buf[64];
+        snprintf(c_buf, sizeof(c_buf), "%s", text);
+        snprintf(rust_buf, sizeof(rust_buf), "%s", text);
+        cbm_rust_path_c_strip_turbofish(c_buf);
+        cbm_rust_path_strip_turbofish(rust_buf);
+        if (strcmp(c_buf, rust_buf) != 0) {
+            mismatches += rustpath_report("strip_turbofish", text, c_buf, rust_buf);
+        }
+        snprintf(c_buf, sizeof(c_buf), "%s", text);
+        snprintf(rust_buf, sizeof(rust_buf), "%s", text);
+        cbm_rust_path_c_strip_impl_args(c_buf);
+        cbm_rust_path_strip_impl_args(rust_buf);
+        if (strcmp(c_buf, rust_buf) != 0) {
+            mismatches += rustpath_report("strip_impl_args", text, c_buf, rust_buf);
+        }
+    }
+
+    const char *names[] = {
+        "String", "ToString", "Vec", "VecDeque", "HashMap", "BTreeMap", "HashSet",
+        "BTreeSet", "Box", "Rc", "Arc", "Option", "Some", "None", "Result", "Ok", "Err",
+        "Iterator", "IntoIterator", "Future", "Clone", "Copy", "Send", "Sync", "Default",
+        "PartialEq", "Eq", "PartialOrd", "Ord", "Hash", "Display", "Debug", "From", "Into",
+        "TryFrom", "TryInto", "AsRef", "AsMut", "Borrow", "BorrowMut", "Deref", "DerefMut",
+        "Drop", "RefCell", "Cell", "Mutex", "RwLock", "", "string", "Vec::new", "Strin",
+        "Stringy", "Write"};
+    for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
+        const char *c_out = cbm_rust_path_c_prelude(names[i]);
+        const char *rust_out = cbm_rust_path_prelude(names[i]);
+        if (!rustpath_same(c_out, rust_out)) {
+            mismatches += rustpath_report("prelude", names[i], c_out, rust_out);
+        }
+    }
+
+    /* NULL inputs: same results, no crash. */
+    if (cbm_rust_path_c_normalize(&arena, NULL) != cbm_rust_path_normalize(&arena, NULL) ||
+        cbm_rust_path_c_leaf(NULL) != cbm_rust_path_leaf(NULL) ||
+        cbm_rust_path_c_prelude(NULL) != cbm_rust_path_prelude(NULL)) {
+        mismatches += rustpath_report("null input", NULL, NULL, NULL);
+    }
+    cbm_rust_path_c_strip_turbofish(NULL);
+    cbm_rust_path_strip_turbofish(NULL);
+    cbm_rust_path_c_strip_impl_args(NULL);
+    cbm_rust_path_strip_impl_args(NULL);
+
+    cbm_arena_destroy(&arena);
+    ASSERT_EQ(0, mismatches);
+    PASS();
+}
+
 void suite_rust_lsp(void) {
     /* Free function dispatch */
     RUN_TEST(rustlsp_free_function_call);
@@ -7386,4 +7636,8 @@ void suite_rust_lsp(void) {
 
     /* FOLLOWUP B: eval-step hardening */
     RUN_TEST(rustlsp_followup_b_pathological_no_hang);
+
+    /* Scoped paths: rust_path.rs against the C reference */
+    RUN_TEST(rustlsp_scoped_path_resolution_matches_c_reference);
+    RUN_TEST(rustlsp_scoped_path_helpers_match_c_reference);
 }
