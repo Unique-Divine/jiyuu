@@ -45,11 +45,9 @@
  * ---------  --------------------  ------------------------------------------
  * Go         GREEN (all)           dedicated parse_go_imports; stress test passes
  * Python     GREEN (all)           mori_python_extract_imports (Rust); tests pass
- * TypeScript GREEN (all)           process_es_import_statement; existing tests pass
+ * TypeScript GREEN (all)           mori_ts_extract_static_import handles static imports
  * JavaScript GREEN (all)           walk_es_imports + CommonJS; existing tests pass
- * Rust       GREEN (basic)         parse_rust_imports strips "use "/";" text-based;
- *                                  grouped/aliased forms may RED (whole-node text
- *                                  including braces is used as module_path)
+ * Rust       GREEN                 mori_rust_extract_use_imports walks use trees
  * Java       GREEN (basic)         parse_java_imports scoped_identifier; existing
  *                                  test asserts java.util.List → GREEN; static-
  *                                  import and wildcard may differ in format
@@ -495,15 +493,7 @@ TEST(javascript_import_table) {
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
- * Rust — parse_rust_imports (text-based: strips "use "/";" from whole node).
- *
- * EXPECTED: basic and namespaced forms GREEN; grouped/braced forms may be RED
- * because the whole `use std::io::{self, Write};` text becomes the module_path,
- * so has_import("std::io") would still match as a substring — likely GREEN even
- * for grouped. The alias form `use X as Y;` leaves "std::collections::HashMap as H"
- * as module_path — has_import("std::collections::HashMap") would still match.
- * So most forms should be GREEN at extraction.  Graph-level zero edges are
- * downstream.
+ * Rust use declarations through mori_rust_extract_use_imports.
  * ═══════════════════════════════════════════════════════════════════════════ */
 
 static const import_case_t rust_cases[] = {

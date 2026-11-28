@@ -330,23 +330,17 @@ mod rust_path;
 #[path = "../internal/cbm/lsp/perl_packages/mod.rs"]
 mod perl_packages;
 
-#[cfg(feature = "c-backend")]
+#[cfg(feature = "native-engine-abi")]
 #[path = "../internal/cbm/rust_use_imports.rs"]
 mod rust_use_imports;
-
-#[cfg(feature = "c-backend")]
-pub use rust_use_imports::register as mori_register_rust_use_imports;
 
 #[cfg(feature = "native-engine-abi")]
 #[path = "../internal/cbm/markdown_extract/mod.rs"]
 mod markdown_extract;
 
-#[cfg(feature = "c-backend")]
+#[cfg(feature = "native-engine-abi")]
 #[path = "../internal/cbm/ts_static_imports.rs"]
 mod ts_static_imports;
-
-#[cfg(feature = "c-backend")]
-pub use ts_static_imports::register as mori_register_ts_static_imports;
 
 #[cfg(feature = "native-engine-abi")]
 #[path = "cli/activation_transaction/mod.rs"]
