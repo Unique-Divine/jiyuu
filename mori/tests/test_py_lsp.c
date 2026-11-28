@@ -16,10 +16,86 @@
 
 /* ── Helpers — same shape as test_go_lsp.c ──────────────────────── */
 
-static CBMFileResult *extract_py(const char *source) {
+static CBMFileResult *extract_py_once(const char *source) {
     return cbm_extract_file(source, (int)strlen(source), CBM_LANG_PYTHON,
                             "test", "main.py", 0, NULL, NULL);
 }
+
+#ifdef CBM_ENABLE_TEST_SEAMS
+/* While the C reference of a Rust Python resolver stays compiled in, every
+ * extract_py also extracts with the C reference and returns NULL when the
+ * resolved calls, synthetic calls or usages differ, so each test below that
+ * extracts a file doubles as a parity case. */
+static bool pyparity_str(const char *what, int i, const char *c, const char *rust) {
+    if (c == rust || (c && rust && strcmp(c, rust) == 0))
+        return true;
+    printf("  parity %s[%d]: C=%s Rust=%s\n", what, i, c ? c : "(null)",
+           rust ? rust : "(null)");
+    return false;
+}
+
+static bool pyparity_int(const char *what, int i, long long c, long long rust) {
+    if (c == rust)
+        return true;
+    printf("  parity %s[%d]: C=%lld Rust=%lld\n", what, i, c, rust);
+    return false;
+}
+
+static bool pyparity_same(const CBMFileResult *c, const CBMFileResult *r) {
+    bool same = pyparity_int("resolved_calls.count", 0, c->resolved_calls.count,
+                             r->resolved_calls.count);
+    for (int i = 0; same && i < c->resolved_calls.count; i++) {
+        const CBMResolvedCall *a = &c->resolved_calls.items[i];
+        const CBMResolvedCall *b = &r->resolved_calls.items[i];
+        same = pyparity_str("caller", i, a->caller_qn, b->caller_qn) &&
+               pyparity_str("callee", i, a->callee_qn, b->callee_qn) &&
+               pyparity_str("strategy", i, a->strategy, b->strategy) &&
+               pyparity_str("reason", i, a->reason, b->reason) &&
+               pyparity_str("callee_sig", i, a->callee_sig, b->callee_sig) &&
+               pyparity_int("confidence", i, (long long)(a->confidence * 1000.0f),
+                            (long long)(b->confidence * 1000.0f)) &&
+               pyparity_int("kind", i, a->kind, b->kind) &&
+               pyparity_int("site_start", i, a->site_start_byte, b->site_start_byte) &&
+               pyparity_int("site_end", i, a->site_end_byte, b->site_end_byte);
+    }
+    same = same && pyparity_int("calls.count", 0, c->calls.count, r->calls.count);
+    for (int i = 0; same && i < c->calls.count; i++) {
+        const CBMCall *a = &c->calls.items[i];
+        const CBMCall *b = &r->calls.items[i];
+        same = pyparity_str("call.callee", i, a->callee_name, b->callee_name) &&
+               pyparity_str("call.caller", i, a->enclosing_func_qn, b->enclosing_func_qn) &&
+               pyparity_int("call.site", i, a->site_start_byte, b->site_start_byte);
+    }
+    same = same && pyparity_int("usages.count", 0, c->usages.count, r->usages.count);
+    for (int i = 0; same && i < c->usages.count; i++) {
+        const CBMUsage *a = &c->usages.items[i];
+        const CBMUsage *b = &r->usages.items[i];
+        same = pyparity_str("usage.name", i, a->ref_name, b->ref_name) &&
+               pyparity_str("usage.caller", i, a->enclosing_func_qn, b->enclosing_func_qn) &&
+               pyparity_int("usage.kind", i, a->kind, b->kind) &&
+               pyparity_int("usage.site", i, a->site_start_byte, b->site_start_byte);
+    }
+    return same && pyparity_int("has_error", 0, c->has_error, r->has_error);
+}
+
+static CBMFileResult *extract_py(const char *source) {
+    cbm_py_lsp_test_use_c_reference(true);
+    CBMFileResult *c = extract_py_once(source);
+    cbm_py_lsp_test_use_c_reference(false);
+    CBMFileResult *r = extract_py_once(source);
+    if (!c != !r || (c && !pyparity_same(c, r))) {
+        printf("  parity mismatch for source:\n%s\n", source);
+        cbm_free_result(r);
+        r = NULL;
+    }
+    cbm_free_result(c);
+    return r;
+}
+#else
+static CBMFileResult *extract_py(const char *source) {
+    return extract_py_once(source);
+}
+#endif
 
 static int find_resolved(const CBMFileResult *r, const char *callerSub, const char *calleeSub) {
     for (int i = 0; i < r->resolved_calls.count; i++) {
@@ -5463,6 +5539,124 @@ TEST(pylsp_inheritance_lookup_cases) {
     PASS();
 }
 
+/* ── Annotation parity: C reference vs python_annotation.rs ─────────── */
+
+/* A compact spelling of an annotation's type: ? unknown, N:qn named,
+ * B:name builtin, T:name[args] template, U(members) union. */
+static void pyann_render(char *out, size_t cap, const CBMType *t) {
+    size_t len = strlen(out);
+    if (len + 1 >= cap)
+        return;
+    char *p = out + len;
+    size_t left = cap - len;
+    if (!t) {
+        snprintf(p, left, "NULL");
+        return;
+    }
+    switch (t->kind) {
+    case CBM_TYPE_UNKNOWN:
+        snprintf(p, left, "?");
+        return;
+    case CBM_TYPE_NAMED:
+        snprintf(p, left, "N:%s", t->data.named.qualified_name);
+        return;
+    case CBM_TYPE_BUILTIN:
+        snprintf(p, left, "B:%s", t->data.builtin.name);
+        return;
+    case CBM_TYPE_TEMPLATE:
+        snprintf(p, left, "T:%s[", t->data.template_type.template_name);
+        for (int i = 0; i < t->data.template_type.arg_count; i++) {
+            if (i)
+                strncat(out, ",", cap - strlen(out) - 1);
+            pyann_render(out, cap, t->data.template_type.template_args[i]);
+        }
+        strncat(out, "]", cap - strlen(out) - 1);
+        return;
+    case CBM_TYPE_UNION:
+        snprintf(p, left, "U(");
+        for (int i = 0; i < t->data.union_type.count; i++) {
+            if (i)
+                strncat(out, ",", cap - strlen(out) - 1);
+            pyann_render(out, cap, t->data.union_type.members[i]);
+        }
+        strncat(out, ")", cap - strlen(out) - 1);
+        return;
+    default:
+        snprintf(p, left, "K%d", (int)t->kind);
+        return;
+    }
+}
+
+/* Builtins, None, Optional and Union spellings, PEP 604 unions, generic
+ * containers of both cases, quoted forward references, whitespace,
+ * malformed brackets, dotted names, scope-bound and registered names, and
+ * deep nesting. */
+static const char *const PYANN_CASES[] = {
+    NULL, "", " ", "int", "str", "bool", "float", "bytes", "None", "object", "Any", "Self",
+    "Foo", "  Foo  ", "'Foo'", "\"Foo\"", "'Foo", "Known", "Imported", "Imported.Inner",
+    "mod.Foo", "typing.Optional[Foo]", "Optional[Foo]", "Optional [Foo]", "Optional[]",
+    "Optional['Foo']", "Optional[Union[A, B]]", "Union[A, B]", "Union[A]", "Union[]",
+    "Union[A, B, A]", "Union[int, None]", "A | B", "A | None", "A|B|C", "int | 'Foo'",
+    "None | Known", "list[Foo]", "List[Foo]", "list[]", "list[Known]", "dict[str, Foo]",
+    "Dict[str, List[Foo]]", "set[Optional['Foo']]", "tuple[int, ...]", "Tuple[int, str]",
+    "Callable[[int], str]", "Literal['a']", "Annotated[Foo, 1]", "type[Foo]", "Type[Known]",
+    "Awaitable[Foo]", "Iterator[Imported]", "Foo[", "Foo]", "Foo[]]", "[Foo]", "Foo[Bar",
+    "list[list[list[list[Foo]]]]", "Optional[list[A | B]]", "Imported[int]", "Known | int",
+};
+
+static int pyann_compare(PyLSPContext *ctx, const char *module_qn, CBMArena *a) {
+    int mismatches = 0;
+    for (size_t i = 0; i < sizeof(PYANN_CASES) / sizeof(PYANN_CASES[0]); i++) {
+        const char *ann = PYANN_CASES[i];
+        for (int scoped = 0; scoped < 2; scoped++) {
+            const CBMType *c_type = scoped ? cbm_py_annotation_test_resolve(ctx, ann, true)
+                                           : cbm_py_annotation_test_parse(a, ann, module_qn, true);
+            const CBMType *r_type = scoped ? cbm_py_annotation_test_resolve(ctx, ann, false)
+                                           : cbm_py_annotation_test_parse(a, ann, module_qn, false);
+            if (!cbm_type_equal(c_type, r_type)) {
+                char c_text[512] = "";
+                char r_text[512] = "";
+                pyann_render(c_text, sizeof(c_text), c_type);
+                pyann_render(r_text, sizeof(r_text), r_type);
+                printf("  %s(%s, module=%s): C=%s Rust=%s\n", scoped ? "resolve" : "parse",
+                       ann ? ann : "(null)", module_qn ? module_qn : "(null)", c_text, r_text);
+                mismatches++;
+            }
+        }
+    }
+    return mismatches;
+}
+
+TEST(pylsp_annotations_match_c_reference) {
+    CBMArena a;
+    cbm_arena_init(&a);
+    CBMTypeRegistry reg;
+    cbm_registry_init(&reg, &a);
+    CBMRegisteredType known;
+    memset(&known, 0, sizeof(known));
+    known.qualified_name = "pkg.mod.Known";
+    known.short_name = "Known";
+    cbm_registry_add_type(&reg, known);
+    int mismatches = 0;
+    const char *modules[] = {NULL, "pkg.mod"};
+    for (int m = 0; m < 2; m++) {
+        PyLSPContext ctx;
+        const char *locals[] = {"Imported"};
+        const char *qns[] = {"ext.Imported"};
+        bind_imports_into_ctx(&ctx, &a, &reg, locals, qns, 1);
+        ctx.module_qn = modules[m];
+        mismatches += pyann_compare(&ctx, modules[m], &a);
+    }
+    /* Spot-check shared answers, so a shared wrong answer still fails. */
+    char text[256] = "";
+    pyann_render(text, sizeof(text), cbm_py_annotation_test_parse(&a, "Optional[Foo]", "pkg.mod",
+                                                                  false));
+    ASSERT_TRUE(strstr(text, "Foo") != NULL);
+    cbm_arena_destroy(&a);
+    ASSERT_EQ(mismatches, 0);
+    PASS();
+}
+
 SUITE(py_lsp) {
     RUN_TEST(pylsp_range_order_boundaries_and_null_contract);
     RUN_TEST(pylsp_range_growth_rebuild_seal_and_independent_failure);
@@ -5545,6 +5739,7 @@ SUITE(py_lsp) {
     RUN_TEST(pylsp_multi_inheritance_first_base);
     RUN_TEST(pylsp_c3_diamond_and_super_use_same_order);
     RUN_TEST(pylsp_inheritance_lookup_cases);
+    RUN_TEST(pylsp_annotations_match_c_reference);
     RUN_TEST(pylsp_pep695_generic_class);
     /* Phase 9 — cross-file + batch */
     RUN_TEST(pylsp_crossfile_method_dispatch);

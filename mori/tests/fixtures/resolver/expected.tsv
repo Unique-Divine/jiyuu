@@ -62,3 +62,16 @@ python_reexport/main.py	hidden	pkg/star.py:_hidden	Function	307:320	pkg._hidden(
 python_reexport/main.py	make	pkg/impl.py:Widget	Class	185:193	Widget()	Widget
 python_reexport/main.py	starred_name	pkg/star.py:starred	Function	227:240	pkg.starred()	pkg.starred
 python_reexport/main.py	via_package	pkg/impl.py:helper	Function	147:159	pkg.helper()	pkg.helper
+# Python annotations: plain, Optional, Union, quoted, List and PEP 604
+# parameters, a return annotation and an annotated local
+python_annotations/main.py	chained	Engine.start	Method	703:717	make().start()	make().start
+python_annotations/main.py	chained	make	Function	703:709	make()	make
+python_annotations/main.py	listed	Wheel.spin	Method	466:478	wheel.spin()	wheel.spin
+python_annotations/main.py	local	Engine.start	Method	772:786	engine.start()	engine.start
+python_annotations/main.py	local	make	Function	754:760	make()	make
+python_annotations/main.py	make	Engine	Class	666:674	Engine()	Engine
+python_annotations/main.py	optional	Engine.start	Method	261:275	engine.start()	engine.start
+python_annotations/main.py	pep604	Engine.start	Method	618:630	part.start()	part.start
+python_annotations/main.py	plain	Engine.start	Method	193:207	engine.start()	engine.start
+python_annotations/main.py	quoted	Engine.start	Method	383:397	engine.start()	engine.start
+python_annotations/main.py	union	Wheel.spin	Method	328:339	part.spin()	part.spin
