@@ -541,9 +541,12 @@ mod tests {
             )
         };
         let (status, page, present, error) = preview(&db, c"p");
-        assert_eq!(
-            (status, present, error),
-            (ERR, false, Some(c"doc_links probe"))
+        assert_eq!((status, present), (ERR, false));
+        // SQLite can run the progress handler while preparing or stepping SQL.
+        assert!(
+            [Some(c"doc_links probe prepare"), Some(c"doc_links probe")]
+                .contains(&error),
+            "unexpected table probe error: {error:?}"
         );
         assert!(page.is_none());
         let error = read_preview(&db, c"p", copy).err().flatten().unwrap();
