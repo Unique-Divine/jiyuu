@@ -296,11 +296,6 @@ CBMPHPTypeView cbm_php_type_view(const CBMRegisteredType *type);
 typedef void (*CBMPHPTypeVisitor)(void *, const CBMRegisteredType *);
 void cbm_php_visit_short_types(const CBMTypeRegistry *reg, const char *name,
                                CBMPHPTypeVisitor visit, void *data);
-void *cbm_php_arena_alloc(CBMArena *arena, size_t n);
-const CBMRegisteredType *cbm_php_registry_type(const CBMTypeRegistry *reg, const char *qn);
-const CBMRegisteredFunc *cbm_php_registry_method(const CBMTypeRegistry *reg, const char *receiver,
-                                                 const char *name);
-const CBMRegisteredFunc *cbm_php_registry_func(const CBMTypeRegistry *reg, const char *qn);
 
 CBMPHPResolverView cbm_php_resolver_view(const PHPLSPContext *ctx) {
     return (CBMPHPResolverView){ctx->arena, ctx->registry, ctx->module_qn, ctx->external_use_qns,
@@ -310,26 +305,6 @@ CBMPHPResolverView cbm_php_resolver_view(const PHPLSPContext *ctx) {
 CBMPHPTypeView cbm_php_type_view(const CBMRegisteredType *type) {
     return (CBMPHPTypeView){type->qualified_name, type->embedded_types, type->method_names,
                             type->method_qns};
-}
-
-/* PHP-named forwarders, so php_resolver's extern block cannot clash with
- * other Rust modules that declare these C functions over their own handle
- * types. */
-void *cbm_php_arena_alloc(CBMArena *arena, size_t n) {
-    return cbm_arena_alloc(arena, n);
-}
-
-const CBMRegisteredType *cbm_php_registry_type(const CBMTypeRegistry *reg, const char *qn) {
-    return cbm_registry_lookup_type(reg, qn);
-}
-
-const CBMRegisteredFunc *cbm_php_registry_method(const CBMTypeRegistry *reg, const char *receiver,
-                                                 const char *name) {
-    return cbm_registry_lookup_method(reg, receiver, name);
-}
-
-const CBMRegisteredFunc *cbm_php_registry_func(const CBMTypeRegistry *reg, const char *qn) {
-    return cbm_registry_lookup_func(reg, qn);
 }
 
 /* Visit the registry's own types named `name`, in short-name index order. */

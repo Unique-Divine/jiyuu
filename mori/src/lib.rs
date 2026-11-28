@@ -28,11 +28,17 @@ mod complexity;
 #[path = "pipeline/csharp_doc_links/mod.rs"]
 mod csharp_doc_links;
 #[cfg(any(feature = "native-engine-abi", test))]
+#[path = "pipeline/decorator_tags/mod.rs"]
+mod decorator_tags;
+#[cfg(any(feature = "native-engine-abi", test))]
 #[path = "pipeline/definition_props.rs"]
 mod definition_props;
 #[cfg(feature = "native-engine-abi")]
 #[path = "mcp/detect_changes/mod.rs"]
 mod detect_changes;
+#[cfg(feature = "native-engine-abi")]
+#[path = "pipeline/diagrams.rs"]
+mod diagrams;
 #[cfg(feature = "native-engine-abi")]
 #[path = "pipeline/doc_file_links.rs"]
 mod doc_file_links;
@@ -315,17 +321,33 @@ mod go_types_native;
 #[path = "../internal/cbm/native_tree.rs"]
 mod native_tree;
 
+#[cfg(feature = "native-engine-abi")]
+#[path = "../internal/cbm/lsp/native_type_registry.rs"]
+mod native_type_registry;
+
 #[cfg(any(feature = "native-engine-abi", test))]
 #[path = "../internal/cbm/lsp/php_resolver/mod.rs"]
 mod php_resolver;
+
+#[cfg(any(feature = "native-engine-abi", test))]
+#[path = "../internal/cbm/lsp/ruby_lookup.rs"]
+mod ruby_lookup;
 
 #[cfg(feature = "native-engine-abi")]
 #[path = "../internal/cbm/lsp/rust_path.rs"]
 mod rust_path;
 
 #[cfg(any(feature = "native-engine-abi", test))]
+#[path = "../internal/cbm/lsp/c_field_lookup/mod.rs"]
+mod c_field_lookup;
+
+#[cfg(any(feature = "native-engine-abi", test))]
 #[path = "../internal/cbm/lsp/perl_packages/mod.rs"]
 mod perl_packages;
+
+#[cfg(any(feature = "native-engine-abi", test))]
+#[path = "../internal/cbm/lsp/ts_type_text.rs"]
+mod ts_type_text;
 
 #[cfg(feature = "native-engine-abi")]
 #[path = "../internal/cbm/rust_use_imports.rs"]
@@ -379,6 +401,26 @@ mod source_publish;
 #[cfg(any(feature = "native-engine-abi", test))]
 #[path = "pipeline/stage_publish.rs"]
 mod stage_publish;
+
+#[cfg(any(feature = "native-engine-abi", test))]
+#[path = "../internal/cbm/lsp/python_annotation.rs"]
+mod python_annotation;
+
+#[cfg(feature = "native-engine-abi")]
+#[path = "../internal/cbm/lsp/python_calls.rs"]
+mod python_calls;
+
+#[cfg(any(feature = "native-engine-abi", test))]
+#[path = "../internal/cbm/lsp/python_mro.rs"]
+mod python_mro;
+
+#[cfg(any(feature = "native-engine-abi", test))]
+#[path = "../internal/cbm/lsp/python_namespace.rs"]
+mod python_namespace;
+
+#[cfg(feature = "native-engine-abi")]
+#[path = "../internal/cbm/lsp/python_walk.rs"]
+mod python_walk;
 
 #[cfg(feature = "native-engine-abi")]
 #[path = "../internal/cbm/python_imports.rs"]
