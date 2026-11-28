@@ -180,7 +180,7 @@ struct Pagination {
 
 impl Pagination {
     fn cursor(&self) -> Option<Cursor> {
-        let leg = match self.leg as u8 {
+        let leg = match self.leg.to_ne_bytes()[0] {
             b'o' => Leg::Outbound,
             b'i' => Leg::Inbound,
             _ => return None,
@@ -254,8 +254,8 @@ unsafe extern "C" fn mori_trace_cursor(
             state.node_id = cursor.watermark.node_id;
             state.hop = cursor.watermark.hop;
             state.leg = match cursor.leg {
-                Leg::Outbound => b'o' as c_char,
-                Leg::Inbound => b'i' as c_char,
+                Leg::Outbound => c_char::from_ne_bytes([b'o']),
+                Leg::Inbound => c_char::from_ne_bytes([b'i']),
             };
             std::ptr::null()
         }
@@ -387,7 +387,7 @@ unsafe extern "C" fn mori_trace_page(
     };
     let encoded = cursor.encode(stamp, state.hash);
     for (slot, byte) in page.next.iter_mut().zip(encoded.bytes().chain([0])) {
-        *slot = byte as c_char;
+        *slot = c_char::from_ne_bytes([byte]);
     }
 }
 
