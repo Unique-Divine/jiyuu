@@ -106,7 +106,11 @@ fn write_fixtures(
             })
             .collect();
         // `file.py:name` names a target in another file of the fixture.
-        let (target_file, target) = match target.split_once(':') {
+        // Other colons belong to the name (Ruby `Admin::User`).
+        let other_file = target
+            .split_once(':')
+            .filter(|(file, _)| Path::new(file).extension().is_some());
+        let (target_file, target) = match other_file {
             Some((file, name)) => (
                 format!("{module}/{file}"),
                 format!(
