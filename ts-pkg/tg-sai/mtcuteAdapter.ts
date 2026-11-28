@@ -11,12 +11,15 @@ import {
   addChatMembers,
   editAdminRights,
   getChatMember,
+  getChatMembers,
   iterDialogs,
   transferChatOwnership,
 } from "@mtcute/bun/methods.js"
 import { convertFromTelethonSession } from "@mtcute/convert"
 import type { ChatAuditInput, ChatMemberData, UserData } from "./adminAudit"
 import { assertPresentMember } from "./adminAudit"
+import { saiBot } from "./cfg"
+import { registrationDiagnostics } from "./registrationAudit"
 import type { SaiChatRecord } from "./ops"
 import { isSaiChatTitle } from "./ops"
 import type { ProfileStoreEnv } from "./profiles"
@@ -472,6 +475,39 @@ export async function fetchChatAuditInput(
     actor: normalizeChatMember(actor),
     target: normalizeChatMember(target),
   }
+}
+
+/** Read the user's view of registration prerequisites without changing them. */
+export async function fetchRegistrationDiagnostics(
+  client: TelegramClient,
+  chatId: number | string,
+) {
+  const chat = await client.getChat(chatId)
+  const type = chat.chatType
+  if (type !== "group" && type !== "supergroup") {
+    throw new Error("Only Telegram groups can register with Deal Desk")
+  }
+  const members = await getChatMembers(client, chat.inputPeer, { type: "admins" })
+  const [owner, ...otherOwners] = members.filter((member) => member.status === "creator")
+  const ownerUserId = owner && !owner.user.isBot && otherOwners.length === 0
+    ? owner.user.id
+    : null
+  const bot = type === "group"
+    ? members.find((member) => member.user.id === saiBot.id) ?? null
+    : await getTargetChatMember(client, {
+        chatId: chat.id,
+        targetUserId: saiBot.handle,
+      })
+  const defaults = chat.defaultPermissions
+  return registrationDiagnostics({
+    chat: { id: chat.id, title: chat.title, type },
+    ownerUserId,
+    bot: normalizeChatMember(bot),
+    defaultMemberRights: defaults && {
+      inviteUsers: defaults.canInviteUsers,
+      pinMessages: defaults.canPinMessages,
+    },
+  })
 }
 
 /**
