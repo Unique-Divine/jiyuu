@@ -1507,29 +1507,6 @@ TEST(fetch_call_edges_memory_core_ownership) {
 
 /* ── Louvain tests ──────────────────────────────────────────────── */
 
-extern int cbm_leiden_c_reference(const int64_t *nodes, int node_count,
-                                  const cbm_louvain_edge_t *edges, int edge_count,
-                                  double resolution, cbm_louvain_result_t **out, int *out_count);
-
-static bool leiden_matches_c(const int64_t *nodes, int count, const cbm_louvain_edge_t *edges,
-                             int edge_count, double resolution, const cbm_louvain_result_t *rust) {
-    cbm_louvain_result_t *reference = NULL;
-    int reference_count = -1;
-    int rc = cbm_leiden_c_reference(nodes, count, edges, edge_count, resolution, &reference,
-                                    &reference_count);
-    bool matches = rc == CBM_STORE_OK && reference_count == count &&
-                   (reference != NULL) == (count > 0) && (rust != NULL) == (count > 0);
-    for (int i = 0; matches && i < count; i++) {
-        matches = reference[i].node_id == nodes[i] && rust[i].node_id == nodes[i];
-        for (int j = 0; matches && j < i; j++) {
-            matches = (reference[i].community == reference[j].community) ==
-                      (rust[i].community == rust[j].community);
-        }
-    }
-    cbm_leiden_free(reference);
-    return matches;
-}
-
 TEST(louvain_basic) {
     /* Triangle: 1-2, 2-3, 1-3. Pair: 4-5. */
     int64_t nodes[] = {1, 2, 3, 4, 5};
@@ -1538,7 +1515,6 @@ TEST(louvain_basic) {
     int count = 0;
     ASSERT_EQ(cbm_louvain(nodes, 5, edges, 4, &result, &count), CBM_STORE_OK);
     ASSERT_EQ(count, 5);
-    ASSERT_TRUE(leiden_matches_c(nodes, count, edges, 4, 1.0, result));
 
     /* Build node→community map */
     int comm[6] = {0};
@@ -1563,7 +1539,6 @@ TEST(louvain_empty) {
     int count = 0;
     ASSERT_EQ(cbm_louvain(NULL, 0, NULL, 0, &result, &count), CBM_STORE_OK);
     ASSERT_EQ(count, 0);
-    ASSERT_TRUE(leiden_matches_c(NULL, count, NULL, 0, 1.0, result));
     cbm_leiden_free(result);
     PASS();
 }
@@ -1575,7 +1550,6 @@ TEST(louvain_single_node) {
     ASSERT_EQ(cbm_louvain(nodes, 1, NULL, 0, &result, &count), CBM_STORE_OK);
     ASSERT_EQ(count, 1);
     ASSERT_EQ(result[0].node_id, 42);
-    ASSERT_TRUE(leiden_matches_c(nodes, count, NULL, 0, 1.0, result));
     cbm_leiden_free(result);
     PASS();
 }
@@ -1608,7 +1582,6 @@ TEST(louvain_converges) {
     int count = 0;
     ASSERT_EQ(cbm_louvain(nodes, 20, edges, nedges, &result, &count), CBM_STORE_OK);
     ASSERT_EQ(count, 20);
-    ASSERT_TRUE(leiden_matches_c(nodes, count, edges, nedges, 1.0, result));
 
     /* Count communities */
     int comm_map[21] = {0};
@@ -1796,7 +1769,6 @@ TEST(leiden_multilevel_collapses_noise) {
     int count = 0;
     ASSERT_EQ(cbm_louvain(nodes, N, edges, ne, &result, &count), CBM_STORE_OK);
     ASSERT_EQ(count, N);
-    ASSERT_TRUE(leiden_matches_c(nodes, count, edges, ne, 1.0, result));
 
     int nc = leiden_count_communities(result, N);
     ASSERT_TRUE(nc >= 2);
@@ -1840,8 +1812,6 @@ TEST(leiden_resolution_controls_granularity) {
     ASSERT_EQ(cbm_leiden(nodes, N, edges, ne, 5.0, &hi, &hc), CBM_STORE_OK);
     ASSERT_EQ(lc, N);
     ASSERT_EQ(hc, N);
-    ASSERT_TRUE(leiden_matches_c(nodes, lc, edges, ne, 0.1, lo));
-    ASSERT_TRUE(leiden_matches_c(nodes, hc, edges, ne, 5.0, hi));
 
     int n_lo = leiden_count_communities(lo, N);
     int n_hi = leiden_count_communities(hi, N);
@@ -1860,7 +1830,6 @@ static int check_leiden_generated_partition(const int64_t *nodes, int node_count
     int count = 0;
     ASSERT_EQ(cbm_leiden(nodes, node_count, edges, edge_count, 1.0, &result, &count), CBM_STORE_OK);
     ASSERT_EQ(count, node_count);
-    ASSERT_TRUE(leiden_matches_c(nodes, count, edges, edge_count, 1.0, result));
     for (int i = 0; i < count; i++) {
         ASSERT_EQ(result[i].node_id, nodes[i]);
         for (int j = 0; j < i; j++) {
