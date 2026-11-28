@@ -323,6 +323,10 @@ mod php_resolver;
 #[path = "../internal/cbm/lsp/rust_path.rs"]
 mod rust_path;
 
+#[cfg(any(feature = "native-engine-abi", test))]
+#[path = "../internal/cbm/lsp/perl_packages/mod.rs"]
+mod perl_packages;
+
 #[cfg(feature = "c-backend")]
 #[path = "../internal/cbm/rust_use_imports.rs"]
 mod rust_use_imports;
