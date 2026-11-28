@@ -275,11 +275,6 @@ pub unsafe extern "C" fn main(argc: c_int, argv: *mut *mut c_char) -> c_int {
         {
             jiyuu_mori::mori_register_graphql_extractor();
         }
-        if std::env::var_os("MORI_IMPL_GO_IMPORTS").as_deref()
-            == Some(OsStr::new("rust"))
-        {
-            jiyuu_mori::mori_register_go_import_extractor();
-        }
         if std::env::var_os("MORI_IMPL_RUST_IMPORTS").as_deref()
             == Some(OsStr::new("rust"))
         {
@@ -296,7 +291,6 @@ pub unsafe extern "C" fn main(argc: c_int, argv: *mut *mut c_char) -> c_int {
             jiyuu_mori::mori_register_ts_static_imports();
         }
         crate::importance::register();
-        crate::go_results::register();
         crate::query_cli::c_args::register();
         crate::cli_output::register();
         crate::initialize::c_initialize::register();
