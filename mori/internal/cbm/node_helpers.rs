@@ -5,10 +5,6 @@ use std::ffi::{CStr, c_char, c_int, c_void};
 use crate::{lang_specs::lang, native_tree::RawNode};
 
 unsafe extern "C" {
-    fn cbm_arena_strdup(
-        arena: *mut c_void,
-        source: *const c_char,
-    ) -> *mut c_char;
     fn cbm_arena_strndup(
         arena: *mut c_void,
         source: *const c_char,
@@ -30,11 +26,12 @@ pub unsafe extern "C" fn cbm_node_text(
     let range = unsafe { node.range() };
     // SAFETY: The arena is caller-owned and the source covers the copied range.
     unsafe {
-        if range.is_empty() {
-            cbm_arena_strdup(arena, c"".as_ptr())
+        let (source, len) = if range.is_empty() {
+            (c"".as_ptr(), 0)
         } else {
-            cbm_arena_strndup(arena, source.add(range.start), range.len())
-        }
+            (source.add(range.start), range.len())
+        };
+        cbm_arena_strndup(arena, source, len)
     }
 }
 
