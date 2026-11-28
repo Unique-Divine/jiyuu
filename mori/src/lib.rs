@@ -32,6 +32,9 @@ mod detect_changes;
 #[path = "pipeline/doc_file_links.rs"]
 mod doc_file_links;
 #[cfg(feature = "native-engine-abi")]
+#[path = "store/doc_links_preview.rs"]
+mod doc_links_preview;
+#[cfg(feature = "native-engine-abi")]
 #[path = "pipeline/docker_image.rs"]
 mod docker_image;
 #[cfg(any(feature = "native-engine-abi", test))]
