@@ -20415,6 +20415,17 @@ TEST(testdetect_is_test_function) {
 
 /* ── TESTS pass parity: Rust (test_edges.rs) against the C reference ── */
 
+/* Fingerprint the C results for regression tests after the reference is removed. */
+#define PT_FNV_SEED UINT64_C(14695981039346656037)
+
+static uint64_t pt_fnv(uint64_t hash, const void *data, size_t size) {
+    const unsigned char *bytes = data;
+    for (size_t i = 0; i < size; i++) {
+        hash = (hash ^ bytes[i]) * UINT64_C(1099511628211);
+    }
+    return hash;
+}
+
 /* A fixed-seed generator so every run builds the same graphs. */
 static uint32_t pt_next(uint32_t *state) {
     *state = *state * 1664525U + 1013904223U;
@@ -20500,6 +20511,7 @@ TEST(testdetect_rules_rust_match_c) {
 
     uint32_t state = 0x7e575eedU;
     char text[CBM_SZ_256];
+    uint64_t digest = PT_FNV_SEED;
     for (int t = 0; t < 20000; t++) {
         pt_random_text(&state, pt_path_pieces,
                        (int)(sizeof(pt_path_pieces) / sizeof(pt_path_pieces[0])), text,
@@ -20507,19 +20519,24 @@ TEST(testdetect_rules_rust_match_c) {
         if (cbm_is_test_path(text) != cbm_is_test_path_c_ref(text)) {
             printf("  path differs: %s\n", text);
         }
-        ASSERT_EQ(cbm_is_test_path(text), cbm_is_test_path_c_ref(text));
+        unsigned char verdicts[3];
+        verdicts[0] = cbm_is_test_path_c_ref(text);
+        ASSERT_EQ(cbm_is_test_path(text), verdicts[0]);
         node.properties_json = (char *)props[pt_next(&state) % 5];
         CBMLanguage lang = (CBMLanguage)(pt_next(&state) % CBM_LANG_COUNT);
-        ASSERT_EQ(cbm_pipeline_caller_is_test(&node, text, lang),
-                  cbm_pipeline_caller_is_test_c_ref(&node, text, lang));
+        verdicts[1] = cbm_pipeline_caller_is_test_c_ref(&node, text, lang);
+        ASSERT_EQ(cbm_pipeline_caller_is_test(&node, text, lang), verdicts[1]);
         pt_random_text(&state, pt_name_pieces,
                        (int)(sizeof(pt_name_pieces) / sizeof(pt_name_pieces[0])), text,
                        sizeof(text));
         if (cbm_is_test_func_name(text) != cbm_is_test_func_name_c_ref(text)) {
             printf("  name differs: %s\n", text);
         }
-        ASSERT_EQ(cbm_is_test_func_name(text), cbm_is_test_func_name_c_ref(text));
+        verdicts[2] = cbm_is_test_func_name_c_ref(text);
+        ASSERT_EQ(cbm_is_test_func_name(text), verdicts[2]);
+        digest = pt_fnv(digest, verdicts, sizeof(verdicts));
     }
+    printf("  TESTS rules C digest %016llx\n", (unsigned long long)digest);
     PASS();
 }
 
@@ -20641,8 +20658,9 @@ static void pt_build(cbm_gbuf_t *gb, uint32_t seed) {
                              : scope == 1 ? "pt.a.test_mod.helper"
                                           : "pt.gen";
         snprintf(qn, sizeof(qn), "%s.%s_%d", prefix, name, i);
-        ids[i] =
-            pt_def(gb, labels[pt_next(&state) % 4], name, qn, file, props[pt_next(&state) % 3]);
+        const char *label = labels[pt_next(&state) % 4];
+        const char *properties = props[pt_next(&state) % 3];
+        ids[i] = pt_def(gb, label, name, qn, file, properties);
     }
     for (int e = 0; e < PT_GEN_EDGES; e++) {
         int64_t a = ids[pt_next(&state) % PT_GEN_NODES];
@@ -20657,16 +20675,27 @@ typedef struct {
     int cap;
 } pt_lines_t;
 
-static void pt_collect_edge(const cbm_gbuf_edge_t *e, void *data) {
-    pt_lines_t *lines = data;
+static void pt_add_line(pt_lines_t *lines, const char *line) {
     if (lines->count == lines->cap) {
         lines->cap = lines->cap ? lines->cap * 2 : 256;
         lines->lines = realloc(lines->lines, (size_t)lines->cap * sizeof(char *));
     }
+    lines->lines[lines->count++] = strdup(line);
+}
+
+static void pt_collect_edge(const cbm_gbuf_edge_t *e, void *data) {
     char line[CBM_SZ_256];
     snprintf(line, sizeof(line), "%s %lld %lld %s", e->type, (long long)e->source_id,
              (long long)e->target_id, e->properties_json ? e->properties_json : "(null)");
-    lines->lines[lines->count++] = strdup(line);
+    pt_add_line(data, line);
+}
+
+static void pt_collect_node(const cbm_gbuf_node_t *n, void *data) {
+    char line[2048];
+    snprintf(line, sizeof(line), "%lld %s %s %s %s %d %d %s", (long long)n->id,
+             n->label, n->name, n->qualified_name, n->file_path, n->start_line, n->end_line,
+             n->properties_json);
+    pt_add_line(data, line);
 }
 
 static int pt_cmp_line(const void *a, const void *b) {
@@ -20677,6 +20706,20 @@ static void pt_edges(const cbm_gbuf_t *gb, pt_lines_t *out) {
     memset(out, 0, sizeof(*out));
     cbm_gbuf_foreach_edge(gb, pt_collect_edge, out);
     qsort(out->lines, (size_t)out->count, sizeof(char *), pt_cmp_line);
+}
+
+static void pt_nodes(const cbm_gbuf_t *gb, pt_lines_t *out) {
+    memset(out, 0, sizeof(*out));
+    cbm_gbuf_foreach_node(gb, pt_collect_node, out);
+    qsort(out->lines, (size_t)out->count, sizeof(char *), pt_cmp_line);
+}
+
+static uint64_t pt_lines_digest(const pt_lines_t *lines) {
+    uint64_t digest = PT_FNV_SEED;
+    for (int i = 0; i < lines->count; i++) {
+        digest = pt_fnv(digest, lines->lines[i], strlen(lines->lines[i]) + 1);
+    }
+    return digest;
 }
 
 static void pt_lines_free(pt_lines_t *lines) {
@@ -20731,6 +20774,19 @@ TEST(tests_pass_rust_matches_c) {
             }
             ASSERT_STR_EQ(c_edges.lines[i], rust_edges.lines[i]);
         }
+        pt_lines_t c_nodes;
+        pt_lines_t rust_nodes;
+        pt_nodes(c_graph, &c_nodes);
+        pt_nodes(rust_graph, &rust_nodes);
+        ASSERT_EQ(rust_nodes.count, c_nodes.count);
+        for (int i = 0; i < c_nodes.count; i++) {
+            ASSERT_STR_EQ(c_nodes.lines[i], rust_nodes.lines[i]);
+        }
+        printf("  TESTS C seed %u nodes %016llx edges %d %016llx\n", seed,
+               (unsigned long long)pt_lines_digest(&c_nodes), c_edges.count,
+               (unsigned long long)pt_lines_digest(&c_edges));
+        pt_lines_free(&c_nodes);
+        pt_lines_free(&rust_nodes);
         pt_lines_free(&c_edges);
         pt_lines_free(&rust_edges);
         cbm_gbuf_free(c_graph);
