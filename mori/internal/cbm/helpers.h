@@ -254,6 +254,16 @@ void cbm_kind_in_set_free_cache(void);
 // Check if node has an ancestor of the given kind, within max_depth levels.
 bool cbm_has_ancestor_kind(TSNode node, const char *kind, int max_depth);
 
+#ifdef CBM_ENABLE_TEST_SEAMS
+char *cbm_c_reference_node_text(CBMArena *a, TSNode node, const char *source);
+bool cbm_c_reference_is_test_file(const char *rel_path, CBMLanguage lang);
+TSNode cbm_c_reference_find_child_by_kind(TSNode parent, const char *kind);
+int cbm_c_reference_find_children_by_kind(TSNode parent, const char *kind, TSNode *out, int max);
+bool cbm_c_reference_is_namespace_scope_kind(CBMLanguage lang, const char *kind);
+bool cbm_c_reference_has_ancestor_kind(TSNode node, const char *kind, int max_depth);
+bool cbm_c_reference_is_loop_node_type(const char *kind);
+#endif
+
 // Growable pending-node stack for the iterative AST walkers.
 //
 // No work cap may decide graph content, so walker stacks never truncate: a

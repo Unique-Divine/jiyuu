@@ -19,11 +19,19 @@ struct RawCursor {
     context: [u32; 3],
 }
 
+#[repr(C)]
+struct ByteRange {
+    start: u32,
+    end: u32,
+}
+
 // The C bridge marks only the initialized fields before Tree-sitter reads them.
 unsafe extern "C" {
     fn cbm_ffi_ts_node_type(node: *const RawNode) -> *const c_char;
-    fn cbm_ffi_ts_node_start_byte(node: *const RawNode) -> u32;
-    fn cbm_ffi_ts_node_end_byte(node: *const RawNode) -> u32;
+    fn cbm_ffi_ts_node_byte_range(node: *const RawNode) -> ByteRange;
+    fn cbm_ffi_ts_node_child_count(node: *const RawNode) -> u32;
+    fn cbm_ffi_ts_node_child(node: *const RawNode, index: u32) -> RawNode;
+    fn cbm_ffi_ts_node_parent(node: *const RawNode) -> RawNode;
     #[cfg(feature = "c-backend")]
     fn cbm_ffi_ts_node_is_named(node: *const RawNode) -> bool;
     fn cbm_ffi_ts_node_child_by_field_name(
@@ -93,6 +101,35 @@ impl Drop for TreeCursor {
 }
 
 impl RawNode {
+    pub(crate) const NULL: Self = Self {
+        context: [0; 4],
+        id: std::ptr::null(),
+        tree: std::ptr::null(),
+    };
+
+    pub(crate) fn is_null(self) -> bool {
+        self.id.is_null()
+    }
+
+    /// # Safety
+    /// The node and its ancestors must borrow a live tree.
+    pub(crate) unsafe fn parent(self) -> Option<Self> {
+        // SAFETY: The caller provides the live tree.
+        let parent = unsafe { cbm_ffi_ts_node_parent(&self) };
+        (!parent.is_null()).then_some(parent)
+    }
+
+    /// Visit direct children by index, including anonymous tokens.
+    ///
+    /// # Safety
+    /// Keep the borrowed tree alive through the last use of the iterator and its nodes.
+    pub(crate) unsafe fn indexed_children(self) -> impl Iterator<Item = Self> {
+        // SAFETY: The caller provides the live tree for the count and each lookup.
+        let count = unsafe { cbm_ffi_ts_node_child_count(&self) };
+        (0..count)
+            .map(move |index| unsafe { cbm_ffi_ts_node_child(&self, index) })
+    }
+
     /// These accessors require a node borrowed from a still-live native tree.
     pub(crate) unsafe fn field(self, name: &CStr) -> Option<Self> {
         // SAFETY: The caller guarantees the live tree, and name is a C string.
@@ -103,7 +140,7 @@ impl RawNode {
                 name.count_bytes() as u32,
             )
         };
-        (!child.id.is_null()).then_some(child)
+        (!child.is_null()).then_some(child)
     }
 
     /// Walk visible children in source order, including anonymous tokens.
@@ -152,9 +189,15 @@ impl RawNode {
 
     pub(crate) unsafe fn range(self) -> std::ops::Range<usize> {
         // SAFETY: The caller guarantees the live tree.
-        unsafe {
-            cbm_ffi_ts_node_start_byte(&self) as usize
-                ..cbm_ffi_ts_node_end_byte(&self) as usize
-        }
+        let range = unsafe { cbm_ffi_ts_node_byte_range(&self) };
+        range.start as usize..range.end as usize
+    }
+
+    /// # Safety
+    /// The node must borrow the live tree parsed from `source`.
+    #[cfg(feature = "c-backend")]
+    pub(crate) unsafe fn text(self, source: &[u8]) -> Option<&[u8]> {
+        // SAFETY: The caller provides the live tree.
+        source.get(unsafe { self.range() })
     }
 }

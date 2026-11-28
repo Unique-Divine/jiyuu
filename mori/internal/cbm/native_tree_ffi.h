@@ -13,8 +13,14 @@ static inline void cbm_ffi_ts_node_written(const TSNode *node) {
 }
 
 const char *cbm_ffi_ts_node_type(const TSNode *node);
-uint32_t cbm_ffi_ts_node_start_byte(const TSNode *node);
-uint32_t cbm_ffi_ts_node_end_byte(const TSNode *node);
+typedef struct {
+    uint32_t start;
+    uint32_t end;
+} cbm_ts_node_byte_range;
+cbm_ts_node_byte_range cbm_ffi_ts_node_byte_range(const TSNode *node);
+uint32_t cbm_ffi_ts_node_child_count(const TSNode *node);
+TSNode cbm_ffi_ts_node_child(const TSNode *node, uint32_t index);
+TSNode cbm_ffi_ts_node_parent(const TSNode *node);
 bool cbm_ffi_ts_node_is_named(const TSNode *node);
 TSNode cbm_ffi_ts_node_child_by_field_name(const TSNode *node, const char *name, uint32_t length);
 

@@ -3,6 +3,7 @@
 #include "arena.h" // CBMArena, cbm_arena_alloc/strdup/strndup/sprintf
 #include "cbm.h"   // CBMExtractCtx, CBMLanguage, CBM_LANG_*, EFCEntry, EFC_SIZE
 #include "lang_specs.h"
+#include "native_tree_ffi.h"
 #include "tree_sitter/api.h" // TSNode, ts_node_*
 #include "foundation/constants.h"
 #include "foundation/compat.h"   // CBM_TLS
@@ -14,7 +15,6 @@ enum {
     MIN_ROUTE_LEN = 3,
     MIN_SYS_PATH_LEN = 4,
     MAX_ROUTE_SCAN = 20,
-    NOEXT_BUF = 256,
     MIN_HEX_LEN = 3,
     MAX_HEX_NAME_LEN = 64,
     INIT_FILE_LEN = 8,  /* strlen("__init__") */
@@ -57,7 +57,8 @@ void *cbm_memmem(const void *haystack, size_t haystack_len, const void *needle, 
 
 // --- Node text extraction ---
 
-char *cbm_node_text(CBMArena *a, TSNode node, const char *source) {
+#ifdef CBM_ENABLE_TEST_SEAMS
+char *cbm_c_reference_node_text(CBMArena *a, TSNode node, const char *source) {
     uint32_t start = ts_node_start_byte(node);
     uint32_t end = ts_node_end_byte(node);
     if (end <= start) {
@@ -65,6 +66,7 @@ char *cbm_node_text(CBMArena *a, TSNode node, const char *source) {
     }
     return cbm_arena_strndup(a, source + start, end - start);
 }
+#endif
 
 // --- Keyword sets per language ---
 
@@ -370,6 +372,9 @@ bool cbm_is_exported(const char *name, CBMLanguage lang) {
 
 // --- Test file detection ---
 
+#ifdef CBM_ENABLE_TEST_SEAMS
+enum { NOEXT_BUF = 256 };
+
 static bool has_suffix(const char *str, const char *suffix) {
     size_t slen = strlen(str);
     size_t xlen = strlen(suffix);
@@ -404,7 +409,7 @@ static void strip_ext(const char *base, char *buf, size_t buflen) {
     }
 }
 
-bool cbm_is_test_file(const char *rel_path, CBMLanguage lang) {
+bool cbm_c_reference_is_test_file(const char *rel_path, CBMLanguage lang) {
     if (!rel_path) {
         return false;
     }
@@ -465,10 +470,22 @@ bool cbm_is_test_file(const char *rel_path, CBMLanguage lang) {
         return false;
     }
 }
+#endif
 
 // --- AST traversal helpers ---
 
+/* Mark the complete Rust output before returning TSNode by value to C. */
+extern void cbm_rust_find_child_by_kind(const TSNode *parent, const char *kind, TSNode *out);
+
 TSNode cbm_find_child_by_kind(TSNode parent, const char *kind) {
+    TSNode child;
+    cbm_rust_find_child_by_kind(&parent, kind, &child);
+    cbm_ffi_ts_node_written(&child);
+    return child;
+}
+
+#ifdef CBM_ENABLE_TEST_SEAMS
+TSNode cbm_c_reference_find_child_by_kind(TSNode parent, const char *kind) {
     uint32_t count = ts_node_child_count(parent);
     for (uint32_t i = 0; i < count; i++) {
         TSNode child = ts_node_child(parent, i);
@@ -480,7 +497,7 @@ TSNode cbm_find_child_by_kind(TSNode parent, const char *kind) {
     return null_node;
 }
 
-int cbm_find_children_by_kind(TSNode parent, const char *kind, TSNode *out, int max) {
+int cbm_c_reference_find_children_by_kind(TSNode parent, const char *kind, TSNode *out, int max) {
     int n = 0;
     uint32_t count = ts_node_child_count(parent);
     for (uint32_t i = 0; i < count && n < max; i++) {
@@ -491,6 +508,7 @@ int cbm_find_children_by_kind(TSNode parent, const char *kind, TSNode *out, int 
     }
     return n;
 }
+#endif
 
 /* ── Node-type classification: TSSymbol bitset acceleration ───────────────
  * cbm_kind_in_set is called for nearly every AST node (function/class/call/
@@ -601,7 +619,8 @@ bool cbm_kind_in_set(TSNode node, const char **types) {
     return kind_in_set_strcmp(node, (const char *const *)types);
 }
 
-bool cbm_is_namespace_scope_kind(CBMLanguage lang, const char *kind) {
+#ifdef CBM_ENABLE_TEST_SEAMS
+bool cbm_c_reference_is_namespace_scope_kind(CBMLanguage lang, const char *kind) {
     if (!kind) {
         return false;
     }
@@ -613,6 +632,7 @@ bool cbm_is_namespace_scope_kind(CBMLanguage lang, const char *kind) {
     }
     return false;
 }
+#endif
 
 /* Free the calling thread's node-type bitset cache (the calloc'd `bits` arrays
  * that cbm_kind_in_set builds lazily). The cache is thread-local, so each worker
@@ -629,7 +649,8 @@ void cbm_kind_in_set_free_cache(void) {
     }
 }
 
-bool cbm_has_ancestor_kind(TSNode node, const char *kind, int max_depth) {
+#ifdef CBM_ENABLE_TEST_SEAMS
+bool cbm_c_reference_has_ancestor_kind(TSNode node, const char *kind, int max_depth) {
     TSNode cur = node;
     for (int i = 0; i < max_depth; i++) {
         TSNode parent = ts_node_parent(cur);
@@ -643,6 +664,7 @@ bool cbm_has_ancestor_kind(TSNode node, const char *kind, int max_depth) {
     }
     return false;
 }
+#endif
 
 bool cbm_walk_stack_reserve(void **items, int *cap, int need, size_t elem_size,
                             const void *inline_buf, const char *walker) {
@@ -724,7 +746,8 @@ int cbm_count_branching(TSNode node, const char **branching_types) {
 }
 
 // Loop node-type names across tree-sitter grammars, for loop-nesting depth.
-bool cbm_is_loop_node_type(const char *kind) {
+#ifdef CBM_ENABLE_TEST_SEAMS
+bool cbm_c_reference_is_loop_node_type(const char *kind) {
     static const char *const loops[] = {
         "for_statement", "while_statement", "do_statement", "do_while_statement",
         "for_in_statement", "for_of_statement", "for_each_statement", "foreach_statement",
@@ -740,6 +763,7 @@ bool cbm_is_loop_node_type(const char *kind) {
     }
     return false;
 }
+#endif
 
 // Is `kind` a chained member/subscript access node? Language-agnostic generic
 // set covering the common grammars; used only for the structural "access depth"

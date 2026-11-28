@@ -72,12 +72,8 @@ unsafe extern "C" fn extract(
     let emit = |spec: RawNode| {
         // SAFETY: The field nodes borrow the same tree as root.
         let import = unsafe {
-            let path = spec
-                .field(c"path")
-                .and_then(|node| source.get(node.range()));
-            let alias = spec
-                .field(c"name")
-                .and_then(|node| source.get(node.range()));
+            let path = spec.field(c"path").and_then(|node| node.text(source));
+            let alias = spec.field(c"name").and_then(|node| node.text(source));
             path.and_then(|path| GoImport::from_spelling(path, alias))
         };
         if let Some(GoImport {
