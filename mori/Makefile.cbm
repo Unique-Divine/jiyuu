@@ -556,7 +556,6 @@ PIPELINE_SRCS = \
     src/pipeline/doc_links_ts.c \
     src/pipeline/doc_links_php.c \
     src/pipeline/doc_links_c.c \
-    src/pipeline/pass_diagrams.c \
     src/pipeline/doc_links_msbuild.c \
     src/pipeline/pass_route_nodes.c \
     src/pipeline/pass_enrichment.c \
