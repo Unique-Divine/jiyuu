@@ -1390,7 +1390,11 @@ int cbm_pipeline_githistory_compute(const char *repo_path, cbm_githistory_result
 /* Apply pre-computed couplings to the graph buffer (main thread only). */
 int cbm_pipeline_githistory_apply(cbm_pipeline_ctx_t *ctx, const cbm_githistory_result_t *result);
 
-/* Pre-dump pass: decorator tags enrichment (operates on gbuf). */
+/* Pre-dump pass: decorator tags enrichment (operates on gbuf), in
+ * pipeline/decorator_tags. Returns how many nodes it tagged. */
+int mori_pipeline_pass_decorator_tags(cbm_gbuf_t *gbuf, const char *project);
+/* Its C reference (pass_enrichment.c), kept only for the Rust parity test in
+ * tests/test_enrichment.c. */
 int cbm_pipeline_pass_decorator_tags(cbm_gbuf_t *gbuf, const char *project);
 
 /* Pre-dump pass: config ↔ code linking. */
