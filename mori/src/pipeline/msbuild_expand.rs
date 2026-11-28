@@ -314,4 +314,101 @@ mod tests {
         assert_eq!(host.requests, [64, 128]);
         assert_eq!(work, 2);
     }
+
+    struct Properties {
+        values: Vec<(&'static [u8], CString)>,
+        buffers: Vec<Vec<u8>>,
+    }
+
+    unsafe extern "C" fn property(
+        context: *mut c_void,
+        name: *const c_char,
+        len: usize,
+    ) -> *const c_char {
+        let host = unsafe { &*context.cast::<Properties>() };
+        let name = unsafe { slice::from_raw_parts(name.cast::<u8>(), len) };
+        host.values
+            .iter()
+            .find(|(key, _)| *key == name)
+            .map_or(ptr::null(), |(_, value)| value.as_ptr())
+    }
+
+    unsafe extern "C" fn keep(context: *mut c_void, size: usize) -> *mut c_char {
+        let host = unsafe { &mut *context.cast::<Properties>() };
+        let mut buffer = vec![0; size];
+        let out = buffer.as_mut_ptr().cast();
+        host.buffers.push(buffer);
+        out
+    }
+
+    // The cases the C and Rust expanders were compared on through the
+    // evaluator before the C implementation was deleted.
+    #[test]
+    fn matches_the_retired_c_expansion_cases() {
+        let repeat = |byte: u8, len: usize| vec![byte; len];
+        let mut host = Properties {
+            values: vec![
+                (b"Empty".as_slice(), c"".into()),
+                (b"Short", c"Abc".into()),
+                (b"Later", c"L".into()),
+                (b"_Under", c"U".into()),
+                (b"Utf", CString::new("\u{e9}t\u{e9}").unwrap()),
+                (b"P63", CString::new(repeat(b'a', 63)).unwrap()),
+                (b"Long4094", CString::new(repeat(b'l', 4094)).unwrap()),
+                (b"Long4095", CString::new(repeat(b'l', 4095)).unwrap()),
+            ],
+            buffers: Vec::new(),
+        };
+        let concat = |parts: &[&[u8]]| Some(parts.concat());
+        let long_name = [b"$(".as_slice(), &repeat(b'N', 300), b")"].concat();
+        let cases: Vec<(&[u8], Option<Vec<u8>>)> = vec![
+            (b"", Some(vec![])),
+            (b"Plain.Namespace", Some(b"Plain.Namespace".to_vec())),
+            (b"$(Empty)$(Empty)", Some(vec![])),
+            (b"Pre.$(Short).$(Later)", Some(b"Pre.Abc.L".to_vec())),
+            (b"$(_Under)", Some(b"U".to_vec())),
+            (b"x$(Unknown)$(Short)", None),
+            (b"$()", None),
+            (b"$(", None),
+            (b"$(3abc)", None),
+            (b"$(No.Close)", None),
+            (b"$(Open", None),
+            (b"$([System.String]::Copy('a'))", None),
+            (b"@(Item)", None),
+            (b"%(Meta)", None),
+            (b"%2F", None),
+            (b"%2f.Lower", None),
+            (b"$", Some(b"$".to_vec())),
+            (b"$ @ % %2 %q0", Some(b"$ @ % %2 %q0".to_vec())),
+            (b"a$b@c%d", Some(b"a$b@c%d".to_vec())),
+            (b"$(P63)x", concat(&[&repeat(b'a', 63), b"x"])),
+            (b"$(Long4094)x", concat(&[&repeat(b'l', 4094), b"x"])),
+            (b"$(Long4094)xy", None),
+            (b"$(Long4095)", Some(repeat(b'l', 4095))),
+            (b"$(Long4095)$(Empty)", Some(repeat(b'l', 4095))),
+            (b"$(Long4095)x", None),
+            (b"$(Long4095)x$(Later)", None),
+            (b"$(Utf)\xc3\xa9", Some("\u{e9}t\u{e9}\u{e9}".as_bytes().to_vec())),
+            (b"$(Pr\xc3\xa9)", None),
+            (&long_name, None),
+        ];
+        for (text, expected) in cases {
+            let input = CString::new(text).unwrap();
+            let oom = false;
+            let mut work = 0;
+            let out = unsafe {
+                mori_msbuild_expand(
+                    input.as_ptr(),
+                    (&raw mut host).cast(),
+                    property,
+                    keep,
+                    &oom,
+                    &mut work,
+                )
+            };
+            let actual = (!out.is_null())
+                .then(|| unsafe { CStr::from_ptr(out) }.to_bytes().to_vec());
+            assert_eq!(actual, expected, "{}", String::from_utf8_lossy(text));
+        }
+    }
 }

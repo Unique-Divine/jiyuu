@@ -1637,107 +1637,10 @@ static char *msb_expand_alloc(void *context, size_t size) {
     return scratch_alloc(host->ev, size);
 }
 
-#if defined(CBM_ENABLE_TEST_SEAMS) && CBM_ENABLE_TEST_SEAMS
-/* The C expansion that mori_msbuild_expand replaced, kept only as the parity
- * reference for test builds. */
-enum {
-    MSB_VALUE_MAX = 4096, /* an expanded value; a longer one is unknown */
-};
-
-static _Atomic bool msb_expand_with_c;
-
-void cbm_msb_test_expand_with_c(bool enabled) {
-    atomic_store(&msb_expand_with_c, enabled);
-}
-
-/* A value being put together; `over` once it is longer than a value may be. */
-typedef struct {
-    msb_eval_t *ev;
-    char *buf;
-    size_t len;
-    size_t cap;
-    bool over;
-} msb_sb_t;
-
-static void msb_sb_put(msb_sb_t *b, const char *s, size_t n) {
-    if (b->over || b->ev->oom) {
-        return;
-    }
-    if (b->len + n >= MSB_VALUE_MAX) {
-        b->over = true;
-        return;
-    }
-    if (b->len + n + SKIP_ONE > b->cap) {
-        size_t ncap = b->cap ? b->cap * PAIR_LEN : CBM_SZ_64;
-        while (ncap < b->len + n + SKIP_ONE) {
-            ncap *= PAIR_LEN;
-        }
-        char *grown = (char *)scratch_alloc(b->ev, ncap);
-        if (!grown) {
-            return;
-        }
-        if (b->len > 0) {
-            memcpy(grown, b->buf, b->len);
-            msb_work(b->len);
-        }
-        b->buf = grown;
-        b->cap = ncap;
-    }
-    memcpy(b->buf + b->len, s, n);
-    b->len += n;
-    b->buf[b->len] = '\0';
-    msb_work(n + SKIP_ONE); /* append plus its terminator */
-}
-
-/* `text` with its $(Property) references replaced. NULL when it has no value
- * this reader knows: a property that is not known, a property function, an
- * item or metadata reference, an escape, a value past MSB_VALUE_MAX. */
-static const char *msb_expand_c(msb_eval_t *ev, int file, const char *text) {
-    msb_eval_file_t host = {.ev = ev, .file = file};
-    msb_sb_t b = {.ev = ev};
-    for (const char *p = text; *p;) {
-        if (p[0] == '$' && p[1] == '(') {
-            const char *nm = p + PAIR_LEN;
-            const char *e = nm;
-            while (isalnum((unsigned char)*e) || *e == '_') {
-                e++;
-            }
-            if (e == nm || *e != ')' || isdigit((unsigned char)nm[0])) {
-                return NULL;
-            }
-            const char *v = msb_expand_lookup(&host, nm, (size_t)(e - nm));
-            if (!v) {
-                return NULL;
-            }
-            msb_sb_put(&b, v, strlen(v));
-            p = e + SKIP_ONE;
-            continue;
-        }
-        if ((p[0] == '@' || p[0] == '%') && p[1] == '(') {
-            return NULL;
-        }
-        if (p[0] == '%' && isxdigit((unsigned char)p[1]) && isxdigit((unsigned char)p[2])) {
-            return NULL;
-        }
-        msb_sb_put(&b, p, SKIP_ONE);
-        p++;
-    }
-    if (b.over || ev->oom) {
-        return NULL;
-    }
-    return b.buf ? b.buf : "";
-}
-#endif
-
 /* `text` with its $(Property) references replaced. NULL when it has no value
  * this reader knows: a property that is not known, a property function, an
  * item or metadata reference, an escape, a value of 4096 bytes or more. */
 static const char *msb_expand(msb_eval_t *ev, int file, const char *text) {
-#if defined(CBM_ENABLE_TEST_SEAMS) && CBM_ENABLE_TEST_SEAMS
-    if (atomic_load(&msb_expand_with_c)) {
-        return msb_expand_c(ev, file, text);
-    }
-#endif
     msb_eval_file_t host = {.ev = ev, .file = file};
     size_t work;
     const char *value =
