@@ -53,6 +53,9 @@ mod kubernetes;
 #[path = "pipeline/msbuild_condition.rs"]
 mod msbuild_condition;
 #[cfg(any(feature = "native-engine-abi", test))]
+#[path = "pipeline/msbuild_expand.rs"]
+mod msbuild_expand;
+#[cfg(any(feature = "native-engine-abi", test))]
 #[path = "pipeline/msbuild_import.rs"]
 mod msbuild_import;
 #[cfg(feature = "native-engine-abi")]

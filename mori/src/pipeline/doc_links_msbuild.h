@@ -141,6 +141,10 @@ typedef struct {
 } cbm_msb_state_test_stats_t;
 void cbm_msb_test_state_stats(cbm_msb_state_test_stats_t *out);
 
+/* Route MSBuild property expansion to the retired C implementation instead of
+ * mori_msbuild_expand, so parity tests can compare both on one input. */
+void cbm_msb_test_expand_with_c(bool enabled);
+
 #endif
 
 #endif /* CBM_PIPELINE_DOC_LINKS_MSBUILD_H */
