@@ -331,6 +331,10 @@ mod rust_path;
 #[path = "../internal/cbm/lsp/perl_packages/mod.rs"]
 mod perl_packages;
 
+#[cfg(any(feature = "native-engine-abi", test))]
+#[path = "../internal/cbm/lsp/ts_type_text.rs"]
+mod ts_type_text;
+
 #[cfg(feature = "c-backend")]
 #[path = "../internal/cbm/rust_use_imports.rs"]
 mod rust_use_imports;

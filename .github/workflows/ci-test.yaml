@@ -516,7 +516,7 @@ jobs:
       MORI_CANDIDATE_SUITES: >-
         edge_types_probe lang_contract cross_repo extraction graph_buffer pipeline yaml language
         config_text_edit doclinks doc_links_pdf watcher daemon_ipc
-        store_graph_digest pipeline_frozen httpd
+        store_graph_digest pipeline_frozen httpd ts_lsp
     steps:
       - name: Unaffected project
         if: needs.changes.outputs.mori != 'true'
