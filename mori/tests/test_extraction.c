@@ -8,7 +8,9 @@
 #include "test_framework.h"
 #include "cbm.h"
 #include "doclink.h"
+#include "foundation/mem_core.h"
 #include "foundation/platform.h"
+#include "foundation/slab_alloc.h"
 #include "foundation/constants.h"     /* CBM_SZ_* */
 #include "preprocessor.h"             /* cbm_export_macro_candidates (#1989) */
 #include "../src/foundation/compat.h" /* cbm_clock_gettime (wide-flat scaling guard) */
@@ -21,12 +23,16 @@
 #include "iris_export_xml.h"
 #include "helpers.h"    /* cbm_count_branching (walker stack cap) */
 #include "lang_specs.h" /* cbm_lang_spec, cbm_ts_language */
+#include "lsp/ruby_lookup.h"
+#include "lsp/ruby_lsp.h"
 
 /* Deep-nesting probes: extraction on a worker-sized stack, crash-isolated. */
 #include "pipeline/worker_pool.h"            /* CBM_WORKER_STACK_SIZE */
 #include "../src/foundation/compat_thread.h" /* cbm_thread_create */
 #if !defined(_WIN32)
+#include <signal.h>
 #include <sys/wait.h> /* fork/waitpid */
+#include <unistd.h>
 #endif
 
 /* ── Helpers ───────────────────────────────────────────────────── */
@@ -1178,6 +1184,163 @@ TEST(ruby_constructor_callee_is_constant_path) {
     ASSERT_FALSE(kept_new);
 
     cbm_free_result(r);
+    PASS();
+}
+
+TEST(ruby_ancestry_resolved_occurrences) {
+    const char *source =
+        "module Admin\n"
+        "  module Greetable\n"
+        "    def greet; end\n"
+        "  end\n"
+        "  class Base\n"
+        "    def helper; end\n"
+        "  end\n"
+        "  class Child < Base\n"
+        "    include Greetable\n"
+        "    def probe\n"
+        "      # π makes byte and character offsets differ\n"
+        "      Child.new\n"
+        "      self.helper\n"
+        "      self.greet\n"
+        "      self.greet\n"
+        "    end\n"
+        "  end\n"
+        "  class Hidden < Base\n"
+        "    include Unseen\n"
+        "    def probe\n"
+        "      self.helper\n"
+        "    end\n"
+        "  end\n"
+        "end\n";
+    const char *targets[] = {"t.main.Admin.Child", "t.main.Admin.Base.helper",
+                             "t.main.Admin.Greetable.greet", "t.main.Admin.Greetable.greet"};
+    const char *sites[] = {"Child.new", "self.helper", "self.greet", "self.greet"};
+    const char *occurrence = source;
+
+    CBMFileResult *result = extract(source, CBM_LANG_RUBY, "t", "main.rb");
+    ASSERT_NOT_NULL(result);
+    ASSERT_EQ(result->resolved_calls.count, 4);
+    for (int i = 0; i < result->resolved_calls.count; i++) {
+        const CBMResolvedCall *row = &result->resolved_calls.items[i];
+        ASSERT_STR_EQ(row->caller_qn, "t.main.Admin.Child.probe");
+        ASSERT_STR_EQ(row->callee_qn, targets[i]);
+        occurrence = strstr(occurrence, sites[i]);
+        ASSERT_NOT_NULL(occurrence);
+        ASSERT_EQ(row->site_start_byte, (uint32_t)(occurrence - source));
+        occurrence += strlen(sites[i]);
+        ASSERT_EQ(row->site_end_byte, (uint32_t)(occurrence - source));
+        ASSERT_STR_EQ(row->strategy, i == 0 ? "ruby_constructor" : "ruby_self_dispatch");
+        ASSERT(row->confidence == 0.95f);
+        ASSERT_EQ(row->kind, CBM_RESOLVED_INVOCATION);
+        ASSERT_EQ(row->source_origin, CBM_SOURCE_ORIGIN_RAW);
+    }
+    cbm_free_result(result);
+    PASS();
+}
+
+TEST(ruby_include_in_scoped_class_with_pipe_comment) {
+    /* The C resolver split the packed reference at the comment's '|' and
+     * lost the mixin. */
+    const char *source = "module Greetable\n"
+                         "  def greet; end\n"
+                         "end\n"
+                         "class Admin:: # | scope\n"
+                         "  Widget\n"
+                         "  include Greetable\n"
+                         "  def probe\n"
+                         "    self.greet\n"
+                         "  end\n"
+                         "end\n";
+    CBMFileResult *result = extract(source, CBM_LANG_RUBY, "t", "main.rb");
+    ASSERT_NOT_NULL(result);
+    ASSERT_EQ(result->resolved_calls.count, 1);
+    const CBMResolvedCall *row = &result->resolved_calls.items[0];
+    ASSERT_STR_EQ(row->callee_qn, "t.main.Greetable.greet");
+    const char *site = strstr(source, "self.greet");
+    ASSERT_NOT_NULL(site);
+    ASSERT_EQ(row->site_start_byte, (uint32_t)(site - source));
+    ASSERT_EQ(row->site_end_byte, (uint32_t)(site - source + strlen("self.greet")));
+    cbm_free_result(result);
+    PASS();
+}
+
+static const char *ruby_ancestry_test_type(const void *registry, const char *path) {
+    const CBMRegisteredType *type = cbm_registry_lookup_type(registry, path);
+    return type ? type->qualified_name : NULL;
+}
+
+static const CBMRegisteredFunc *ruby_ancestry_test_method(const void *registry, const char *key,
+                                                         const char *name) {
+    return cbm_registry_lookup_method(registry, key, name);
+}
+
+TEST(ruby_ancestry_lookup_boundaries) {
+    char nesting[513];
+    memset(nesting, 'A', 512);
+    nesting[511] = '\0';
+    nesting[512] = '\0';
+
+    CBMArena arena;
+    cbm_arena_init(&arena);
+    CBMTypeRegistry registry;
+    cbm_registry_init(&registry, &arena);
+    /* Seeding without allocation skips formatted methods but keeps builtin types. */
+    CBMArena exhausted = {0};
+    cbm_ruby_stdlib_register(&registry, &exhausted);
+    ASSERT_NOT_NULL(cbm_registry_lookup_type(&registry, "ApplicationRecord"));
+    ASSERT_NULL(cbm_registry_lookup_method(&registry, "ActiveRecord.Base.self", "find"));
+    cbm_registry_add_func(&registry, (CBMRegisteredFunc){
+        .qualified_name = "Base.helper", .receiver_type = "Base", .short_name = "helper"});
+
+    RubyAncestry *ancestry = mori_ruby_ancestry_new();
+    ASSERT_NOT_NULL(ancestry);
+    ASSERT_NULL(mori_ruby_ancestry_constant(ancestry, "", "Leaf"));
+    mori_ruby_ancestry_declare(ancestry, "Leaf", "", "Leaf", NULL);
+    mori_ruby_ancestry_declare(ancestry, "NestedLeaf", nesting, "Leaf", NULL);
+    nesting[511] = 'A';
+    mori_ruby_ancestry_declare(ancestry, "BeyondLimitLeaf", nesting, "Leaf", NULL);
+    mori_ruby_ancestry_declare(ancestry, "Base", "", "Base", NULL);
+    mori_ruby_ancestry_declare(ancestry, "Child", "", "Child", "Base");
+    mori_ruby_ancestry_declare(ancestry, "Model", "", "Model", "ApplicationRecord");
+    mori_ruby_ancestry_declare(ancestry, "UnseenParent", "", "UnseenParent", "Unavailable");
+    mori_ruby_ancestry_finalize(ancestry, &registry, ruby_ancestry_test_type);
+    ASSERT_NULL(mori_ruby_ancestry_constant(ancestry, "", ""));
+    ASSERT_STR_EQ(mori_ruby_ancestry_constant(ancestry, nesting, "Leaf"), "Leaf");
+    nesting[511] = '\0';
+    ASSERT_STR_EQ(mori_ruby_ancestry_constant(ancestry, nesting, "Leaf"), "NestedLeaf");
+
+    RubyMethodResult capped = mori_ruby_ancestry_lookup(
+        ancestry, &registry, ruby_ancestry_test_method, "Child", "helper", false,
+        RUBY_LOOKUP_RECEIVER, 0);
+    ASSERT_NULL(capped.target);
+    ASSERT_FALSE(capped.blocked);
+    ASSERT_EQ(capped.steps, 1);
+
+    RubyMethodResult reached = mori_ruby_ancestry_lookup(
+        ancestry, &registry, ruby_ancestry_test_method, "Child", "helper", false,
+        RUBY_LOOKUP_RECEIVER, 1);
+    ASSERT_NOT_NULL(reached.target);
+    ASSERT_STR_EQ(reached.target->qualified_name, "Base.helper");
+    ASSERT_FALSE(reached.blocked);
+    ASSERT_EQ(reached.steps, 2);
+
+    RubyMethodResult no_seed = mori_ruby_ancestry_lookup(
+        ancestry, &registry, ruby_ancestry_test_method, "Model", "find", true,
+        RUBY_LOOKUP_RECEIVER, 2);
+    ASSERT_NULL(no_seed.target);
+    ASSERT_FALSE(no_seed.blocked);
+    ASSERT_EQ(no_seed.steps, 3);
+
+    RubyMethodResult no_parent = mori_ruby_ancestry_lookup(
+        ancestry, &registry, ruby_ancestry_test_method, "UnseenParent", "helper", false,
+        RUBY_LOOKUP_SUPER, 2);
+    ASSERT_NULL(no_parent.target);
+    ASSERT_FALSE(no_parent.blocked);
+    ASSERT_EQ(no_parent.steps, 0);
+
+    mori_ruby_ancestry_free(ancestry);
+    cbm_arena_destroy(&arena);
     PASS();
 }
 
@@ -15859,9 +16022,34 @@ TEST(extraction_marker_round_trips_non_ascii_environment_path) {
 }
 #endif
 
+#if !defined(_WIN32) && defined(CBM_MEM_TEST_API) && CBM_MEM_TEST_API
+extern void *(*ts_current_malloc)(size_t);
+
+TEST(extraction_tree_sitter_slab_malloc_aborts_on_failure) {
+    const size_t heap_size = 128; /* Above the 64-byte slab threshold. */
+    pid_t child = fork();
+    ASSERT_GTE(child, 0);
+    if (child == 0) {
+        cbm_slab_install();
+        cbm_mem_test_fail_alloc_size(CBM_MEM_CLASS_TS_TREE, heap_size);
+        (void)ts_current_malloc(heap_size);
+        _exit(0);
+    }
+
+    int status = 0;
+    ASSERT_EQ(waitpid(child, &status, 0), child);
+    ASSERT_TRUE(WIFSIGNALED(status));
+    ASSERT_EQ(WTERMSIG(status), SIGABRT);
+    PASS();
+}
+#endif
+
 SUITE(extraction) {
 #ifdef _WIN32
     RUN_TEST(extraction_marker_round_trips_non_ascii_environment_path);
+#endif
+#if !defined(_WIN32) && defined(CBM_MEM_TEST_API) && CBM_MEM_TEST_API
+    RUN_TEST(extraction_tree_sitter_slab_malloc_aborts_on_failure);
 #endif
     RUN_TEST(extract_compact_keeps_every_field_and_shrinks_the_arena);
     RUN_TEST(extract_compact_is_idempotent_and_survives_empty_results);
@@ -15990,6 +16178,9 @@ SUITE(extraction) {
     RUN_TEST(ruby_class);
     RUN_TEST(ruby_module);
     RUN_TEST(ruby_constructor_callee_is_constant_path);
+    RUN_TEST(ruby_ancestry_resolved_occurrences);
+    RUN_TEST(ruby_include_in_scoped_class_with_pipe_comment);
+    RUN_TEST(ruby_ancestry_lookup_boundaries);
     RUN_TEST(csharp_class);
     RUN_TEST(csharp_interface);
     RUN_TEST(csharp_extension_block_members);

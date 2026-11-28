@@ -16355,6 +16355,271 @@ TEST(clsp_cuda_preprocessed_coordinate_collision_isolated) {
     return assert_cpp_family_preprocessed_collision_isolated(CBM_LANG_CUDA);
 }
 
+TEST(clsp_cpp_field_dispatch_preserves_raw_and_expanded_spans) {
+    static const char source[] =
+        "struct Alpha { int render(){return 1;} };\n"
+        "struct Bravo { int render(){return 2;} };\n"
+        "struct Holder { Alpha alpha; Bravo bravo; };\n"
+        "#define RENDER_BRAVO(x) x.bravo.render()\n"
+        "int probe(Holder h) { return h.alpha.render() + RENDER_BRAVO(h); }\n";
+    static const char raw_expr[] = "h.alpha.render()";
+    CBMFileResult *result = extract_cpp(source);
+    ASSERT_NOT_NULL(result);
+    const CBMCall *raw = NULL;
+    const CBMCall *expanded = NULL;
+    for (int i = 0; i < result->calls.count; i++) {
+        const CBMCall *call = &result->calls.items[i];
+        if (!call->callee_name)
+            continue;
+        if (call->source_origin == CBM_SOURCE_ORIGIN_RAW && strstr(call->callee_name, "alpha") &&
+            strstr(call->callee_name, "render"))
+            raw = call;
+        if (call->source_origin == CBM_SOURCE_ORIGIN_PREPROCESSED &&
+            strstr(call->callee_name, "bravo") && strstr(call->callee_name, "render"))
+            expanded = call;
+    }
+    ASSERT_NOT_NULL(raw);
+    ASSERT_NOT_NULL(expanded);
+    ASSERT_EQ(raw->site_start_byte, (uint32_t)(strstr(source, raw_expr) - source));
+    ASSERT_EQ(raw->site_end_byte, raw->site_start_byte + sizeof(raw_expr) - 1);
+    ASSERT_TRUE(expanded->site_start_byte < expanded->site_end_byte);
+    const CBMResolvedCall *alpha =
+        cbm_pipeline_find_lsp_resolution(&result->resolved_calls, raw, false);
+    const CBMResolvedCall *bravo =
+        cbm_pipeline_find_lsp_resolution(&result->resolved_calls, expanded, false);
+    ASSERT_NOT_NULL(alpha);
+    ASSERT_NOT_NULL(bravo);
+    ASSERT_NOT_NULL(alpha->callee_qn);
+    ASSERT_NOT_NULL(bravo->callee_qn);
+    ASSERT_NOT_NULL(strstr(alpha->callee_qn, "Alpha.render"));
+    ASSERT_NOT_NULL(strstr(bravo->callee_qn, "Bravo.render"));
+    ASSERT_EQ(alpha->source_origin, CBM_SOURCE_ORIGIN_RAW);
+    ASSERT_EQ(bravo->source_origin, CBM_SOURCE_ORIGIN_PREPROCESSED);
+    ASSERT_EQ(alpha->site_start_byte, raw->site_start_byte);
+    ASSERT_EQ(alpha->site_end_byte, raw->site_end_byte);
+    ASSERT_EQ(bravo->site_start_byte, expanded->site_start_byte);
+    ASSERT_EQ(bravo->site_end_byte, expanded->site_end_byte);
+    cbm_free_result(result);
+    PASS();
+}
+
+/* The C bridge to the Rust field lookup (c_field_lookup/mod.rs): exact,
+ * module-qualified and short-name receivers, include evidence, aliases, the
+ * depth limit, untyped fields, memberless stubs, names longer than the
+ * 1024-byte stack buffer and an overlay that shadows its base. These cases
+ * come from the parity test that compared the lookup with the C it replaced. */
+static void c_field_lookup_add(CBMTypeRegistry *reg, const char *qn, const char *short_name,
+                               const char **fields, const CBMType **types, const char **bases,
+                               const char *alias_of) {
+    CBMRegisteredType t;
+    memset(&t, 0, sizeof(t));
+    t.qualified_name = qn;
+    t.short_name = short_name;
+    t.field_names = fields;
+    t.field_types = types;
+    t.embedded_types = bases;
+    t.alias_of = alias_of;
+    cbm_registry_add_type(reg, t);
+}
+
+static char *c_field_lookup_long_name(CBMArena *arena, const char *prefix, char fill) {
+    enum { LEN = 1100 };
+    size_t plen = strlen(prefix);
+    char *name = cbm_arena_alloc(arena, plen + LEN + 1);
+    memcpy(name, prefix, plen);
+    memset(name + plen, fill, LEN);
+    name[plen + LEN] = '\0';
+    return name;
+}
+
+TEST(clsp_field_lookup_through_rust_bridge) {
+    CBMArena arena;
+    cbm_arena_init(&arena);
+    CBMTypeRegistry base;
+    cbm_registry_init(&base, &arena);
+
+    const CBMType *t_int = cbm_type_named(&arena, "test.Int");
+    const CBMType *t_long = cbm_type_named(&arena, "test.Long");
+    const CBMType *t_ops = cbm_type_named(&arena, "hdr.Ops");
+    static const char *count[] = {"count", NULL};
+    const CBMType **count_int = cbm_arena_alloc(&arena, 2 * sizeof(CBMType *));
+    count_int[0] = t_int;
+    count_int[1] = NULL;
+    const CBMType **count_long = cbm_arena_alloc(&arena, 2 * sizeof(CBMType *));
+    count_long[0] = t_long;
+    count_long[1] = NULL;
+    static const char *shut[] = {"shut", NULL};
+    const CBMType **shut_types = cbm_arena_alloc(&arena, 2 * sizeof(CBMType *));
+    shut_types[0] = t_ops;
+    shut_types[1] = NULL;
+    static const char *x_field[] = {"x", NULL};
+    static const char *y_field[] = {"y", NULL};
+    static const char *own[] = {"own", NULL};
+    static const char *mixed[] = {"u", "t", "u", NULL};
+    const CBMType **mixed_types = cbm_arena_alloc(&arena, 4 * sizeof(CBMType *));
+    mixed_types[0] = NULL;
+    mixed_types[1] = t_int;
+    mixed_types[2] = t_long;
+    mixed_types[3] = NULL;
+    static const char *alpha_base[] = {"repo.use.Alpha", NULL};
+    static const char *two_bases[] = {"repo.use.Missing", "repo.use.Mixed", "hdr.Ops", NULL};
+    static const char *self_base[] = {"repo.use.Loop", NULL};
+
+    c_field_lookup_add(&base, "repo.use.Alpha", "Alpha", count, count_int, NULL, NULL);
+    c_field_lookup_add(&base, "repo.use.Beta", "Beta", count, count_long, NULL, NULL);
+    c_field_lookup_add(&base, "hdr.Ops", "Ops", shut, shut_types, NULL, NULL);
+    c_field_lookup_add(&base, "repo.use.Ops", "Ops", NULL, NULL, NULL, NULL);
+    c_field_lookup_add(&base, "other.Ops", "Ops", shut, NULL, NULL, NULL);
+    c_field_lookup_add(&base, "inc.Shared", "Shared", x_field, count_int, NULL, NULL);
+    c_field_lookup_add(&base, "far.Shared", "Shared", x_field, count_long, NULL, NULL);
+    c_field_lookup_add(&base, "a.Twin", "Twin", y_field, count_int, NULL, NULL);
+    c_field_lookup_add(&base, "b.Twin", "Twin", y_field, count_long, NULL, NULL);
+    c_field_lookup_add(&base, "a.Twin", "Twin", y_field, count_long, NULL, NULL);
+    c_field_lookup_add(&base, "repo.use.Local", "Local", x_field, count_int, NULL, NULL);
+    c_field_lookup_add(&base, "z.Local", "Local", x_field, count_long, NULL, NULL);
+    c_field_lookup_add(&base, "repo.use.AliasT", "AliasT", NULL, NULL, NULL, "repo.use.Alpha");
+    c_field_lookup_add(&base, "repo.use.Derived", "Derived", own, count_int, alpha_base, NULL);
+    c_field_lookup_add(&base, "repo.use.Multi", "Multi", NULL, NULL, two_bases, NULL);
+    c_field_lookup_add(&base, "repo.use.Mixed", "Mixed", mixed, mixed_types, NULL, NULL);
+    c_field_lookup_add(&base, "repo.use.Untyped", "Untyped", count, NULL, NULL, NULL);
+    c_field_lookup_add(&base, "repo.use.Loop", "Loop", NULL, NULL, self_base, NULL);
+    c_field_lookup_add(&base, "stub.Lone", "Lone", NULL, NULL, NULL, NULL);
+    c_field_lookup_add(&base, "x.Ghost", "Ghost", NULL, NULL, NULL, NULL);
+    c_field_lookup_add(&base, "y.Ghost", "Ghost", NULL, NULL, NULL, NULL);
+    c_field_lookup_add(&base, ".Edge", "Edge", count, count_int, NULL, NULL);
+    c_field_lookup_add(&base, "Bare", "Bare", count, count_int, NULL, NULL);
+    /* An alias chain deeper than the walk's limit of five. */
+    for (int i = 0; i < 8; i++) {
+        char *qn = cbm_arena_sprintf(&arena, "repo.use.L%d", i);
+        char *next = i < 7 ? cbm_arena_sprintf(&arena, "repo.use.L%d", i + 1) : NULL;
+        c_field_lookup_add(&base, qn, qn + strlen("repo.use."), i < 7 ? NULL : count,
+                           i < 7 ? NULL : count_int, NULL, next);
+    }
+    /* Names past the 1024-byte stack buffer use the resolver arena. */
+    char *long_module = c_field_lookup_long_name(&arena, "m", 'm');
+    char *long_short = c_field_lookup_long_name(&arena, "", 'q');
+    char *long_qn = cbm_arena_sprintf(&arena, "%s.%s", long_module, long_short);
+    c_field_lookup_add(&base, long_qn, long_short, count, count_int, NULL, NULL);
+    cbm_registry_finalize(&base);
+    base.read_only = true;
+
+    /* An overlay that shadows hdr.Ops with a copy and adds its own type. */
+    CBMArena scratch;
+    cbm_arena_init(&scratch);
+    CBMTypeRegistry overlay;
+    cbm_registry_init(&overlay, &scratch);
+    overlay.fallback = &base;
+    CBMRegisteredType *shadow = cbm_registry_type_for_update(&overlay, "hdr.Ops");
+    ASSERT_NOT_NULL(shadow);
+    shadow->field_types = count_long;
+    c_field_lookup_add(&overlay, "inc.Ops", "Ops", shut, count_int, NULL, NULL);
+
+    const char *inc_none[] = {NULL};
+    const char *inc_hdr[] = {"inc", NULL, "hdr"};
+
+    const char *repo_use = "repo.use";
+    const CBMType *ty = NULL;
+    const CBMRegisteredType *owner;
+    owner =
+        cbm_c_lsp_test_field_lookup(&scratch, &base, repo_use, inc_none, 0, "Ops", "shut", NULL);
+    ASSERT_NULL(owner); /* hdr.Ops and other.Ops both declare it */
+    owner = cbm_c_lsp_test_field_lookup(&scratch, &base, repo_use, inc_hdr, 3, "Ops", "shut", NULL);
+    ASSERT_NOT_NULL(owner);
+    ASSERT_STR_EQ(owner->qualified_name, "hdr.Ops");
+    cbm_c_lsp_test_field_lookup(&scratch, &overlay, repo_use, inc_hdr, 3, "Ops", "shut", &ty);
+    ASSERT_NULL(ty); /* the overlay adds inc.Ops: two included candidates */
+    cbm_c_lsp_test_field_lookup(&scratch, &overlay, repo_use, NULL, 0, "hdr.Ops", "shut", &ty);
+    ASSERT(ty == t_long); /* the exact overlay row shadows the base row */
+    cbm_c_lsp_test_field_lookup(&scratch, &base, repo_use, inc_none, 0, "AliasT", "count", &ty);
+    ASSERT(ty == t_int);
+    cbm_c_lsp_test_field_lookup(&scratch, &base, repo_use, inc_none, 0, "Mixed", "u", &ty);
+    ASSERT(ty == t_long); /* the untyped first "u" is skipped */
+    owner = cbm_c_lsp_test_field_lookup(&scratch, &base, long_module, inc_none, 0, long_short,
+                                        "count", NULL);
+    ASSERT_NOT_NULL(owner);
+    ASSERT_STR_EQ(owner->qualified_name, long_qn);
+
+    const struct {
+        const char *receiver;
+        const char *field;
+        const char *expected;
+    } cases[] = {
+        {"use.Alpha", "count", "repo.use.Alpha"},
+        {"repo.use.Beta", "count", "repo.use.Beta"},
+        {"Shared", "x", NULL},
+        {"Twin", "y", NULL},
+        {"Local", "x", "repo.use.Local"},
+        {"Derived", "own", "repo.use.Derived"},
+        {"Derived", "count", "repo.use.Alpha"},
+        {"Multi", "u", "repo.use.Mixed"},
+        {"Multi", "shut", "hdr.Ops"},
+        {"Untyped", "count", "repo.use.Untyped"},
+        {"Loop", "shut", NULL},
+        {"L0", "count", NULL},
+        {"L2", "count", "repo.use.L7"},
+        {"Ghost", NULL, NULL},
+        {"Lone", NULL, "stub.Lone"},
+        {"Edge", "count", NULL},
+        {".Edge", "count", ".Edge"},
+        {"Bare", "count", "Bare"},
+        {"", "count", NULL},
+        {"Alpha.", "count", NULL},
+        {"Alpha", "", NULL},
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        owner = cbm_c_lsp_test_field_lookup(&scratch, &base, repo_use, NULL, 0,
+                                            cases[i].receiver, cases[i].field, NULL);
+        if (cases[i].expected) {
+            ASSERT_NOT_NULL(owner);
+            ASSERT_STR_EQ(owner->qualified_name, cases[i].expected);
+        } else {
+            ASSERT_NULL(owner);
+        }
+    }
+    ASSERT_NULL(cbm_c_lsp_test_field_lookup(&scratch, NULL, repo_use, NULL, 0, "Alpha", "count",
+                                            NULL));
+
+    cbm_arena_destroy(&scratch);
+    cbm_arena_destroy(&arena);
+    PASS();
+}
+
+TEST(clsp_field_lookup_preserves_arena_fallback) {
+    enum { STACK_KEY_SIZE = 1024, STACK_MODULE_LEN = STACK_KEY_SIZE - sizeof(".T") };
+    CBMArena arena;
+    cbm_arena_init(&arena);
+    CBMArena closed = {0};
+    const char *fields[] = {"count", NULL};
+
+    for (size_t len = STACK_MODULE_LEN; len <= STACK_MODULE_LEN + 1; len++) {
+        char module[STACK_MODULE_LEN + 2];
+        memset(module, 'm', len);
+        module[len] = '\0';
+        const char *fallback = cbm_arena_sprintf(&arena, "%s.nested.T", module);
+        const char *exact = cbm_arena_sprintf(&arena, "%s.T", module);
+        ASSERT_NOT_NULL(fallback);
+        ASSERT_NOT_NULL(exact);
+
+        // The unfinalized registry scans the first local short-name match.
+        CBMTypeRegistry registry;
+        cbm_registry_init(&registry, &arena);
+        c_field_lookup_add(&registry, fallback, "T", fields, NULL, NULL, NULL);
+        c_field_lookup_add(&registry, exact, "T", fields, NULL, NULL, NULL);
+
+        for (int closed_arena = 0; closed_arena < 2; closed_arena++) {
+            CBMArena *lookup_arena = closed_arena ? &closed : &arena;
+            const CBMRegisteredType *owner = cbm_c_lsp_test_field_lookup(
+                lookup_arena, &registry, module, NULL, 0, "T", "count", NULL);
+            ASSERT_NOT_NULL(owner);
+            ASSERT_STR_EQ(owner->qualified_name,
+                          closed_arena && len > STACK_MODULE_LEN ? fallback : exact);
+        }
+    }
+
+    cbm_arena_destroy(&arena);
+    PASS();
+}
+
 TEST(clsp_c_preprocessed_coordinate_collision_isolated) {
     /* The raw fp call and macro-hidden expanded fp call both occupy 180:186
      * (comment payload sized against the preprocessed buffer's spacing), but
@@ -17094,6 +17359,9 @@ SUITE(c_lsp) {
     RUN_TEST(clsp_c_preprocessed_coordinate_collision_isolated);
     RUN_TEST(clsp_cpp_preprocessed_coordinate_collision_isolated);
     RUN_TEST(clsp_cuda_preprocessed_coordinate_collision_isolated);
+    RUN_TEST(clsp_cpp_field_dispatch_preserves_raw_and_expanded_spans);
+    RUN_TEST(clsp_field_lookup_through_rust_bridge);
+    RUN_TEST(clsp_field_lookup_preserves_arena_fallback);
     RUN_TEST(clsp_preprocessed_destructor_rewrite_respects_origin_during_rewrite);
     RUN_TEST(clsp_tier2_shared_registry_readonly_c);
     RUN_TEST(clsp_tier2_shared_registry_readonly_cpp);
