@@ -121,14 +121,6 @@ const CBMRegisteredType *cbm_php_lookup_type(const PHPLSPContext *ctx, const cha
  * left unresolved. Implemented in Rust (php_resolver/native.rs). */
 bool cbm_php_external_qn(const PHPLSPContext *ctx, const char *qn);
 
-#ifdef CBM_ENABLE_TEST_SEAMS
-/* C reference spellings of the php_resolver exports, kept for comparison. */
-bool cbm_php_c_external_qn(const PHPLSPContext *ctx, const char *qn);
-const CBMRegisteredType *cbm_php_c_lookup_type(PHPLSPContext *ctx, const char *qn);
-const CBMRegisteredFunc *cbm_php_c_lookup_method(PHPLSPContext *ctx, const char *class_qn,
-                                                 const char *method_name);
-#endif
-
 /* Entry point: build registry from file defs + stdlib + composer (if present),
  * then run resolution. Called from cbm_extract_file(). */
 void cbm_run_php_lsp(CBMArena *arena, CBMFileResult *result, const char *source, int source_len,
