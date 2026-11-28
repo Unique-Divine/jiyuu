@@ -28,6 +28,8 @@
 #include "cbm.h"
 #include "../src/pipeline/lsp_resolve.h"
 #include "lsp/perl_lsp.h"
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 /* ── Helpers (mirror test_php_lsp.c) ───────────────────────────── */
@@ -564,6 +566,319 @@ TEST(perllsp_repeated_inherited_method_calls_join_by_exact_site) {
                                            "$child->greet()");
 }
 
+/* ── Package lookup parity (C registry lookup vs Rust index) ───── */
+
+static bool perl_str_eq(const char *a, const char *b) {
+    return a == b || (a && b && strcmp(a, b) == 0);
+}
+
+static void perl_print_resolved(const char *side, const CBMFileResult *r) {
+    for (int i = 0; i < r->resolved_calls.count; i++) {
+        const CBMResolvedCall *rc = &r->resolved_calls.items[i];
+        printf("    %s %s -> %s [%s %.2f] %u:%u\n", side, rc->caller_qn ? rc->caller_qn : "(null)",
+               rc->callee_qn ? rc->callee_qn : "(null)", rc->strategy ? rc->strategy : "(null)",
+               rc->confidence, rc->site_start_byte, rc->site_end_byte);
+    }
+}
+
+/* Extract `source` with the C registry lookup and with the Rust package index
+ * and require identical resolved calls, in order. */
+static int perl_assert_lookup_parity(const char *label, const char *source) {
+    cbm_perl_lsp_test_set_c_package_lookup(true);
+    CBMFileResult *c = extract_perl(source);
+    cbm_perl_lsp_test_set_c_package_lookup(false);
+    CBMFileResult *rust = extract_perl(source);
+    ASSERT_NOT_NULL(c);
+    ASSERT_NOT_NULL(rust);
+
+    bool same = c->resolved_calls.count == rust->resolved_calls.count;
+    for (int i = 0; same && i < c->resolved_calls.count; i++) {
+        const CBMResolvedCall *a = &c->resolved_calls.items[i];
+        const CBMResolvedCall *b = &rust->resolved_calls.items[i];
+        same = perl_str_eq(a->caller_qn, b->caller_qn) && perl_str_eq(a->callee_qn, b->callee_qn) &&
+               perl_str_eq(a->strategy, b->strategy) && perl_str_eq(a->reason, b->reason) &&
+               perl_str_eq(a->callee_sig, b->callee_sig) && a->confidence == b->confidence &&
+               a->kind == b->kind && a->site_start_byte == b->site_start_byte &&
+               a->site_end_byte == b->site_end_byte && a->source_origin == b->source_origin;
+    }
+    if (!same) {
+        printf("  Perl lookup parity differs for %s\n", label);
+        perl_print_resolved("c   ", c);
+        perl_print_resolved("rust", rust);
+    }
+    cbm_free_result(c);
+    cbm_free_result(rust);
+    ASSERT_TRUE(same);
+    return 0;
+}
+
+/* Each source exercises one branch of the package lookup: own subs, @ISA
+ * order, SUPER, cycles, the 32-package visit cap and the frontier cap. */
+TEST(perllsp_package_lookup_parity) {
+    static const struct {
+        const char *label;
+        const char *source;
+    } cases[] = {
+        {"empty file", ""},
+        {"main only", "package main;\n"},
+        {"subs before any package",
+         "sub helper { return 1; }\n"
+         "sub run { main->helper(); __PACKAGE__->helper(); main->missing(); }\n"},
+        {"own sub and constructor",
+         "package Acme::Widget;\n"
+         "sub new { my $class = shift; return bless {}, $class; }\n"
+         "sub render { return 1; }\n"
+         "package main;\n"
+         "sub run { my $w = Acme::Widget->new; $w->render; Widget->render; }\n"},
+        {"parent without subs",
+         "package Base;\n"
+         "sub speak { return 1; }\n"
+         "package Intermediate;\n"
+         "our @ISA = ('Base');\n"
+         "package Derived;\n"
+         "use parent -norequire, 'Intermediate';\n"
+         "sub new { return bless {}, shift; }\n"
+         "package main;\n"
+         "sub run { my $d = Derived->new; $d->speak; Derived->speak; Derived->absent; }\n"},
+        {"several parents and SUPER",
+         "package First;\n"
+         "sub greet { return 1; }\n"
+         "package Last;\n"
+         "sub greet { return 2; }\n"
+         "sub only_last { return 3; }\n"
+         "package Child;\n"
+         "use base qw(First Last);\n"
+         "sub new { return bless {}, shift; }\n"
+         "sub greet { my $self = shift; return $self->SUPER::greet(); }\n"
+         "sub last { my $self = shift; return $self->SUPER::only_last(); }\n"
+         "sub none { my $self = shift; return $self->SUPER::missing(); }\n"
+         "package main;\n"
+         "sub run { my $c = Child->new; $c->greet; $c->only_last; Child->greet; }\n"},
+        {"SUPER without a parent", "package Orphan;\n"
+                                   "sub greet { my $self = shift; return $self->SUPER::greet(); }\n"
+                                   "sub empty { my $self = shift; return $self->SUPER::(); }\n"},
+        {"block packages", "package Base { sub greet { return 1; } }\n"
+                           "package Child {\n"
+                           "    our @ISA = ('Base');\n"
+                           "    sub new { return bless {}, shift; }\n"
+                           "    sub greet { my $self = shift; return $self->SUPER::greet(); }\n"
+                           "}\n"
+                           "sub after_block { my $self = shift; return $self->SUPER::greet(); }\n"
+                           "package main;\n"
+                           "sub run { my $c = Child->new; $c->greet; }\n"},
+        {"reopened package", "package Base;\n"
+                             "sub greet { return 1; }\n"
+                             "package Child;\n"
+                             "sub new { return bless {}, shift; }\n"
+                             "package Other;\n"
+                             "sub other { return 1; }\n"
+                             "package Child;\n"
+                             "our @ISA = ('Base');\n"
+                             "sub again { my $self = shift; return $self->SUPER::greet(); }\n"
+                             "package main;\n"
+                             "sub run { Child->greet; Child->other; }\n"},
+        {"qualified @ISA and duplicate subs", "package Base;\n"
+                                              "sub greet { return 1; }\n"
+                                              "sub greet { return 2; }\n"
+                                              "package Child;\n"
+                                              "@Child::ISA = ('Base', 'Base');\n"
+                                              "package main;\n"
+                                              "sub run { Child->greet; }\n"},
+        {"inheritance cycle", "package A;\n"
+                              "our @ISA = ('B');\n"
+                              "sub from_a { return 1; }\n"
+                              "package B;\n"
+                              "our @ISA = ('A');\n"
+                              "package main;\n"
+                              "sub run { B->from_a; A->missing; B->missing; }\n"},
+        {"exported and static calls",
+         "package Helper;\n"
+         "sub func { return 1; }\n"
+         "package main;\n"
+         "use Helper qw(func);\n"
+         "use Scalar::Util qw(blessed);\n"
+         "sub run { func(); Helper::func(); blessed(1); Helper->func; }\n"},
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        if (perl_assert_lookup_parity(cases[i].label, cases[i].source) != 0)
+            return 1;
+    }
+    PASS();
+}
+
+/* An @ISA chain one package longer than the 32-package visit cap, and a
+ * package with more parents than the 32-entry frontier holds. */
+TEST(perllsp_package_lookup_parity_at_caps) {
+    enum { LINKS = 34, PARENTS = 40 };
+    char chain[8192];
+    size_t used = 0;
+    for (int i = 0; i < LINKS; i++) {
+        used += (size_t)snprintf(chain + used, sizeof(chain) - used,
+                                 "package P%d;\nour @ISA = ('P%d');\n", i, i + 1);
+    }
+    used += (size_t)snprintf(chain + used, sizeof(chain) - used,
+                             "package P%d;\nsub deep { return 1; }\n"
+                             "package main;\n"
+                             "sub run { P0->deep; P1->deep; P2->deep; P3->deep; }\n",
+                             LINKS);
+    ASSERT_TRUE(used < sizeof(chain));
+    if (perl_assert_lookup_parity("chain past the visit cap", chain) != 0)
+        return 1;
+
+    char fan[8192];
+    used = (size_t)snprintf(fan, sizeof(fan), "package Wide;\nour @ISA = (");
+    for (int i = 0; i < PARENTS; i++)
+        used += (size_t)snprintf(fan + used, sizeof(fan) - used, "%s'Q%d'", i ? ", " : "", i);
+    used += (size_t)snprintf(fan + used, sizeof(fan) - used, ");\n");
+    for (int i = 0; i < PARENTS; i++)
+        used += (size_t)snprintf(fan + used, sizeof(fan) - used,
+                                 "package Q%d;\nsub q%d { return 1; }\n", i, i);
+    used += (size_t)snprintf(fan + used, sizeof(fan) - used,
+                             "package main;\nsub run { Wide->q0; Wide->q8; Wide->q31; "
+                             "Wide->q32; Wide->q39; }\n");
+    ASSERT_TRUE(used < sizeof(fan));
+    return perl_assert_lookup_parity("parents past the frontier cap", fan);
+}
+
+/* The one known difference. Code before the first `package` statement has
+ * no enclosing package, but the C lookup kept the SUPER parent that its
+ * second pre-pass left for the last package statement (here Last, whose
+ * parent Base was already recorded when Last was reopened). The C lookup
+ * therefore resolved early's SUPER::greet to Base::greet; the Rust index
+ * finds no parent for the implicit main package and emits nothing. */
+TEST(perllsp_package_lookup_super_before_first_package) {
+    static const char source[] = "sub early { my $self = shift; return $self->SUPER::greet(); }\n"
+                                 "package Base;\n"
+                                 "sub greet { return 1; }\n"
+                                 "package Last;\n"
+                                 "our @ISA = ('Base');\n"
+                                 "package Other;\n"
+                                 "package Last;\n";
+    cbm_perl_lsp_test_set_c_package_lookup(true);
+    CBMFileResult *c = extract_perl(source);
+    cbm_perl_lsp_test_set_c_package_lookup(false);
+    CBMFileResult *rust = extract_perl(source);
+    ASSERT_NOT_NULL(c);
+    ASSERT_NOT_NULL(rust);
+    const CBMResolvedCall *c_super =
+        find_resolved_with_strategy(c, "main.early", "main.greet", "perl_method_super");
+    const CBMResolvedCall *rust_super =
+        find_resolved_with_strategy(rust, "main.early", "main.greet", "perl_method_super");
+    bool c_resolved = c_super != NULL;
+    int c_count = c->resolved_calls.count;
+    int rust_count = rust->resolved_calls.count;
+    bool rust_resolved = rust_super != NULL;
+    cbm_free_result(c);
+    cbm_free_result(rust);
+    ASSERT_TRUE(c_resolved);
+    ASSERT_EQ(c_count, 1);
+    ASSERT_TRUE(!rust_resolved);
+    ASSERT_EQ(rust_count, 0);
+    PASS();
+}
+
+/* Read a resolver fixture relative to the mori/ directory the runner uses. */
+static char *perl_read_fixture(const char *path) {
+    FILE *f = fopen(path, "rb");
+    if (!f)
+        return NULL;
+    char *buf = NULL;
+    long len = -1;
+    if (fseek(f, 0, SEEK_END) == 0)
+        len = ftell(f);
+    if (len >= 0 && fseek(f, 0, SEEK_SET) == 0)
+        buf = malloc((size_t)len + 1);
+    if (buf && fread(buf, 1, (size_t)len, f) == (size_t)len) {
+        buf[len] = '\0';
+    } else {
+        free(buf);
+        buf = NULL;
+    }
+    fclose(f);
+    return buf;
+}
+
+/* resolver_acceptance.rs checks the Perl rows of expected.tsv in the graph,
+ * which merges repeated calls into one CALLS edge. Check each listed span
+ * here: every occurrence needs its own resolved call. */
+static int perl_assert_fixture_occurrences(void) {
+    char *table = perl_read_fixture("tests/fixtures/resolver/expected.tsv");
+    ASSERT_NOT_NULL(table);
+    int rows = 0;
+    char *save_row = NULL;
+    for (char *row = strtok_r(table, "\n", &save_row); row; row = strtok_r(NULL, "\n", &save_row)) {
+        char *col[7] = {0};
+        int n = 0;
+        for (char *p = row; n < 7;) {
+            col[n++] = p;
+            char *tab = strchr(p, '\t');
+            if (!tab)
+                break;
+            *tab = '\0';
+            p = tab + 1;
+        }
+        size_t path_len = strlen(col[0]);
+        if (row[0] == '#' || path_len < 3 || strcmp(col[0] + path_len - 3, ".pl") != 0)
+            continue;
+        ASSERT_EQ(n, 7);
+        rows++;
+
+        char path[256];
+        snprintf(path, sizeof(path), "tests/fixtures/resolver/%s", col[0]);
+        char *source = perl_read_fixture(path);
+        ASSERT_NOT_NULL(source);
+        char module[128];
+        snprintf(module, sizeof(module), "test.%.*s.main", (int)strcspn(col[0], "/"), col[0]);
+        char caller[256];
+        char callee[256];
+        snprintf(caller, sizeof(caller), "%s.%s", module, col[1]);
+        snprintf(callee, sizeof(callee), "%s.%s", module, col[2]);
+
+        CBMFileResult *r = cbm_extract_file(source, (int)strlen(source), CBM_LANG_PERL, "test",
+                                            col[0], 0, NULL, NULL);
+        ASSERT_NOT_NULL(r);
+        int spans = 0;
+        int matched = 0;
+        char *save_span = NULL;
+        for (char *span = strtok_r(col[4], ",", &save_span); span;
+             span = strtok_r(NULL, ",", &save_span)) {
+            unsigned start = 0;
+            unsigned end = 0;
+            ASSERT_EQ(sscanf(span, "%u:%u", &start, &end), 2);
+            spans++;
+            for (int i = 0; i < r->resolved_calls.count; i++) {
+                const CBMResolvedCall *rc = &r->resolved_calls.items[i];
+                if (rc->kind == CBM_RESOLVED_INVOCATION && rc->site_start_byte == start &&
+                    rc->site_end_byte == end && perl_str_eq(rc->caller_qn, caller) &&
+                    perl_str_eq(rc->callee_qn, callee)) {
+                    matched++;
+                    break;
+                }
+            }
+        }
+        if (matched != spans) {
+            printf("  %s: %d of %d spans resolve %s -> %s\n", col[0], matched, spans, caller,
+                   callee);
+            perl_print_resolved("got ", r);
+        }
+        cbm_free_result(r);
+        free(source);
+        ASSERT_GT(spans, 1);
+        ASSERT_EQ(matched, spans);
+    }
+    free(table);
+    ASSERT_GT(rows, 0);
+    return 0;
+}
+
+TEST(perllsp_fixture_occurrences_resolve_by_site) {
+    cbm_perl_lsp_test_set_c_package_lookup(true);
+    int c = perl_assert_fixture_occurrences();
+    cbm_perl_lsp_test_set_c_package_lookup(false);
+    ASSERT_EQ(c, 0);
+    return perl_assert_fixture_occurrences();
+}
+
 /* ── Suite registration ────────────────────────────────────────── */
 
 SUITE(perl_lsp) {
@@ -584,4 +899,8 @@ SUITE(perl_lsp) {
     RUN_TEST(perllsp_repeated_target_calls_join_by_exact_site);
     RUN_TEST(perllsp_repeated_static_function_calls_join_by_exact_site);
     RUN_TEST(perllsp_repeated_inherited_method_calls_join_by_exact_site);
+    RUN_TEST(perllsp_package_lookup_parity);
+    RUN_TEST(perllsp_package_lookup_parity_at_caps);
+    RUN_TEST(perllsp_package_lookup_super_before_first_package);
+    RUN_TEST(perllsp_fixture_occurrences_resolve_by_site);
 }
