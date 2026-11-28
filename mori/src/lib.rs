@@ -328,6 +328,10 @@ mod php_resolver;
 mod rust_path;
 
 #[cfg(any(feature = "native-engine-abi", test))]
+#[path = "../internal/cbm/lsp/c_field_lookup/mod.rs"]
+mod c_field_lookup;
+
+#[cfg(any(feature = "native-engine-abi", test))]
 #[path = "../internal/cbm/lsp/perl_packages/mod.rs"]
 mod perl_packages;
 
