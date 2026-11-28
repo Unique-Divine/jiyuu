@@ -57,19 +57,28 @@ fn write_fixtures(
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../tests/fixtures/resolver");
     let mut paths = BTreeSet::new();
     let mut calls = BTreeMap::new();
-    for row in EXPECTED.lines().filter(|row| !row.starts_with('#')) {
-        let columns: Vec<_> = row.split('\t').collect();
-        let [path, caller, target, target_label, spans, text, callee] =
-            columns[..]
-        else {
-            panic!("invalid resolver fixture row {row:?}");
-        };
+    let mut write = |path: &'static str| {
         let source = fs::read(fixtures.join(path)).unwrap();
         if paths.insert(path) {
             let destination = repo.join(path);
             fs::create_dir_all(destination.parent().unwrap()).unwrap();
             fs::write(destination, &source).unwrap();
         }
+        source
+    };
+    for row in EXPECTED.lines().filter(|row| !row.starts_with('#')) {
+        let columns: Vec<_> = row.split('\t').collect();
+        // A row with only a path adds a file that no expected call starts in.
+        if let [path] = columns[..] {
+            write(path);
+            continue;
+        }
+        let [path, caller, target, target_label, spans, text, callee] =
+            columns[..]
+        else {
+            panic!("invalid resolver fixture row {row:?}");
+        };
+        let source = write(path);
         let module = path.split_once('/').unwrap().0;
         let qualified = |name: &str| {
             if name.is_empty() {
@@ -96,11 +105,22 @@ fn write_fixtures(
                     .count()
             })
             .collect();
+        // `file.py:name` names a target in another file of the fixture.
+        let (target_file, target) = match target.split_once(':') {
+            Some((file, name)) => (
+                format!("{module}/{file}"),
+                format!(
+                    "{PROJECT}.{module}.{}.{name}",
+                    file.trim_end_matches(".py").replace('/', ".")
+                ),
+            ),
+            None => (path.to_owned(), qualified(target)),
+        };
         let call = Call {
             caller_file: path.to_owned(),
             caller: qualified(caller),
-            target_file: path.to_owned(),
-            target: qualified(target),
+            target_file,
+            target,
             target_label: target_label.to_owned(),
             callee: callee.to_owned(),
         };

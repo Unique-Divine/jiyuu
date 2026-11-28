@@ -49,3 +49,16 @@ python_inheritance/main.py	Broken.up	P.run	Method	846:859	super().run()	super().
 python_inheritance/main.py	Child.__init__	Root.__init__	Method	247:265	super().__init__()	super().__init__
 python_inheritance/main.py	Child.direct	Right.work	Method	304:315	self.work()	self.work
 python_inheritance/main.py	Child.via_super	Right.work	Method	357:371	super().work()	super().work
+# Python package re-exports: from-imports, a module attribute, a star import
+# limited by __all__, a renamed chain, and a private name outside __all__ that
+# only the textual fallback reaches
+python_reexport/pkg/__init__.py
+python_reexport/pkg/chain.py
+python_reexport/pkg/impl.py
+python_reexport/pkg/star.py
+python_reexport/main.py	chained	pkg/impl.py:helper	Function	269:279	pkg.deep()	pkg.deep
+python_reexport/main.py	direct	pkg/impl.py:helper	Function	106:114	helper()	helper
+python_reexport/main.py	hidden	pkg/star.py:_hidden	Function	307:320	pkg._hidden()	pkg._hidden
+python_reexport/main.py	make	pkg/impl.py:Widget	Class	185:193	Widget()	Widget
+python_reexport/main.py	starred_name	pkg/star.py:starred	Function	227:240	pkg.starred()	pkg.starred
+python_reexport/main.py	via_package	pkg/impl.py:helper	Function	147:159	pkg.helper()	pkg.helper
