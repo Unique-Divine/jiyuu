@@ -106,7 +106,12 @@ impl Fixture {
         }
         let mut command = self.command(side);
         for (selector, _) in SELECTORS {
-            if side == "c" || *selector != "MORI_IMPL_RUST_IMPORTS" {
+            if side == "c"
+                || !matches!(
+                    *selector,
+                    "MORI_IMPL_RUST_IMPORTS" | "MORI_IMPL_TS_STATIC_IMPORTS"
+                )
+            {
                 command.env(selector, side);
             }
         }

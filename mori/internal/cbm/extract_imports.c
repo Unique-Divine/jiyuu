@@ -1628,8 +1628,8 @@ static bool emit_ts_static_import(void *context, TSNode source, const TSNode *lo
     CBMArena *arena = ctx->arena;
     if (!output->path) {
         output->path = strip_quotes(arena, cbm_node_text(arena, source, ctx->source));
-        /* The source is shared by every binding. Decline before writing any
-         * row so the statement can fall back to native extraction. */
+        /* The source is shared by every binding. Reject an empty path before
+         * writing any rows. */
         if (!output->path || !output->path[0]) {
             return false;
         }
@@ -1766,10 +1766,8 @@ static void walk_es_imports(CBMExtractCtx *ctx, TSNode root, bool rust_static) {
         bool push_children = true;
 
         if (strcmp(kind, "import_statement") == 0) {
-            if ((rust_static && process_ts_static_import(ctx, node)) ||
-                process_es_import_statement(ctx, node)) {
-                push_children = false;
-            }
+            push_children = rust_static ? !process_ts_static_import(ctx, node)
+                                        : !process_es_import_statement(ctx, node);
         } else if (strcmp(kind, "export_statement") == 0) {
             /* Re-export: `export { x } from './mod'` / `export * from './mod'`.
              * It carries a `source` string just like an import and creates the

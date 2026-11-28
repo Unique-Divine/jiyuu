@@ -286,7 +286,7 @@ pub unsafe extern "C" fn main(argc: c_int, argv: *mut *mut c_char) -> c_int {
         crate::named_watch::register();
         crate::index_route::register();
         if std::env::var_os("MORI_IMPL_TS_STATIC_IMPORTS").as_deref()
-            == Some(OsStr::new("rust"))
+            != Some(OsStr::new("c"))
         {
             jiyuu_mori::mori_register_ts_static_imports();
         }

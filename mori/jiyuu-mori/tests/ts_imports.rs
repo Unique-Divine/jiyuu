@@ -23,12 +23,12 @@ impl Drop for Scratch {
 
 struct IndexRun {
     root: PathBuf,
-    implementation: &'static str,
+    implementation: Option<&'static str>,
 }
 
 impl IndexRun {
-    fn new(root: &Path, implementation: &'static str) -> Self {
-        let root = root.join(implementation);
+    fn new(root: &Path, implementation: Option<&'static str>) -> Self {
+        let root = root.join(implementation.unwrap_or("default"));
         let mut dirs = fs::DirBuilder::new();
         dirs.recursive(true).mode(0o700);
         dirs.create(root.join("cache")).unwrap();
@@ -50,8 +50,10 @@ impl IndexRun {
             .env("CBM_RUNTIME_DIR", self.root.join("rt"))
             .env("CBM_PROFILE", "1")
             .env("CBM_LOG_LEVEL", "debug")
-            .env("CBM_WORKERS", "1")
-            .env("MORI_IMPL_TS_STATIC_IMPORTS", self.implementation);
+            .env("CBM_WORKERS", "1");
+        if let Some(implementation) = self.implementation {
+            command.env("MORI_IMPL_TS_STATIC_IMPORTS", implementation);
+        }
         command
     }
 
@@ -197,9 +199,9 @@ export function direct(): number { return 2; }
         fs::write(repo.join("src").join(file), text).unwrap();
     }
 
-    let native = IndexRun::new(&scratch.0, "c");
+    let native = IndexRun::new(&scratch.0, Some("c"));
     native.index(&repo);
-    let rust = IndexRun::new(&scratch.0, "rust");
+    let rust = IndexRun::new(&scratch.0, None);
     rust.index(&repo);
     assert_eq!(rust.graph(), native.graph(), "persistent graph differs");
 
