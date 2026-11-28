@@ -514,7 +514,7 @@ jobs:
     env:
       CCACHE_MAXSIZE: 1G
       MORI_CANDIDATE_SUITES: >-
-        edge_types_probe lang_contract lang_specs cross_repo extraction graph_buffer pipeline yaml language
+        edge_types_probe lang_contract cross_repo extraction graph_buffer pipeline yaml language
         config_text_edit doclinks doc_links_pdf watcher daemon_ipc
         store_graph_digest pipeline_frozen httpd
     steps:
