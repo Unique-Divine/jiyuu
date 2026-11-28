@@ -4219,18 +4219,22 @@ static void py_resolve_calls_in_inner(PyLSPContext *ctx, TSNode node) {
 
 /* ── function / class processing ───────────────────────────────── */
 
-/* Parse a type-annotation TEXT into a CBMType without requiring a
- * PyLSPContext. Handles `Optional[T]`, `Union[A, B]`, `X | Y`, generic
- * containers (`list[T]` -> TEMPLATE), forward-reference quotes, and
- * builtin scalar names. Used by py_register_def, which runs before any
- * context is available. When module_qn is non-NULL, bare class names
- * are qualified as "<module_qn>.<name>" so registry lookups match. */
-static const CBMType *py_parse_type_text(CBMArena *arena, const char *ann);
-static const CBMType *py_parse_type_text_qn(CBMArena *arena, const char *ann,
-                                            const char *module_qn);
+#ifdef CBM_ENABLE_TEST_SEAMS
+/* ── C reference for python_annotation.rs, kept for the parity test ───── */
+
+/* Routes annotation parsing and resolution through the C below instead of
+ * python_annotation.rs (cbm_py_lsp_test_use_c_reference). */
+static bool py_test_c_reference;
+
+void cbm_py_lsp_test_use_c_reference(bool enabled) {
+    py_test_c_reference = enabled;
+}
+
+static const CBMType *py_c_parse_type_text_qn(CBMArena *arena, const char *ann,
+                                              const char *module_qn);
 
 /* Trim ASCII whitespace from both ends of an arena-allocated copy. */
-static char *py_trim_ws(CBMArena *arena, const char *start, size_t len) {
+static char *py_c_trim_ws(CBMArena *arena, const char *start, size_t len) {
     while (len > 0 && (start[0] == ' ' || start[0] == '\t')) {
         start++;
         len--;
@@ -4248,7 +4252,7 @@ static char *py_trim_ws(CBMArena *arena, const char *start, size_t len) {
 /* Split a comma-separated argument string at depth 0 (ignoring commas
  * inside [], (), {}). Returns NULL-terminated arena array of trimmed
  * substring copies. Caller passes the inside of `[...]`. */
-static const char **py_split_subscript_args(CBMArena *arena, const char *s, int *out_n) {
+static const char **py_c_split_subscript_args(CBMArena *arena, const char *s, int *out_n) {
     if (!s) {
         *out_n = 0;
         return NULL;
@@ -4271,7 +4275,7 @@ static const char **py_split_subscript_args(CBMArena *arena, const char *s, int 
         else if (c == ']' || c == ')' || c == '}')
             depth--;
         else if (c == ',' && depth == 0) {
-            char *part = py_trim_ws(arena, s + start, i - start);
+            char *part = py_c_trim_ws(arena, s + start, i - start);
             if (part && part[0]) {
                 if (n >= cap) {
                     int new_cap = cap * 2;
@@ -4295,7 +4299,7 @@ static const char **py_split_subscript_args(CBMArena *arena, const char *s, int 
     return out;
 }
 
-static const CBMType *py_parse_type_text_qn(CBMArena *arena, const char *ann,
+static const CBMType *py_c_parse_type_text_qn(CBMArena *arena, const char *ann,
                                             const char *module_qn) {
     if (!ann || !ann[0])
         return cbm_type_unknown();
@@ -4306,7 +4310,7 @@ static const CBMType *py_parse_type_text_qn(CBMArena *arena, const char *ann,
         if (unquoted) {
             memcpy(unquoted, ann + 1, len - 2);
             unquoted[len - 2] = '\0';
-            return py_parse_type_text_qn(arena, unquoted, module_qn);
+            return py_c_parse_type_text_qn(arena, unquoted, module_qn);
         }
     }
 
@@ -4332,14 +4336,14 @@ static const CBMType *py_parse_type_text_qn(CBMArena *arena, const char *ann,
                 memcpy(args_text, ann + inner_start, inner_len);
                 args_text[inner_len] = '\0';
                 int arg_n = 0;
-                const char **arg_strs = py_split_subscript_args(arena, args_text, &arg_n);
+                const char **arg_strs = py_c_split_subscript_args(arena, args_text, &arg_n);
                 const CBMType **arg_types = NULL;
                 if (arg_n > 0 && arg_strs) {
                     arg_types = (const CBMType **)cbm_arena_alloc(
                         arena, (size_t)(arg_n + 1) * sizeof(const CBMType *));
                     if (arg_types) {
                         for (int i = 0; i < arg_n; i++) {
-                            arg_types[i] = py_parse_type_text_qn(arena, arg_strs[i], module_qn);
+                            arg_types[i] = py_c_parse_type_text_qn(arena, arg_strs[i], module_qn);
                         }
                         arg_types[arg_n] = NULL;
                     }
@@ -4402,7 +4406,7 @@ static const CBMType *py_parse_type_text_qn(CBMArena *arena, const char *ann,
                 if (arg_types && arg_n > 0) {
                     return cbm_type_template(arena, btrim, arg_types, arg_n);
                 }
-                return py_parse_type_text_qn(arena, btrim, module_qn);
+                return py_c_parse_type_text_qn(arena, btrim, module_qn);
             }
         }
     }
@@ -4424,7 +4428,7 @@ static const CBMType *py_parse_type_text_qn(CBMArena *arena, const char *ann,
                     d2--;
                 else if (cc == '|' && d2 == 0) {
                     seen_pipe = (j < len);
-                    char *p = py_trim_ws(arena, ann + start, j - start);
+                    char *p = py_c_trim_ws(arena, ann + start, j - start);
                     if (p && p[0] && onum < cap)
                         out[onum++] = p;
                     start = j + 1;
@@ -4435,7 +4439,7 @@ static const CBMType *py_parse_type_text_qn(CBMArena *arena, const char *ann,
                     arena, (size_t)(onum + 1) * sizeof(const CBMType *));
                 if (members) {
                     for (int j = 0; j < onum; j++) {
-                        members[j] = py_parse_type_text_qn(arena, out[j], module_qn);
+                        members[j] = py_c_parse_type_text_qn(arena, out[j], module_qn);
                     }
                     return cbm_type_union(arena, members, onum);
                 }
@@ -4494,20 +4498,6 @@ static const CBMType *py_parse_type_text_qn(CBMArena *arena, const char *ann,
     return cbm_type_named(arena, ann);
 }
 
-typedef struct {
-    const char *module_qn;
-} PySignatureParamParserContext;
-
-static const CBMType *py_signature_param_type_adapter(CBMArena *arena, const char *text,
-                                                      void *parser_ctx) {
-    const PySignatureParamParserContext *ctx = (const PySignatureParamParserContext *)parser_ctx;
-    return py_parse_type_text_qn(arena, text, ctx ? ctx->module_qn : NULL);
-}
-
-static const CBMType *py_parse_type_text(CBMArena *arena, const char *ann) {
-    return py_parse_type_text_qn(arena, ann, NULL);
-}
-
 /* Resolve a type-annotation text into a CBMType. Tries: scope lookup
  * (for imports / type aliases), module-qualified lookup in the registry,
  * then falls back to a bare NAMED. Strips quoted forward-reference
@@ -4515,7 +4505,7 @@ static const CBMType *py_parse_type_text(CBMArena *arena, const char *ann) {
  * `Optional[Foo]` / `Union[A, B]` into TEMPLATE / UNION shapes so
  * subsequent code can reach into element types for comprehensions
  * etc. */
-static const CBMType *py_resolve_annotation(PyLSPContext *ctx, const char *ann) {
+static const CBMType *py_c_resolve_annotation(PyLSPContext *ctx, const char *ann) {
     if (!ann || !ann[0])
         return cbm_type_unknown();
 
@@ -4526,7 +4516,7 @@ static const CBMType *py_resolve_annotation(PyLSPContext *ctx, const char *ann) 
         if (unquoted) {
             memcpy(unquoted, ann + 1, len - 2);
             unquoted[len - 2] = '\0';
-            return py_resolve_annotation(ctx, unquoted);
+            return py_c_resolve_annotation(ctx, unquoted);
         }
     }
 
@@ -4556,7 +4546,7 @@ static const CBMType *py_resolve_annotation(PyLSPContext *ctx, const char *ann) 
                 memcpy(args_text, ann + inner_start, inner_len);
                 args_text[inner_len] = '\0';
                 int arg_n = 0;
-                const char **arg_strs = py_split_subscript_args(ctx->arena, args_text, &arg_n);
+                const char **arg_strs = py_c_split_subscript_args(ctx->arena, args_text, &arg_n);
                 // Recursively resolve each arg to a CBMType.
                 const CBMType **arg_types = NULL;
                 if (arg_n > 0 && arg_strs) {
@@ -4564,7 +4554,7 @@ static const CBMType *py_resolve_annotation(PyLSPContext *ctx, const char *ann) 
                         ctx->arena, (size_t)(arg_n + 1) * sizeof(const CBMType *));
                     if (arg_types) {
                         for (int i = 0; i < arg_n; i++) {
-                            arg_types[i] = py_resolve_annotation(ctx, arg_strs[i]);
+                            arg_types[i] = py_c_resolve_annotation(ctx, arg_strs[i]);
                         }
                         arg_types[arg_n] = NULL;
                     }
@@ -4624,7 +4614,7 @@ static const CBMType *py_resolve_annotation(PyLSPContext *ctx, const char *ann) 
                 if (arg_types && arg_n > 0) {
                     return cbm_type_template(ctx->arena, btrim, arg_types, arg_n);
                 }
-                return py_resolve_annotation(ctx, btrim);
+                return py_c_resolve_annotation(ctx, btrim);
             }
         }
     }
@@ -4640,7 +4630,7 @@ static const CBMType *py_resolve_annotation(PyLSPContext *ctx, const char *ann) 
                 depth--;
             else if (c == '|' && depth == 0) {
                 int n = 0;
-                const char **parts = py_split_subscript_args(ctx->arena, ann, &n);
+                const char **parts = py_c_split_subscript_args(ctx->arena, ann, &n);
                 // py_split splits on commas — manually split on '|' at depth 0
                 (void)parts;
                 (void)n;
@@ -4660,7 +4650,7 @@ static const CBMType *py_resolve_annotation(PyLSPContext *ctx, const char *ann) 
                     else if (cc == ']' || cc == ')' || cc == '}')
                         d2--;
                     else if (cc == '|' && d2 == 0) {
-                        char *p = py_trim_ws(ctx->arena, ann + start, j - start);
+                        char *p = py_c_trim_ws(ctx->arena, ann + start, j - start);
                         if (p && p[0] && onum < cap)
                             out[onum++] = p;
                         start = j + 1;
@@ -4672,7 +4662,7 @@ static const CBMType *py_resolve_annotation(PyLSPContext *ctx, const char *ann) 
                     if (!members)
                         break;
                     for (int j = 0; j < onum; j++) {
-                        members[j] = py_resolve_annotation(ctx, out[j]);
+                        members[j] = py_c_resolve_annotation(ctx, out[j]);
                     }
                     return cbm_type_union(ctx->arena, members, onum);
                 }
@@ -4705,6 +4695,129 @@ static const CBMType *py_resolve_annotation(PyLSPContext *ctx, const char *ann) 
     }
     return cbm_type_named(ctx->arena, ann);
 }
+#endif /* CBM_ENABLE_TEST_SEAMS */
+
+/* Annotation text and lookup order belong to Rust. Construct existing arena
+ * types and expose the lexical and registry lookups for the active file. */
+typedef struct {
+    CBMArena *arena;
+    const PyLSPContext *scope;
+} PyAnnotationContext;
+
+enum {
+    PY_ANN_UNKNOWN = 0,
+    PY_ANN_BUILTIN = 1,
+    PY_ANN_NAMED = 2,
+    PY_ANN_OPTIONAL = 3,
+    PY_ANN_UNION = 4,
+    PY_ANN_TEMPLATE = 5,
+};
+
+typedef struct {
+    const CBMType *(*build)(PyAnnotationContext *, int, const char *, size_t, const CBMType **,
+                           size_t);
+    const CBMType *(*scope)(PyAnnotationContext *, const char *, size_t, bool);
+    bool (*registered)(PyAnnotationContext *, const char *, size_t);
+} PyAnnotationNative;
+
+extern const CBMType *mori_py_resolve_annotation(PyAnnotationContext *, const PyAnnotationNative *,
+                                                 const char *, const char *, bool);
+
+static const CBMType *py_annotation_build(PyAnnotationContext *context, int kind,
+                                           const char *name, size_t length, const CBMType **args,
+                                           size_t count) {
+    if (length)
+        CBM_MSAN_WRITTEN(name, length);
+    if (count)
+        CBM_MSAN_WRITTEN(args, count * sizeof(*args));
+    CBMArena *arena = context->arena;
+    switch (kind) {
+    case PY_ANN_BUILTIN:
+        return cbm_type_builtin(arena, name);
+    case PY_ANN_NAMED:
+        return cbm_type_named(arena, name);
+    case PY_ANN_OPTIONAL:
+        return cbm_type_optional(arena, args[0]);
+    case PY_ANN_UNION:
+        return count <= (INT_MAX - 4) / 2 ? cbm_type_union(arena, args, (int)count)
+                                          : cbm_type_unknown();
+    case PY_ANN_TEMPLATE:
+        return count < INT_MAX ? cbm_type_template(arena, name, args, (int)count)
+                               : cbm_type_unknown();
+    case PY_ANN_UNKNOWN:
+    default:
+        return cbm_type_unknown();
+    }
+}
+
+static const CBMType *py_annotation_scope(PyAnnotationContext *context, const char *name,
+                                           size_t length, bool enclosing) {
+    CBM_MSAN_WRITTEN(name, length);
+    (void)length;
+    const PyLSPContext *ctx = context->scope;
+    const CBMScope *scope = enclosing ? ctx->annotation_scope : ctx->current_scope;
+    const CBMType *type = scope ? cbm_scope_lookup(scope, name) : NULL;
+    return cbm_type_is_unknown(type) ? NULL : type;
+}
+
+static bool py_annotation_registered(PyAnnotationContext *context, const char *name,
+                                      size_t length) {
+    CBM_MSAN_WRITTEN(name, length);
+    (void)length;
+    return cbm_registry_lookup_type(context->scope->registry, name) != NULL;
+}
+
+static const PyAnnotationNative py_annotation_native = {
+    .build = py_annotation_build,
+    .scope = py_annotation_scope,
+    .registered = py_annotation_registered,
+};
+
+static const CBMType *py_parse_type_text_qn(CBMArena *arena, const char *ann, const char *module_qn) {
+#ifdef CBM_ENABLE_TEST_SEAMS
+    if (py_test_c_reference)
+        return py_c_parse_type_text_qn(arena, ann, module_qn);
+#endif
+    PyAnnotationContext context = {.arena = arena};
+    return mori_py_resolve_annotation(&context, &py_annotation_native, ann, module_qn, false);
+}
+
+typedef struct {
+    const char *module_qn;
+} PySignatureParamParserContext;
+
+static const CBMType *py_signature_param_type_adapter(CBMArena *arena, const char *text,
+                                                      void *parser_ctx) {
+    const PySignatureParamParserContext *ctx = (const PySignatureParamParserContext *)parser_ctx;
+    return py_parse_type_text_qn(arena, text, ctx ? ctx->module_qn : NULL);
+}
+
+static const CBMType *py_resolve_annotation(PyLSPContext *ctx, const char *ann) {
+#ifdef CBM_ENABLE_TEST_SEAMS
+    if (py_test_c_reference)
+        return py_c_resolve_annotation(ctx, ann);
+#endif
+    PyAnnotationContext context = {.arena = ctx->arena, .scope = ctx};
+    return mori_py_resolve_annotation(&context, &py_annotation_native, ann, ctx->module_qn, true);
+}
+
+#ifdef CBM_ENABLE_TEST_SEAMS
+const CBMType *cbm_py_annotation_test_parse(CBMArena *arena, const char *ann,
+                                            const char *module_qn, bool c_reference) {
+    if (c_reference)
+        return py_c_parse_type_text_qn(arena, ann, module_qn);
+    PyAnnotationContext context = {.arena = arena};
+    return mori_py_resolve_annotation(&context, &py_annotation_native, ann, module_qn, false);
+}
+
+const CBMType *cbm_py_annotation_test_resolve(PyLSPContext *ctx, const char *ann,
+                                              bool c_reference) {
+    if (c_reference)
+        return py_c_resolve_annotation(ctx, ann);
+    PyAnnotationContext context = {.arena = ctx->arena, .scope = ctx};
+    return mori_py_resolve_annotation(&context, &py_annotation_native, ann, ctx->module_qn, true);
+}
+#endif
 
 static void py_bind_parameters(PyLSPContext *ctx, TSNode params) {
     if (ts_node_is_null(params))

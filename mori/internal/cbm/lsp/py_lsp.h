@@ -216,6 +216,15 @@ bool cbm_py_lsp_test_register_defs(CBMArena *arena, CBMTypeRegistry *reg, CBMLSP
                                    int def_count);
 const CBMType *cbm_py_lsp_test_eval(PyLSPContext *ctx, TSNode node);
 void cbm_py_lsp_test_bind_external_classes(PyLSPContext *ctx, TSNode root);
+/* Routes annotation parsing and resolution through the C reference kept for
+ * comparison instead of Rust. */
+void cbm_py_lsp_test_use_c_reference(bool enabled);
+/* Annotation text in registry form (no file context) or resolved in ctx's
+ * scope, through python_annotation.rs or the C reference. */
+const CBMType *cbm_py_annotation_test_parse(CBMArena *arena, const char *ann,
+                                            const char *module_qn, bool c_reference);
+const CBMType *cbm_py_annotation_test_resolve(PyLSPContext *ctx, const char *ann,
+                                              bool c_reference);
 /* Attribute lookup along a class's method resolution order, and the target
  * QN super().member reaches from inside class_qn (python_mro.rs). */
 const CBMRegisteredFunc *cbm_py_mro_test_lookup(PyLSPContext *ctx, const char *type_qn,
