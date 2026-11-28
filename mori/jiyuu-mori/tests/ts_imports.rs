@@ -23,19 +23,16 @@ impl Drop for Scratch {
 
 struct IndexRun {
     root: PathBuf,
-    implementation: Option<&'static str>,
 }
 
 impl IndexRun {
-    fn new(root: &Path, implementation: Option<&'static str>) -> Self {
-        let root = root.join(implementation.unwrap_or("default"));
+    fn new(root: &Path) -> Self {
         let mut dirs = fs::DirBuilder::new();
         dirs.recursive(true).mode(0o700);
         dirs.create(root.join("cache")).unwrap();
         dirs.create(root.join("rt")).unwrap();
         Self {
-            root,
-            implementation,
+            root: root.to_owned(),
         }
     }
 
@@ -51,9 +48,6 @@ impl IndexRun {
             .env("CBM_PROFILE", "1")
             .env("CBM_LOG_LEVEL", "debug")
             .env("CBM_WORKERS", "1");
-        if let Some(implementation) = self.implementation {
-            command.env("MORI_IMPL_TS_STATIC_IMPORTS", implementation);
-        }
         command
     }
 
@@ -71,23 +65,6 @@ impl IndexRun {
 
     fn db_path(&self) -> PathBuf {
         self.root.join("cache").join(format!("{PROJECT}.db"))
-    }
-
-    fn graph(&self) -> Vec<u8> {
-        let output = self
-            .command()
-            .args([
-                "dev",
-                "export",
-                "--tables",
-                "nodes,edges,file_hashes",
-                "--db",
-            ])
-            .arg(self.db_path())
-            .output()
-            .unwrap();
-        assert!(output.status.success(), "{output:?}");
-        output.stdout
     }
 
     fn worker_markers(&self) -> Vec<String> {
@@ -199,11 +176,8 @@ export function direct(): number { return 2; }
         fs::write(repo.join("src").join(file), text).unwrap();
     }
 
-    let native = IndexRun::new(&scratch.0, Some("c"));
-    native.index(&repo);
-    let rust = IndexRun::new(&scratch.0, None);
+    let rust = IndexRun::new(&scratch.0);
     rust.index(&repo);
-    assert_eq!(rust.graph(), native.graph(), "persistent graph differs");
 
     let db = Connection::open_with_flags(
         rust.db_path(),
@@ -223,6 +197,8 @@ export function direct(): number { return 2; }
     };
     assert!(import_exists("src/app.ts", "src/toolkit.ts", "toolkit"));
     assert!(import_exists("src/app.ts", "src/setup.ts", "setup"));
+    assert!(import_exists("src/app.ts", "src/input.ts", "Input"));
+    assert!(import_exists("src/app.ts", "src/legacy.ts", "legacy"));
     assert!(import_exists(
         "src/view.tsx",
         "src/view_setup.ts",
@@ -240,7 +216,6 @@ export function direct(): number { return 2; }
         .unwrap();
     assert!(aliased_call, "named import alias lost its exported member");
 
-    assert!(native.worker_markers().is_empty());
     let markers = rust.worker_markers();
     for file in ["src/app.ts", "src/view.tsx"] {
         assert!(

@@ -1569,7 +1569,7 @@ static bool process_import_clause(CBMExtractCtx *ctx, TSNode clause, const char 
     return found;
 }
 
-/* Process a single ES import_statement node. Returns true if fully handled. */
+/* Static imports for JavaScript, ArkTS, and embedded scripts. */
 static bool process_es_import_statement(CBMExtractCtx *ctx, TSNode node) {
     CBMArena *a = ctx->arena;
     TSNode source_node = find_es_source_node(node);
@@ -1608,13 +1608,7 @@ static bool process_es_import_statement(CBMExtractCtx *ctx, TSNode node) {
 /* The sink receives nodes borrowed from the live tree. C keeps ownership
  * of import rows and their strings. */
 typedef bool (*ts_static_import_emit_t)(void *, TSNode, const TSNode *, const TSNode *, bool);
-typedef bool (*ts_static_import_extractor_t)(TSNode, void *, ts_static_import_emit_t);
-static ts_static_import_extractor_t ts_static_import_extractor;
-
-void cbm_ts_set_static_import_extractor(ts_static_import_extractor_t extract);
-void cbm_ts_set_static_import_extractor(ts_static_import_extractor_t extract) {
-    ts_static_import_extractor = extract;
-}
+extern bool mori_ts_extract_static_import(TSNode node, void *context, ts_static_import_emit_t emit);
 
 typedef struct {
     CBMExtractCtx *ctx;
@@ -1649,7 +1643,7 @@ static bool emit_ts_static_import(void *context, TSNode source, const TSNode *lo
 
 static bool process_ts_static_import(CBMExtractCtx *ctx, TSNode node) {
     TSStaticImportOutput output = {.ctx = ctx};
-    if (!ts_static_import_extractor(node, &output, emit_ts_static_import)) {
+    if (!mori_ts_extract_static_import(node, &output, emit_ts_static_import)) {
         return false;
     }
     cbm_log_debug("extract.ts_static_import", "implementation", "rust", "file",
@@ -1799,7 +1793,7 @@ static void walk_es_imports(CBMExtractCtx *ctx, TSNode root, bool rust_static) {
 
 static void parse_es_imports(CBMExtractCtx *ctx) {
     bool typescript = ctx->language == CBM_LANG_TYPESCRIPT || ctx->language == CBM_LANG_TSX;
-    walk_es_imports(ctx, ctx->root, typescript && ts_static_import_extractor != NULL);
+    walk_es_imports(ctx, ctx->root, typescript);
 }
 
 // --- Java imports ---

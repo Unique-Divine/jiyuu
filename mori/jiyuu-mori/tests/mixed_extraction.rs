@@ -9,10 +9,8 @@ use std::process::Command;
 use rusqlite::{Connection, OpenFlags};
 use serde_json::{Value, json};
 
-const SELECTORS: &[(&str, &str)] = &[
-    ("MORI_IMPL_GRAPHQL_EXTRACT", "extract.graphql_field_spans"),
-    ("MORI_IMPL_TS_STATIC_IMPORTS", "extract.ts_static_import"),
-];
+const SELECTORS: &[(&str, &str)] =
+    &[("MORI_IMPL_GRAPHQL_EXTRACT", "extract.graphql_field_spans")];
 
 struct Fixture(PathBuf);
 
@@ -105,9 +103,7 @@ impl Fixture {
         }
         let mut command = self.command(side);
         for (selector, _) in SELECTORS {
-            if side == "c" || *selector != "MORI_IMPL_TS_STATIC_IMPORTS" {
-                command.env(selector, side);
-            }
+            command.env(selector, side);
         }
         let arguments =
             json!({"repo_path": self.0.join("repo"), "name": "mixed"});
@@ -206,6 +202,9 @@ fn mixed_language_extraction_matches_native_graph_rows() {
     let rust_imports = "msg=extract.rust_imports implementation=rust";
     assert!(native_logs.contains(rust_imports), "{native_logs}");
     assert!(rust_logs.contains(rust_imports), "{rust_logs}");
+    let ts_imports = "msg=extract.ts_static_import implementation=rust";
+    assert!(native_logs.contains(ts_imports), "{native_logs}");
+    assert!(rust_logs.contains(ts_imports), "{rust_logs}");
     for (_, event) in SELECTORS {
         let marker = format!("msg={event} implementation=rust");
         assert!(

@@ -12,11 +12,6 @@ type Emit = unsafe extern "C" fn(
     *const RawNode,
     bool,
 ) -> bool;
-type Extract = unsafe extern "C" fn(RawNode, *mut c_void, Emit) -> bool;
-
-unsafe extern "C" {
-    fn cbm_ts_set_static_import_extractor(extract: Extract);
-}
 
 struct Statement {
     source: RawNode,
@@ -123,21 +118,16 @@ unsafe fn extract(
     Some(())
 }
 
-unsafe extern "C" fn extract_statement(
+/// Read a static TypeScript import statement and lend its bindings to `emit`.
+///
+/// # Safety
+/// The caller keeps the tree and output context live until extraction returns.
+#[unsafe(no_mangle)]
+unsafe extern "C" fn mori_ts_extract_static_import(
     node: RawNode,
     context: *mut c_void,
     emit: Emit,
 ) -> bool {
     // SAFETY: The C caller keeps the tree and output context live throughout extraction.
     unsafe { extract(node, context, emit).is_some() }
-}
-
-/// Install the parser callback for static TypeScript and TSX imports.
-///
-/// # Safety
-///
-/// Register during process startup, before any extraction threads run.
-pub unsafe fn register() {
-    // SAFETY: Startup registration precedes all extractor workers.
-    unsafe { cbm_ts_set_static_import_extractor(extract_statement) };
 }
