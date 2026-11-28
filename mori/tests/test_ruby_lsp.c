@@ -27,8 +27,7 @@
  *
  * Scope: every row here is SINGLE-FILE, driven through cbm_extract_file so it
  * exercises the per-file resolver exactly as the extraction pipeline calls it.
- * Cross-file resolution (cbm_run_ruby_lsp_cross, wired through
- * pass_lsp_cross.c) is a separate tier and is covered by its own rows.
+ * Cross-file Ruby calls go through the shared graph resolver.
  *
  * The resolver populates result->resolved_calls with CBMResolvedCall rows.
  * The pipeline joins a row to its caller def by EXACT QN equality, so every
@@ -215,6 +214,8 @@ TEST(rubylsp_constructor_edge_targets_class) {
                       "end\n"
                       "class Maker\n"
                       "  def build\n"
+                      "    # π makes byte and character offsets differ\n"
+                      "    Widget.new\n"
                       "    Widget.new\n"
                       "  end\n"
                       "end\n";
@@ -227,6 +228,22 @@ TEST(rubylsp_constructor_edge_targets_class) {
      * extractor's Widget.new -> "Widget" rewrite so the row joins. */
     ASSERT(strcmp(rc->callee_qn, "test.main.Widget") == 0);
     ASSERT(rc->confidence >= CBM_LSP_CONFIDENCE_FLOOR);
+    const char *first = strstr(src, "Widget.new");
+    const char *second = strstr(first + 1, "Widget.new");
+    unsigned int sites = 0;
+    for (int i = 0; i < r->resolved_calls.count; i++) {
+        const CBMResolvedCall *row = &r->resolved_calls.items[i];
+        if (strcmp(row->strategy, "ruby_constructor") != 0)
+            continue;
+        ASSERT(strcmp(row->callee_qn, "test.main.Widget") == 0);
+        ASSERT(row->site_end_byte - row->site_start_byte == strlen("Widget.new"));
+        if (row->site_start_byte == (uint32_t)(first - src))
+            sites |= 1;
+        if (row->site_start_byte == (uint32_t)(second - src))
+            sites |= 2;
+    }
+    ASSERT(count_resolved_exact(r, "test.main.Maker.build", "test.main.Widget") == 2);
+    ASSERT(sites == 3);
     cbm_free_result(r);
     PASS();
 }
