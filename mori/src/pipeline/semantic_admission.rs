@@ -1,4 +1,9 @@
 //! Apply the per-function edge budget to scored semantic pairs.
+//!
+//! Admission is best-first, not first-come: when a function has more
+//! candidate partners than its budget, it keeps its best ones. Judged on
+//! held-out repositories (2026-10-07), the pairs first-come admitted over
+//! budget were 0 of 17 related; the ones best-first admits instead, 7 of 20.
 
 use std::{cmp::Ordering, ffi::c_int, mem::MaybeUninit, slice};
 
@@ -173,5 +178,89 @@ mod tests {
         let pairs = [pair(0, 1, 0, 0.9, true)];
         assert_eq!(admit(&pairs, 1, &mut counts), [false]);
         assert_eq!(counts, [0, 0]);
+    }
+
+    /// The removed C admission, kept as the oracle: stable descending score,
+    /// equal scores (signed zeros included) in pair order.
+    fn reference(
+        pairs: &[Pair],
+        max_edges: c_int,
+        counts: &mut [c_int],
+    ) -> Vec<bool> {
+        let mut order: Vec<usize> =
+            (0..pairs.len()).filter(|&k| !pairs[k].below).collect();
+        order.sort_by(|&a, &b| {
+            let (x, y) = (pairs[a].score, pairs[b].score);
+            if x == y {
+                Ordering::Equal
+            } else if x > y {
+                Ordering::Less
+            } else {
+                Ordering::Greater
+            }
+        });
+        let mut admitted = vec![false; pairs.len()];
+        for k in order {
+            let (i, j) = (pairs[k].i as usize, pairs[k].j as usize);
+            if counts[i] < max_edges && counts[j] < max_edges {
+                counts[i] += 1;
+                counts[j] += 1;
+                admitted[k] = true;
+            }
+        }
+        admitted
+    }
+
+    /// The cases from the C parity comparison: a fixed-seed generator with
+    /// frequent ties, signed zeros, infinities and functions that start at
+    /// or over the budget.
+    #[test]
+    fn matches_the_c_reference_on_generated_cases() {
+        const SCORES: [f32; 12] = [
+            0.95,
+            0.90,
+            0.90,
+            0.85,
+            0.80,
+            0.0,
+            -0.0,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            0.75,
+            1.0,
+            0.85,
+        ];
+        let mut state: u32 = 0x5eed_1234;
+        let mut next = || {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            state >> 8
+        };
+        for case in 0..4000 {
+            let func_count = 2 + (next() % 9) as usize;
+            let n = (next() % 49) as usize;
+            let max_edges = (next() % 5) as c_int;
+            let start: Vec<c_int> = (0..func_count)
+                .map(|_| match next() % 8 {
+                    r @ 6..=7 => max_edges + r as c_int - 6,
+                    _ => 0,
+                })
+                .collect();
+            let pairs: Vec<Pair> = (0..n)
+                .map(|k| {
+                    let i = (next() % (func_count as u32 - 1)) as c_int;
+                    let j = i
+                        + 1
+                        + (next() % (func_count as u32 - 1 - i as u32)) as c_int;
+                    let score = SCORES[(next() % SCORES.len() as u32) as usize];
+                    pair(i, j, k as c_int, score, next() % 4 == 0)
+                })
+                .collect();
+            let mut want_counts = start.clone();
+            let mut got_counts = start;
+            let want = reference(&pairs, max_edges, &mut want_counts);
+            let got = admit(&pairs, max_edges, &mut got_counts);
+            assert_eq!(got, want, "case {case}");
+            assert_eq!(got_counts, want_counts, "case {case}");
+        }
     }
 }

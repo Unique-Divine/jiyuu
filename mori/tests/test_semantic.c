@@ -10,7 +10,6 @@
 #include <semantic/rotsq.h>
 #include <semantic/semantic.h>
 #include <semantic/semantic_admission.h>
-#include <foundation/mem_core.h>
 
 #include <math.h>
 #include <stdatomic.h>
@@ -468,13 +467,17 @@ TEST(sem_combine_weighs_signals) {
  * never admitted and takes no budget. */
 TEST(sem_admit_best_first_keeps_the_best) {
     /* function 0 has four partners in canonical order, budget 2 */
-    const float scores[] = {0.80F, 0.90F, 0.95F, 0.99F, 0.90F};
-    const int fa[] = {0, 0, 0, 0, 5};
-    const int fb[] = {1, 2, 3, 4, 6};
-    const bool eligible[] = {true, true, true, false, true};
+    const cbm_semantic_pair_t pairs[] = {
+        {.i = 0, .j = 1, .c = 0, .score = 0.80F},
+        {.i = 0, .j = 2, .c = 1, .score = 0.90F},
+        {.i = 0, .j = 3, .c = 2, .score = 0.95F},
+        {.i = 0, .j = 4, .c = 3, .score = 0.99F, .below = true},
+        {.i = 5, .j = 6, .c = 0, .score = 0.90F},
+    };
     int counts[7] = {0};
+    int order[5];
     bool admitted[5];
-    ASSERT_TRUE(cbm_sem_admit_best_first(scores, fa, fb, eligible, 5, 2, counts, admitted));
+    mori_semantic_admit_best_first(pairs, 5, 2, counts, 7, order, admitted);
     ASSERT_FALSE(admitted[0]); /* first-come would have kept 0.80 */
     ASSERT_TRUE(admitted[1]);
     ASSERT_TRUE(admitted[2]);
@@ -483,122 +486,18 @@ TEST(sem_admit_best_first_keeps_the_best) {
     ASSERT_EQ(counts[0], 2);
     ASSERT_EQ(counts[4], 0);
 
-    /* ties: the earlier pair in canonical order wins the last slot */
-    const float tied[] = {0.85F, 0.85F};
-    const int ta[] = {0, 0};
-    const int tb[] = {1, 2};
-    const bool all[] = {true, true};
+    /* The earlier pair wins the shared target's last slot. */
+    const cbm_semantic_pair_t tied[] = {
+        {.i = 0, .j = 2, .score = 0.85F},
+        {.i = 1, .j = 2, .score = 0.85F},
+    };
     int tcounts[3] = {0};
     bool tadmitted[2];
-    ASSERT_TRUE(cbm_sem_admit_best_first(tied, ta, tb, all, 2, 1, tcounts, tadmitted));
+    mori_semantic_admit_best_first(tied, 2, 1, tcounts, 3, order, tadmitted);
     ASSERT_TRUE(tadmitted[0]);
     ASSERT_FALSE(tadmitted[1]);
-    PASS();
-}
-
-/* Parity: the Rust admission (mori_semantic_admit_best_first) and the C
- * reference (cbm_sem_admit_best_first) choose the same pairs and leave the
- * same counts. A fixed-seed generator draws scores from a small set so ties,
- * signed zeros and infinities are common, and starts some functions at or
- * over the budget. */
-enum { SEM_PARITY_CASES = 4000, SEM_PARITY_MAX_PAIRS = 48, SEM_PARITY_MAX_FUNCS = 10 };
-
-static uint32_t sem_parity_next(uint32_t *state) {
-    *state = *state * 1664525U + 1013904223U;
-    return *state >> 8;
-}
-
-static int sem_parity_compare(const cbm_semantic_pair_t *pairs, int n, int max_edges,
-                              const int *start_counts, int func_count) {
-    float scores[SEM_PARITY_MAX_PAIRS];
-    int fa[SEM_PARITY_MAX_PAIRS];
-    int fb[SEM_PARITY_MAX_PAIRS];
-    bool eligible[SEM_PARITY_MAX_PAIRS];
-    for (int k = 0; k < n; k++) {
-        scores[k] = pairs[k].score;
-        fa[k] = pairs[k].i;
-        fb[k] = pairs[k].j;
-        eligible[k] = !pairs[k].below;
-    }
-    int c_counts[SEM_PARITY_MAX_FUNCS];
-    int rust_counts[SEM_PARITY_MAX_FUNCS];
-    memcpy(c_counts, start_counts, (size_t)func_count * sizeof(int));
-    memcpy(rust_counts, start_counts, (size_t)func_count * sizeof(int));
-    bool c_admitted[SEM_PARITY_MAX_PAIRS] = {false};
-    bool rust_admitted[SEM_PARITY_MAX_PAIRS] = {false};
-    int order[SEM_PARITY_MAX_PAIRS];
-    if (!cbm_sem_admit_best_first(scores, fa, fb, eligible, n, max_edges, c_counts,
-                                  c_admitted)) {
-        return -1;
-    }
-    mori_semantic_admit_best_first(pairs, n, max_edges, rust_counts, func_count, order,
-                                   rust_admitted);
-    for (int k = 0; k < n; k++) {
-        if (c_admitted[k] != rust_admitted[k]) {
-            return k + 1;
-        }
-    }
-    return memcmp(c_counts, rust_counts, (size_t)func_count * sizeof(int)) == 0 ? 0 : -2;
-}
-
-TEST(sem_admit_best_first_rust_matches_c) {
-    static const float score_set[] = {0.95F, 0.90F, 0.90F, 0.85F, 0.80F, 0.0F, -0.0F,
-                                      INFINITY, -INFINITY, 0.75F, 1.0F, 0.85F};
-    const int score_count = (int)(sizeof(score_set) / sizeof(score_set[0]));
-    uint32_t state = 0x5eed1234U;
-    cbm_semantic_pair_t pairs[SEM_PARITY_MAX_PAIRS] = {0};
-    int start_counts[SEM_PARITY_MAX_FUNCS];
-
-    /* Empty input: both leave counts alone. */
-    int empty_counts[1] = {0};
-    ASSERT_EQ(sem_parity_compare(pairs, 0, 2, empty_counts, 1), 0);
-
-    for (int t = 0; t < SEM_PARITY_CASES; t++) {
-        int func_count = 2 + (int)(sem_parity_next(&state) % (SEM_PARITY_MAX_FUNCS - 1));
-        int n = (int)(sem_parity_next(&state) % (SEM_PARITY_MAX_PAIRS + 1));
-        int max_edges = (int)(sem_parity_next(&state) % 5);
-        for (int f = 0; f < func_count; f++) {
-            /* Mostly zero; sometimes at or above the budget. */
-            uint32_t r = sem_parity_next(&state) % 8;
-            start_counts[f] = r < 6 ? 0 : max_edges + (int)(r - 6);
-        }
-        for (int k = 0; k < n; k++) {
-            int i = (int)(sem_parity_next(&state) % (uint32_t)(func_count - 1));
-            int j = i + 1 + (int)(sem_parity_next(&state) % (uint32_t)(func_count - 1 - i));
-            pairs[k] = (cbm_semantic_pair_t){
-                .source_id = i,
-                .target_id = j,
-                .score = score_set[sem_parity_next(&state) % (uint32_t)score_count],
-                .below = sem_parity_next(&state) % 4 == 0,
-                .i = i,
-                .j = j,
-                .c = k,
-            };
-        }
-        int diff = sem_parity_compare(pairs, n, max_edges, start_counts, func_count);
-        if (diff != 0) {
-            printf("  admission parity case %d differs (%d)\n", t, diff);
-        }
-        ASSERT_EQ(diff, 0);
-    }
-
-    /* Allocation failure: the C reference admits nothing and leaves counts
-     * alone. The pass treats that and a failed scratch allocation for the
-     * Rust call the same way: a warning and no edges. */
-    const float one_score[] = {0.9F};
-    const int one_a[] = {0};
-    const int one_b[] = {1};
-    const bool one_eligible[] = {true};
-    int oom_counts[2] = {0};
-    bool oom_admitted[1] = {true};
-    cbm_mem_test_fail_alloc_size(CBM_MEM_CLASS_SEMANTIC, sizeof(float) + sizeof(int));
-    bool ranked = cbm_sem_admit_best_first(one_score, one_a, one_b, one_eligible, 1, 1,
-                                           oom_counts, oom_admitted);
-    ASSERT_TRUE(cbm_mem_test_reset_alloc_failure());
-    ASSERT_FALSE(ranked);
-    ASSERT_FALSE(oom_admitted[0]);
-    ASSERT_EQ(oom_counts[0], 0);
-    ASSERT_EQ(oom_counts[1], 0);
+    ASSERT_EQ(tcounts[1], 0);
+    ASSERT_EQ(tcounts[2], 1);
     PASS();
 }
 
@@ -1027,7 +926,6 @@ SUITE(semantic) {
     RUN_TEST(sem_tfidf_terms_compare_vocabulary_not_positions);
     RUN_TEST(sem_combine_weighs_signals);
     RUN_TEST(sem_admit_best_first_keeps_the_best);
-    RUN_TEST(sem_admit_best_first_rust_matches_c);
     RUN_TEST(sem_calibrated_p_bands);
     RUN_TEST(sem_doc_calibrated_p_bands);
     RUN_TEST(sem_diag_family_by_format_and_kind);
