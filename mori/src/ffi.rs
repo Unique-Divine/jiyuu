@@ -307,8 +307,10 @@ pub unsafe extern "C" fn main(argc: c_int, argv: *mut *mut c_char) -> c_int {
         crate::path_verdict::register();
         crate::trace_predecessor::register();
         crate::ingest_trace::register();
+        // Rust reads Python import statements unless `=c` selects the C
+        // extractor for comparison.
         if std::env::var_os("MORI_IMPL_PYTHON_IMPORTS").as_deref()
-            == Some(OsStr::new("rust"))
+            != Some(OsStr::new("c"))
         {
             jiyuu_mori::mori_register_python_imports();
         }
