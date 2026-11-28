@@ -267,16 +267,57 @@ mod graphql_extract;
 #[cfg(feature = "c-backend")]
 pub use graphql_extract::register as mori_register_graphql_extractor;
 
-#[cfg(feature = "c-backend")]
+#[cfg(any(feature = "native-engine-abi", test))]
+#[path = "../internal/cbm/lsp/go_cross.rs"]
+mod go_cross;
+
+#[cfg(any(feature = "native-engine-abi", test))]
+#[path = "../internal/cbm/lsp/go_results.rs"]
+mod go_results;
+
+#[cfg(any(feature = "native-engine-abi", test))]
+#[path = "../internal/cbm/lsp/resolver.rs"]
+mod resolver;
+
+#[cfg(feature = "native-engine-abi")]
+#[path = "../internal/cbm/lsp/go_eval.rs"]
+mod go_eval;
+
+#[cfg(feature = "native-engine-abi")]
+#[path = "../internal/cbm/lsp/go_identity.rs"]
+mod go_identity;
+
+#[cfg(feature = "native-engine-abi")]
 #[path = "../internal/cbm/go_imports.rs"]
 mod go_imports;
 
-#[cfg(feature = "c-backend")]
-pub use go_imports::register as mori_register_go_import_extractor;
+#[cfg(feature = "native-engine-abi")]
+#[path = "../internal/cbm/lsp/go_registry_ast.rs"]
+mod go_registry_ast;
+
+#[cfg(feature = "native-engine-abi")]
+#[path = "../internal/cbm/lsp/go_registry_defs.rs"]
+mod go_registry_defs;
+
+#[cfg(feature = "native-engine-abi")]
+#[path = "../internal/cbm/lsp/go_registry_generics.rs"]
+mod go_registry_generics;
+
+#[cfg(feature = "native-engine-abi")]
+#[path = "../internal/cbm/lsp/go_types.rs"]
+mod go_types;
+
+#[cfg(feature = "native-engine-abi")]
+#[path = "../internal/cbm/lsp/go_types_native.rs"]
+mod go_types_native;
 
 #[cfg(feature = "native-engine-abi")]
 #[path = "../internal/cbm/native_tree.rs"]
 mod native_tree;
+
+#[cfg(any(feature = "native-engine-abi", test))]
+#[path = "../internal/cbm/lsp/php_resolver/mod.rs"]
+mod php_resolver;
 
 #[cfg(feature = "native-engine-abi")]
 #[path = "../internal/cbm/lsp/rust_path.rs"]

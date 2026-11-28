@@ -123,7 +123,8 @@ fn part(span: &[u8]) -> Part<'_> {
 type Allocate =
     unsafe extern "C" fn(context: *mut c_void, len: usize) -> *mut c_char;
 
-unsafe extern "C" fn encode(
+#[unsafe(no_mangle)]
+unsafe extern "C" fn mori_go_encode_results(
     raw: *const c_char,
     context: *mut c_void,
     allocate: Allocate,
@@ -163,27 +164,6 @@ unsafe extern "C" fn encode(
         cursor.write(0);
     }
     output.cast()
-}
-
-#[cfg(not(test))]
-unsafe extern "C" {
-    fn cbm_pxc_set_go_results_driver(
-        driver: unsafe extern "C" fn(
-            *const c_char,
-            *mut c_void,
-            Allocate,
-        ) -> *const c_char,
-    );
-}
-
-#[cfg(not(test))]
-pub(crate) unsafe fn register() {
-    if std::env::var_os("MORI_IMPL_GO_RESULTS")
-        .is_some_and(|value| value == "rust")
-    {
-        // SAFETY: Startup registration precedes native indexing workers.
-        unsafe { cbm_pxc_set_go_results_driver(encode) };
-    }
 }
 
 #[cfg(test)]
@@ -263,13 +243,19 @@ mod tests {
         let context = (&raw mut output).cast();
         let raw = b"(*T, error)\0ignored";
         // SAFETY: The input is live and NUL-terminated. The buffer is disjoint.
-        let result = unsafe { encode(raw.as_ptr().cast(), context, allocate) };
+        let result = unsafe {
+            mori_go_encode_results(raw.as_ptr().cast(), context, allocate)
+        };
         assert_eq!(result, output.as_ptr().cast());
         // SAFETY: The encoder returned a NUL-terminated pointer to output.
         assert_eq!(unsafe { CStr::from_ptr(result) }.to_bytes(), b"*T|error");
         // SAFETY: The callback contract above also applies to this larger input.
         let too_large = unsafe {
-            encode(c"(ABCDEFGH, abcdefgh, error)".as_ptr(), context, allocate)
+            mori_go_encode_results(
+                c"(ABCDEFGH, abcdefgh, error)".as_ptr(),
+                context,
+                allocate,
+            )
         };
         assert!(too_large.is_null());
         assert_eq!(output[9], 0xFF);
