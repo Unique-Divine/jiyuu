@@ -3,13 +3,14 @@
  * merge base's rules, classification of every changed path, the HEAD
  * snapshot, seeding, the walk, the selection and the answer.
  */
-#include "mcp/test_impact_engine_internal.h"
+#include "mcp/test_impact_engine_reach.h"
 
 #include "foundation/compat.h"
 #include "foundation/compat_fs.h"
 #include "foundation/compat_thread.h"
 #include "foundation/mem_core.h"
 #include "foundation/platform.h"
+#include "foundation/sanitized.h"
 #include "foundation/sha256.h"
 #include "store/store_graph_digest.h"
 #include "store/store_impact.h"
@@ -343,6 +344,36 @@ static bool te_classify_unmatched(te_ctx_t *c, const bool *unmatched) {
 
 /* ── Graph scope, seeding, selection ─────────────────────────────── */
 
+void cbm_test_impact_reach_free(void *items) {
+    cbm_free(CBM_MEM_CLASS_EXTRACT, items);
+}
+
+void cbm_test_impact_reach_publish(te_ctx_t *c, cbm_test_reach_t *rows, int row_count,
+                                  cbm_test_suite_trigger_t *triggers, int trigger_count) {
+    if (row_count) {
+        CBM_MSAN_WRITTEN(rows, (size_t)row_count * sizeof(*rows));
+    }
+    if (trigger_count) {
+        CBM_MSAN_WRITTEN(triggers, (size_t)trigger_count * sizeof(*triggers));
+    }
+    c->reach = rows;
+    c->reach_count = row_count;
+    c->triggers = triggers;
+    c->trigger_count = trigger_count;
+}
+
+static bool te_run_static_reach(te_ctx_t *c) {
+    te_reach_input_t input = {
+        .context = c, .store = c->store, .scope = c->scope, .graph = c->graph,
+        .source = c->source, .model = c->model, .policy = c->policy, .seeds = c->seeds,
+        .matches = c->matches, .match_count = c->match_count,
+        .fixture_paths = c->fixture_paths, .fixture_rules = c->fixture_rules,
+        .fixture_count = c->fixture_count,
+    };
+    c->static_complete = cbm_test_impact_rust_reach(&input);
+    return c->static_complete;
+}
+
 static bool te_open_scope(te_ctx_t *c) {
     if (cbm_store_read_scope_open(c->store, NULL, NULL, &c->scope) != CBM_STORE_OK) {
         return te_fallback(c, CBM_TEST_RESULT_FALLBACK_GRAPH_UNAVAILABLE,
@@ -584,7 +615,7 @@ static void te_free(te_ctx_t *c) {
     cbm_changes_free(c->changes);
     cbm_git_facts_free(c->facts);
     void *arrays[] = {c->matches,       c->fallbacks,     c->warnings, c->seed_changes,
-                      c->fixture_paths, c->fixture_rules, c->triggers};
+                      c->fixture_paths, c->fixture_rules, c->reach,    c->triggers};
     for (size_t i = 0; i < sizeof(arrays) / sizeof(arrays[0]); i++) {
         cbm_free(CBM_MEM_CLASS_EXTRACT, arrays[i]);
     }
@@ -614,7 +645,7 @@ static void te_steps(te_ctx_t *c) {
         !te_classify_unmatched(c, unmatched) || c->fallback_count) {
         return;
     }
-    if (!te_open_scope(c) || !te_seed(c) || !te_reach(c) || !te_coverage_ids(c)) {
+    if (!te_open_scope(c) || !te_seed(c) || !te_run_static_reach(c) || !te_coverage_ids(c)) {
         return;
     }
     (void)te_select(c);

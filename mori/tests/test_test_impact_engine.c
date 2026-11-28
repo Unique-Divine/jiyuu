@@ -400,7 +400,7 @@ TEST(test_impact_engine_path_key_selects_naming_tests_or_ignores) {
 /* ── Child-process roles: the runner's TF_ROLE table ─────────────────
  * The fixture runner dispatches its roles from a table by argv[1]; a change
  * that reaches a role handler selects the tests that spawn the role, not
- * every test (src/mcp/test_impact_engine_reach.c te_role_lift). */
+ * every test (src/mcp/test_impact_engine_reach/scan.rs). */
 static const char tie_roles_main[] =
     "#include \"test_framework.h\"\n"
     "#include <string.h>\n"

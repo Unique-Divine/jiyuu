@@ -2135,7 +2135,7 @@ static int tf_role_userns_secure_probe(int argc, char **argv) {
  * literal, and main hands over to the handler at the entry's phase. A handler
  * returns the process's exit code, or -1 to let main continue.
  *
- * The test-impact engine reads this table (src/mcp/test_impact_engine_reach.c):
+ * The test-impact engine reads this table (src/mcp/test_impact_engine_reach/scan.rs):
  * a change only a role reaches runs the tests that name the role's literal,
  * while one that reaches main itself runs every test. So every role main can
  * enter by its argv[1] belongs here, and each entry stays on one line (phase,
