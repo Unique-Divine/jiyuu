@@ -88,6 +88,14 @@ Resolve that same line in its originating revision after verification:
   - Resolved: Describe the fix or why no change was appropriate, with evidence.
 ```
 
+Each finding's level (P0 to P3) follows the Severity section of the
+`gh-pr-review` skill. Only an unresolved P0 or P1 finding supports a Request
+Changes recommendation. Record P2 and P3 findings, approve, and list them as
+follow-up tickets.
+
+A finding about how the project should behave (policy), not what this diff
+breaks, links one shared policy issue. Do not raise it again on every PR.
+
 The scanner recognizes only exact `- [ ] rev:` and `- [x] rev:` prefixes.
 Findings have two states: unresolved or resolved. Do not invent stale,
 awaiting-review, rejected, or similar intermediate states. A well-supported
