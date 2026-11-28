@@ -41,6 +41,9 @@ typedef struct {
     const CBMEmbeddedLangSpec *embedded_imports;
 } CBMLangSpec;
 
+// lang_specs.rs holds the tables and defines cbm_conditional_block_types,
+// cbm_lang_spec and cbm_ts_language; its structs must match the two above.
+
 // Returns a NULL-terminated list of callee-name suffixes that indicate a
 // string-dispatch call for a given language (e.g. ".classMethodValue" for
 // Python/IRIS), or NULL if the language has no such dispatch pattern.
@@ -61,5 +64,13 @@ const CBMLangSpec *cbm_lang_spec(CBMLanguage lang);
 // Get the TSLanguage* for a given language. Returns NULL for unsupported.
 // These resolve at link time to grammar symbols from Go tree-sitter modules.
 const TSLanguage *cbm_ts_language(CBMLanguage lang);
+
+#ifdef CBM_ENABLE_TEST_SEAMS
+// The C tables in lang_specs.c, kept for the parity test against the Rust
+// tables in lang_specs.rs that serve the three accessors above.
+const CBMLangSpec *cbm_c_reference_lang_spec(CBMLanguage lang);
+const TSLanguage *cbm_c_reference_ts_language(CBMLanguage lang);
+const char **cbm_c_reference_conditional_block_types(CBMLanguage lang);
+#endif
 
 #endif // CBM_LANG_SPECS_H

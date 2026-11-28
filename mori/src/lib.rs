@@ -279,6 +279,10 @@ pub use go_imports::register as mori_register_go_import_extractor;
 mod native_tree;
 
 #[cfg(feature = "native-engine-abi")]
+#[path = "../internal/cbm/lang_specs.rs"]
+mod lang_specs;
+
+#[cfg(feature = "native-engine-abi")]
 #[path = "../internal/cbm/lsp/rust_path.rs"]
 mod rust_path;
 

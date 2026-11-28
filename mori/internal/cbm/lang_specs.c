@@ -2,6 +2,11 @@
 #include "cbm.h"             // CBMLanguage, CBM_LANG_*
 #include "tree_sitter/api.h" // TSLanguage
 
+// The C reference for the tables in lang_specs.rs, which now serves
+// cbm_lang_spec, cbm_ts_language and cbm_conditional_block_types. Only
+// test-seam builds compile it, for the parity test that compares the two.
+#ifdef CBM_ENABLE_TEST_SEAMS
+
 // -- Extern declarations for tree-sitter grammar functions --
 // These symbols are defined in the grammar C code compiled by Go tree-sitter modules.
 extern const TSLanguage *tree_sitter_go(void);
@@ -2767,7 +2772,7 @@ _Static_assert(sizeof(lang_specs) / sizeof(lang_specs[0]) == CBM_LANG_COUNT,
 static const char *c_family_conditional_types[] = {
     "preproc_if", "preproc_ifdef", "preproc_else", "preproc_elif", "preproc_elifdef", NULL};
 
-const char **cbm_conditional_block_types(CBMLanguage lang) {
+const char **cbm_c_reference_conditional_block_types(CBMLanguage lang) {
     switch (lang) {
     case CBM_LANG_C:
     case CBM_LANG_CPP:
@@ -2784,7 +2789,7 @@ const char **cbm_conditional_block_types(CBMLanguage lang) {
     }
 }
 
-const CBMLangSpec *cbm_lang_spec(CBMLanguage lang) {
+const CBMLangSpec *cbm_c_reference_lang_spec(CBMLanguage lang) {
     if (lang < 0 || lang >= CBM_LANG_COUNT) {
         return NULL;
     }
@@ -2795,7 +2800,9 @@ const CBMLangSpec *cbm_lang_spec(CBMLanguage lang) {
     return spec;
 }
 
-const TSLanguage *cbm_ts_language(CBMLanguage lang) {
-    const CBMLangSpec *spec = cbm_lang_spec(lang);
+const TSLanguage *cbm_c_reference_ts_language(CBMLanguage lang) {
+    const CBMLangSpec *spec = cbm_c_reference_lang_spec(lang);
     return spec && spec->ts_factory ? spec->ts_factory() : NULL;
 }
+
+#endif // CBM_ENABLE_TEST_SEAMS
