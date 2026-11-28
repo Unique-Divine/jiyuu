@@ -4,6 +4,7 @@
 #include "type_rep.h"
 #include "scope.h"
 #include "type_registry.h"
+#include "perl_lookup.h"
 #include "../cbm.h"
 #include "go_lsp.h" /* CBMLSPDef reused across languages */
 
@@ -45,6 +46,9 @@ typedef struct {
     const char **isa_parent_qns;
     int isa_count;
     int isa_cap;
+
+    /* Rust package index (perl_packages/): @ISA parents and package subs. */
+    MoriPerlPackages *packages;
 
     /* bless var→class map: blessed_var_names[i] holds a reference blessed
      * into class blessed_class_qns[i], so $self->method() can dispatch. */
@@ -104,6 +108,13 @@ void cbm_run_perl_lsp(CBMArena *arena, CBMFileResult *result, const char *source
 /* Register Perl stdlib (perlfunc builtins) + curated CPAN types into a
  * registry. */
 void cbm_perl_stdlib_register(CBMTypeRegistry *reg, CBMArena *arena);
+
+#ifdef CBM_ENABLE_TEST_SEAMS
+/* Select the C registry lookup instead of the Rust package index, so tests can
+ * compare both on the same files. Not thread-safe; tests call it between
+ * extractions. */
+void cbm_perl_lsp_test_set_c_package_lookup(bool enabled);
+#endif
 
 /* --- Cross-file LSP resolution ---
  *

@@ -73,6 +73,22 @@
  * edges, never a wrong one. */
 #define CBM_LSP_PERL_MAX_WALK_DEPTH 512
 
+/* Package method lookup runs in Rust (perl_packages/). Test builds can select
+ * the original C registry lookup to compare the two on the same files. */
+#ifdef CBM_ENABLE_TEST_SEAMS
+static bool perl_c_package_lookup;
+void cbm_perl_lsp_test_set_c_package_lookup(bool enabled) {
+    perl_c_package_lookup = enabled;
+}
+#else
+#define perl_c_package_lookup false
+#endif
+
+static const MoriPerlRegistryLookup perl_registry_lookup = {
+    .exact = cbm_registry_lookup_func,
+    .direct_method = cbm_registry_lookup_method,
+};
+
 /* ── forward declarations ───────────────────────────────────────── */
 
 static void perl_resolve_calls_in_node(PerlLSPContext *ctx, TSNode node);
@@ -284,6 +300,10 @@ const char *perl_resolve_package_name(PerlLSPContext *ctx, const char *name) {
 static void perl_add_isa(PerlLSPContext *ctx, const char *pkg, const char *parent) {
     if (!ctx || !pkg || !parent || !pkg[0] || !parent[0])
         return;
+    if (!perl_c_package_lookup) {
+        mori_perl_packages_add_parent(ctx->packages, pkg, parent);
+        return;
+    }
     if (ctx->isa_count >= ctx->isa_cap) {
         int newcap = ctx->isa_cap ? ctx->isa_cap * 2 : 8;
         const char **pk =
@@ -318,6 +338,9 @@ const CBMRegisteredFunc *perl_lookup_method(PerlLSPContext *ctx, const char *pac
                                             const char *method_name) {
     if (!ctx || !package_qn || !method_name)
         return NULL;
+    if (!perl_c_package_lookup)
+        return mori_perl_packages_lookup(ctx->packages, ctx->registry, &perl_registry_lookup,
+                                         package_qn, method_name, false);
 
     enum { CAP = CBM_LSP_MAX_LOOKUP_DEPTH * 2 };
     const char *frontier[CAP];
@@ -860,6 +883,15 @@ static void perl_resolve_method_call(PerlLSPContext *ctx, TSNode call) {
         const char *super_method = mname + 7;
         if (!super_method[0])
             return;
+        if (!perl_c_package_lookup) {
+            const CBMRegisteredFunc *sf =
+                mori_perl_packages_lookup(ctx->packages, ctx->registry, &perl_registry_lookup,
+                                          ctx->enclosing_package_qn, super_method, true);
+            if (sf)
+                perl_emit_resolved(ctx, sf->qualified_name, "perl_method_super", PERL_CONF_LITERAL,
+                                   call);
+            return;
+        }
         const char *parent_qn = ctx->enclosing_parent_qn;
         if (!parent_qn || !parent_qn[0])
             return;
@@ -1361,12 +1393,16 @@ void perl_lsp_process_file(PerlLSPContext *ctx, TSNode root) {
 
     /* PASS 1: collect package context, @ISA inheritance, Exporter imports.
      * Reset the per-file maps first so this is idempotent even when a caller
-     * (cbm_run_perl_lsp) has already run a pre-pass to build registry types. */
-    ctx->current_package_qn = "";
-    ctx->enclosing_package_qn = "";
-    ctx->use_count = 0;
-    ctx->isa_count = 0;
-    perl_pass1_scan(ctx, root);
+     * (cbm_run_perl_lsp) has already run a pre-pass to build registry types.
+     * The Rust package index keeps the pre-pass result: a second scan would
+     * append each parent again, and the import map it rebuilds is identical. */
+    if (perl_c_package_lookup) {
+        ctx->current_package_qn = "";
+        ctx->enclosing_package_qn = "";
+        ctx->use_count = 0;
+        ctx->isa_count = 0;
+        perl_pass1_scan(ctx, root);
+    }
 
     /* PASS 2: walk subs in package order; resolve + emit call edges. */
     ctx->current_package_qn = "";
@@ -1633,6 +1669,53 @@ static void perl_attach_methods(PerlLSPContext *ctx, CBMTypeRegistry *reg, TSNod
     free(mv.v);
 }
 
+/* Record each top-level sub, and each sub in a package block, under its
+ * package in the Rust package index. Mirrors perl_attach_methods. */
+static void perl_collect_sub(PerlLSPContext *ctx, TSNode node, const char *package) {
+    const char *kind = ts_node_type(node);
+    if (strcmp(kind, "subroutine_declaration_statement") != 0 &&
+        strcmp(kind, "method_declaration_statement") != 0)
+        return;
+    const char *name = perl_sub_name(ctx, node);
+    if (name && name[0])
+        mori_perl_packages_add_sub(ctx->packages, package, name, ctx->module_qn);
+}
+
+static void perl_collect_package_subs(PerlLSPContext *ctx, TSNode root) {
+    const char *package = "main";
+    uint32_t count = ts_node_child_count(root);
+    TSNode *kids = perl_collect_children(root, count);
+    for (uint32_t i = 0; i < count; i++) {
+        TSNode node = kids ? kids[i] : ts_node_child(root, i);
+        if (ts_node_is_null(node))
+            continue;
+        if (strcmp(ts_node_type(node), "package_statement") != 0) {
+            perl_collect_sub(ctx, node, package);
+            continue;
+        }
+
+        TSNode name = ts_node_child_by_field_name(node, "name", 4);
+        if (ts_node_is_null(name))
+            name = perl_first_child_of_type(node, "package");
+        if (!ts_node_is_null(name)) {
+            const char *text = perl_node_text(ctx, name);
+            if (text && text[0])
+                package = text;
+        }
+
+        /* Block-scoped package body: subs are nested children. */
+        uint32_t body_count = ts_node_child_count(node);
+        TSNode *body = perl_collect_children(node, body_count);
+        for (uint32_t j = 0; j < body_count; j++) {
+            TSNode child = body ? body[j] : ts_node_child(node, j);
+            if (!ts_node_is_null(child) && ts_node_is_named(child))
+                perl_collect_sub(ctx, child, package);
+        }
+        free(body);
+    }
+    free(kids);
+}
+
 /* ── entry: cbm_run_perl_lsp ────────────────────────────────────── */
 
 void cbm_run_perl_lsp(CBMArena *arena, CBMFileResult *result, const char *source, int source_len,
@@ -1681,12 +1764,18 @@ void cbm_run_perl_lsp(CBMArena *arena, CBMFileResult *result, const char *source
     PerlLSPContext ctx;
     perl_lsp_init(&ctx, arena, source, source_len, &reg, module_qn, &result->resolved_calls);
     ctx.usages = &result->usages;
+    if (!perl_c_package_lookup)
+        ctx.packages = mori_perl_packages_new();
 
     ctx.current_package_qn = "";
     ctx.enclosing_package_qn = "";
     perl_pass1_scan(&ctx, root);
-    perl_register_packages(&ctx, &reg);
-    perl_attach_methods(&ctx, &reg, root);
+    if (perl_c_package_lookup) {
+        perl_register_packages(&ctx, &reg);
+        perl_attach_methods(&ctx, &reg, root);
+    } else {
+        perl_collect_package_subs(&ctx, root);
+    }
 
     /* Finalize the registry for O(1) lookups during resolution — mirrors
      * php_lsp/java_lsp. Must come AFTER all registry mutations (stdlib, file
@@ -1713,5 +1802,7 @@ void cbm_run_perl_lsp(CBMArena *arena, CBMFileResult *result, const char *source
         }
     }
 
+    if (ctx.packages)
+        mori_perl_packages_free(ctx.packages);
     cbm_arena_destroy(&idx_arena);
 }
