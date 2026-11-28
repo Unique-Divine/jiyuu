@@ -127,6 +127,9 @@ mod test_impact_git;
 #[cfg(any(feature = "native-engine-abi", test))]
 #[path = "cli/config_cli/mod.rs"]
 mod config_cli;
+#[cfg(any(feature = "native-engine-abi", test))]
+#[path = "cli/tiered_profiles/mod.rs"]
+mod tiered_profiles;
 
 #[cfg(any(feature = "native-engine-abi", test))]
 #[path = "mcp/mcp_dispatch/methods.rs"]
