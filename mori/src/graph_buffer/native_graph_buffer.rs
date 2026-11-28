@@ -15,6 +15,16 @@ pub(super) struct Node {
     pub(super) properties_json: *const c_char,
 }
 
+// Keep this layout aligned with cbm_gbuf_edge_t in graph_buffer.h.
+#[repr(C)]
+pub(super) struct Edge {
+    pub(super) id: i64,
+    pub(super) source_id: i64,
+    pub(super) target_id: i64,
+    pub(super) kind: *const c_char,
+    pub(super) properties_json: *const c_char,
+}
+
 unsafe extern "C" {
     pub(super) fn cbm_gbuf_find_by_qn(
         graph: *const c_void,
@@ -44,4 +54,27 @@ unsafe extern "C" {
         nodes: *mut *const *const Node,
         count: *mut c_int,
     ) -> c_int;
+
+    pub(super) fn cbm_gbuf_find_edges_by_type(
+        graph: *const c_void,
+        kind: *const c_char,
+        edges: *mut *const *const Edge,
+        count: *mut c_int,
+    ) -> c_int;
+
+    pub(super) fn cbm_gbuf_find_edges_by_target_type(
+        graph: *const c_void,
+        target: i64,
+        kind: *const c_char,
+        edges: *mut *const *const Edge,
+        count: *mut c_int,
+    ) -> c_int;
+
+    pub(super) fn cbm_gbuf_insert_edge(
+        graph: *mut c_void,
+        source: i64,
+        target: i64,
+        kind: *const c_char,
+        props: *const c_char,
+    ) -> i64;
 }
