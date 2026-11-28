@@ -48,3 +48,38 @@ ruby_shadow/main.rb	Worker.run	Foo.bar	Method	231:236	a.bar	a.bar
 # clsp_c_nested_function_pointer_shadow_restores_outer_target
 shadowed/main.c	occurrence_probe	bravo_target	Function	234:238	fp()	fp
 shadowed/main.c	occurrence_probe	alpha_target	Function	265:269	fp()	fp
+# tslsp_type_text: TS annotations whose call resolution depends on parsed type text
+tsjs_types/main.ts		Gadget	Class	1101:1113	new Gadget()	Gadget
+tsjs_types/main.ts	array	Widget.render	Method	588:608	items.pop().render()	items.pop().render
+tsjs_types/main.ts	arrayGeneric	Gadget.spin	Method	705:716	item.spin()	item.spin
+tsjs_types/main.ts	callback	Widget.render	Method	880:895	make().render()	make().render
+tsjs_types/main.ts	callbackArg	Gadget.spin	Method	981:995	make(1).spin()	make(1).spin
+tsjs_types/main.ts	chained	Box.get	Method	1419:1435	returned().get()	returned().get
+tsjs_types/main.ts	chained	returned	Function	1419:1429	returned()	returned
+tsjs_types/main.ts	generic	Box.get	Method	249:258	box.get()	box.get
+tsjs_types/main.ts	intersection	Gadget.spin	Method	528:539	item.spin()	item.spin
+tsjs_types/main.ts	keyed	Widget.render	Method	1060:1073	item.render()	item.render
+tsjs_types/main.ts	nullable	Widget.render	Method	453:466	item.render()	item.render
+tsjs_types/main.ts	returned	Box	Class	1362:1383	new Box(new Gadget())	Box
+tsjs_types/main.ts	returned	Gadget	Class	1370:1382	new Gadget()	Gadget
+tsjs_types/main.ts	tuple	Gadget.spin	Method	812:825	second.spin()	second.spin
+tsjs_types/main.ts	union	Widget.render	Method	384:397	item.render()	item.render
+tsjs_types/main.ts	wrapped	Widget.render	Method	316:329	item.render()	item.render
+# tslsp_tsx_type_text: TSX annotations with unions and generic returns
+tsjs_tsx/main.tsx	renderPanel	Panel.item	Method	330:342	panel.item()	panel.item
+tsjs_tsx/main.tsx	renderTyped	ViewData.query	Method	232:251	data.query("typed")	data.query
+# tslsp_jsdoc_type_text: JSDoc types parsed by the same type-text parser
+tsjs_jsdoc/main.js	array	Widget.render	Method	309:329	items.pop().render()	items.pop().render
+tsjs_jsdoc/main.js	arrayGeneric	Gadget.spin	Method	441:452	item.spin()	item.spin
+tsjs_jsdoc/main.js	awaited	Gadget.spin	Method	787:815	(await fetchGadget()).spin()	(await fetchGadget()).spin
+tsjs_jsdoc/main.js	awaited	fetchGadget	Function	794:807	fetchGadget()	fetchGadget
+tsjs_jsdoc/main.js	build	Widget	Class	600:612	new Widget()	Widget
+tsjs_jsdoc/main.js	callback	Gadget.spin	Method	527:540	make().spin()	make().spin
+tsjs_jsdoc/main.js	chained	Widget.render	Method	642:658	build().render()	build().render
+tsjs_jsdoc/main.js	chained	build	Function	642:649	build()	build
+tsjs_jsdoc/main.js	fetchGadget	Gadget	Class	739:751	new Gadget()	Gadget
+tsjs_jsdoc/main.js	named	Widget.render	Method	150:163	item.render()	item.render
+tsjs_jsdoc/main.js	union	Widget.render	Method	232:245	item.render()	item.render
+# tslsp_jsx_jsdoc_type_text: JSDoc names and function types in JSX
+tsjs_jsx/main.jsx	renderLegacy	JsxSession.query	Method	136:156	session.query("jsx")	session.query
+tsjs_jsx/main.jsx	renderOpened	JsxSession.query	Method	259:282	open(1).query("opened")	open(1).query
