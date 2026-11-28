@@ -6,8 +6,10 @@
 #include "test_framework.h"
 #include "test_helpers.h"
 #include "test_doc_mentions_helpers.h"
+#include "test_gbuf_dump.h"
 
 #include "cbm.h"
+#include "pipeline/pipeline_internal.h"
 
 #include <ctype.h>
 #include <stdint.h>
@@ -1131,6 +1133,166 @@ TEST(diagrams_incremental_equals_full) {
     PASS();
 }
 
+/* ── Rust parity ─────────────────────────────────────────────────── */
+
+/* The fixture graph: a section, a diagram in it, its elements, and a
+ * function. Built the same way twice, so node ids match. */
+static cbm_gbuf_t *dg_parity_graph(void) {
+    cbm_gbuf_t *gb = cbm_gbuf_new("p", "/tmp/p");
+    cbm_gbuf_upsert_node(gb, "Section", "Arch", "p.doc.Arch", "doc.md", 5, 20, "{}");
+    cbm_gbuf_upsert_node(gb, "Diagram", "diagram-1", "p.doc.Arch#diagram-1", "doc.md", 7, 17, "{}");
+    const char *elems[] = {"A", "B", "C", "D"};
+    for (int i = 0; i < 4; i++) {
+        char qn[64];
+        snprintf(qn, sizeof(qn), "p.doc.Arch#diagram-1.%s", elems[i]);
+        cbm_gbuf_upsert_node(gb, "DiagramElement", elems[i], qn, "doc.md", 8 + i, 8 + i, "{}");
+    }
+    cbm_gbuf_upsert_node(gb, "Function", "f", "p.src.f", "src.py", 1, 2, "{}");
+    return gb;
+}
+
+static int64_t dg_id(const cbm_gbuf_t *gb, const char *qn) {
+    const cbm_gbuf_node_t *n = cbm_gbuf_find_by_qn(gb, qn);
+    return n ? n->id : 0;
+}
+
+TEST(diagrams_parent_edge_rust_matches_c) {
+    static const struct {
+        const char *label;
+        const char *parent;
+        const char *node; /* by qualified name; NULL for node_id */
+        int64_t node_id;
+    } cases[] = {
+        {"Diagram", "p.doc.Arch", "p.doc.Arch#diagram-1", 0},
+        {"DiagramElement", "p.doc.Arch#diagram-1", "p.doc.Arch#diagram-1.A", 0},
+        {"DiagramElement", "p.doc.Arch#diagram-1", "p.doc.Arch#diagram-1.B", 0},
+        /* again: the buffer keeps one edge */
+        {"DiagramElement", "p.doc.Arch#diagram-1", "p.doc.Arch#diagram-1.B", 0},
+        /* other labels, missing fields, a missing parent, the node itself */
+        {"Function", "p.doc.Arch", "p.src.f", 0},
+        {"diagram", "p.doc.Arch", "p.doc.Arch#diagram-1.C", 0},
+        {"", "p.doc.Arch", "p.doc.Arch#diagram-1.C", 0},
+        {NULL, "p.doc.Arch", "p.doc.Arch#diagram-1.C", 0},
+        {"DiagramElement", NULL, "p.doc.Arch#diagram-1.C", 0},
+        {"DiagramElement", "p.doc.Gone", "p.doc.Arch#diagram-1.C", 0},
+        {"DiagramElement", "", "p.doc.Arch#diagram-1.C", 0},
+        {"DiagramElement", "p.doc.Arch#diagram-1.D", "p.doc.Arch#diagram-1.D", 0},
+        /* a node id that is no node, zero and negative ids */
+        {"DiagramElement", "p.doc.Arch#diagram-1", NULL, 999},
+        {"DiagramElement", "p.doc.Arch#diagram-1", NULL, 0},
+        {"DiagramElement", "p.doc.Arch#diagram-1", NULL, -3},
+        /* a function as the container of a diagram element */
+        {"DiagramElement", "p.src.f", "p.doc.Arch#diagram-1.D", 0},
+    };
+    cbm_gbuf_t *c_gb = dg_parity_graph();
+    cbm_gbuf_t *rust_gb = dg_parity_graph();
+    cbm_pipeline_ctx_t ctx;
+    memset(&ctx, 0, sizeof(ctx));
+    ctx.gbuf = c_gb;
+    int before = cbm_gbuf_edge_count(c_gb);
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        CBMDefinition def;
+        memset(&def, 0, sizeof(def));
+        def.label = cases[i].label;
+        def.parent_class = cases[i].parent;
+        int64_t c_id = cases[i].node ? dg_id(c_gb, cases[i].node) : cases[i].node_id;
+        int64_t rust_id = cases[i].node ? dg_id(rust_gb, cases[i].node) : cases[i].node_id;
+        ASSERT_EQ(c_id, rust_id);
+        cbm_pipeline_diagram_parent_edge(&ctx, &def, c_id);
+        mori_pipeline_diagram_parent_edge(rust_gb, def.label, def.parent_class, rust_id);
+        char what[64];
+        snprintf(what, sizeof(what), "parent edge case %zu", i);
+        ASSERT_EQ(tg_dumps_differ(c_gb, rust_gb, what), 0);
+    }
+    /* Diagram, A, B, and D under the function; a nonexistent target id may
+     * still add an edge, the same on both sides. */
+    ASSERT_GTE(cbm_gbuf_edge_count(rust_gb) - before, 4);
+    /* NULL graph and definition: nothing, no crash. */
+    cbm_pipeline_diagram_parent_edge(NULL, NULL, 1);
+    mori_pipeline_diagram_parent_edge(NULL, "Diagram", "p.doc.Arch", 1);
+    cbm_gbuf_free(c_gb);
+    cbm_gbuf_free(rust_gb);
+    PASS();
+}
+
+TEST(diagrams_arrows_rust_matches_c) {
+    enum { DG_LONG = 700 };
+    static char long_plain[DG_LONG + 1];
+    static char long_quotes[DG_LONG + 1];
+    static char long_mixed[DG_LONG + 1];
+    static char long_ctrl[DG_LONG + 1];
+    memset(long_plain, 'x', DG_LONG);
+    memset(long_quotes, '"', DG_LONG);
+    /* one plain byte first, so a two-byte escape straddles the limit */
+    long_mixed[0] = 'y';
+    memset(long_mixed + 1, '\\', DG_LONG - 1);
+    /* six-byte \u00XX escapes up to the limit */
+    memset(long_ctrl, '\x01', DG_LONG);
+    const char *a = "p.doc.Arch#diagram-1.A";
+    const char *b = "p.doc.Arch#diagram-1.B";
+    const char *c = "p.doc.Arch#diagram-1.C";
+    const char *d = "p.doc.Arch#diagram-1.D";
+    CBMDiagramArrow arrows[] = {
+        {a, b, "calls", "flow", 12},
+        {b, c, NULL, "flow", 13},
+        {b, d, "", "dotted", 14},
+        {c, d, "say \"hi\"\\ now\n\ttab\r", "message\x01\x1f", 15},
+        {d, a, "caf\xc3\xa9 \xe2\x86\x92 \x7f", NULL, 0},
+        {a, c, long_plain, long_quotes, 4294967295U},
+        {c, a, long_mixed, long_ctrl, 7},
+        /* a self arrow; endpoints missing or not in the graph */
+        {a, a, "loop", "flow", 16},
+        {NULL, b, "x", "flow", 17},
+        {a, NULL, "x", "flow", 18},
+        {a, "p.doc.Arch#diagram-1.Z", "x", "flow", 19},
+        {"p.gone", b, "x", "flow", 20},
+        /* a diagram element to a function */
+        {d, "p.src.f", "ext", "flow", 21},
+        /* the same pair again: the buffer merges the properties */
+        {a, b, NULL, "inherits", 22},
+        {b, c, "second", "flow", 23},
+    };
+    int n = (int)(sizeof(arrows) / sizeof(arrows[0]));
+    cbm_gbuf_t *c_gb = dg_parity_graph();
+    cbm_gbuf_t *rust_gb = dg_parity_graph();
+    cbm_pipeline_ctx_t ctx;
+    memset(&ctx, 0, sizeof(ctx));
+    ctx.gbuf = c_gb;
+    static CBMFileResult result;
+    memset(&result, 0, sizeof(result));
+    result.diagram_arrows.items = arrows;
+    /* every prefix, so each arrow's edge is compared as it lands */
+    for (int k = 0; k <= n; k++) {
+        cbm_gbuf_t *c_step = dg_parity_graph();
+        cbm_gbuf_t *rust_step = dg_parity_graph();
+        ctx.gbuf = c_step;
+        result.diagram_arrows.count = k;
+        cbm_pipeline_diagram_arrows(&ctx, &result);
+        mori_pipeline_diagram_arrows(rust_step, arrows, k);
+        char what[64];
+        snprintf(what, sizeof(what), "first %d arrows", k);
+        ASSERT_EQ(tg_dumps_differ(c_step, rust_step, what), 0);
+        cbm_gbuf_free(c_step);
+        cbm_gbuf_free(rust_step);
+    }
+    ctx.gbuf = c_gb;
+    result.diagram_arrows.count = n;
+    cbm_pipeline_diagram_arrows(&ctx, &result);
+    mori_pipeline_diagram_arrows(rust_gb, arrows, n);
+    ASSERT_EQ(tg_dumps_differ(c_gb, rust_gb, "all arrows"), 0);
+    ASSERT_EQ(cbm_gbuf_edge_count_by_type(rust_gb, "DIAGRAM_ARROW"), 9);
+    /* NULL and empty inputs: nothing, no crash. */
+    cbm_pipeline_diagram_arrows(&ctx, NULL);
+    mori_pipeline_diagram_arrows(NULL, arrows, n);
+    mori_pipeline_diagram_arrows(rust_gb, NULL, 3);
+    mori_pipeline_diagram_arrows(rust_gb, arrows, 0);
+    mori_pipeline_diagram_arrows(rust_gb, arrows, -1);
+    ASSERT_EQ(tg_dumps_differ(c_gb, rust_gb, "after empty calls"), 0);
+    cbm_gbuf_free(c_gb);
+    cbm_gbuf_free(rust_gb);
+    PASS();
+}
+
 SUITE(diagrams) {
     RUN_TEST(diagrams_markdown_mermaid);
     RUN_TEST(diagrams_section_text_keeps_labels);
@@ -1151,4 +1313,6 @@ SUITE(diagrams) {
     RUN_TEST(diagrams_links_graph);
     RUN_TEST(diagrams_incremental_equals_full);
     RUN_TEST(diagrams_graph);
+    RUN_TEST(diagrams_parent_edge_rust_matches_c);
+    RUN_TEST(diagrams_arrows_rust_matches_c);
 }
