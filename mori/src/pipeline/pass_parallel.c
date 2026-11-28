@@ -1462,7 +1462,7 @@ static int register_and_link_def(cbm_pipeline_ctx_t *ctx, const CBMDefinition *d
         }
     }
     if (def_node) {
-        cbm_pipeline_diagram_parent_edge(ctx, def, def_node->id);
+        mori_pipeline_diagram_parent_edge(ctx->gbuf, def->label, def->parent_class, def_node->id);
     }
     return edges;
 }
@@ -1631,7 +1631,8 @@ int cbm_build_registry_from_cache(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t
 
         imports_edges += create_imports_edges(ctx, result, rel, namespace_map);
         create_channel_edges(ctx, result, rel);
-        cbm_pipeline_diagram_arrows(ctx, result);
+        mori_pipeline_diagram_arrows(ctx->gbuf, result->diagram_arrows.items,
+                                     result->diagram_arrows.count);
         cbm_pipeline_create_env_configures_for_file(ctx, result, rel);
         if (loaded) {
             cbm_free_result(result);
