@@ -3363,6 +3363,9 @@ static const CBMRegisteredType *c_resolve_field_owner_type(CLSPContext *ctx, con
 
 #ifdef CBM_ENABLE_TEST_SEAMS
 /* C reference for the Rust field lookup, kept for the parity test only. */
+static const CBMRegisteredType *c_ref_resolve_field_owner_type(CLSPContext *ctx,
+                                                               const char *type_qn);
+
 static const CBMType *c_ref_lookup_field_type(CLSPContext *ctx, const char *type_qn,
                                               const char *field_name, int depth) {
     if (!type_qn || !field_name || depth > 5)
