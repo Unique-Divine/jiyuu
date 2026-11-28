@@ -262,3 +262,128 @@ fn module_qualified_exact_lookup_accepts_long_and_non_utf8_names() {
     registry.visit_short = empty;
     assert_eq!(owner(&registry, c"Ops", c"count"), record.identity);
 }
+
+// The cases below come from clsp_field_lookup_rust_matches_c, the parity test
+// that compared this lookup with the C implementation it replaced.
+
+fn resolve(registry: &Registry, name: &CStr) -> *const RegisteredType {
+    unsafe {
+        mori_c_field_lookup(
+            registry,
+            name.as_ptr(),
+            null(),
+            std::ptr::null_mut(),
+        )
+    }
+}
+
+#[test]
+fn alias_walk_stops_past_five_steps() {
+    let names: Vec<_> = (0..8)
+        .map(|i| std::ffi::CString::new(format!("repo.use.L{i}")).unwrap())
+        .collect();
+    let fields = [c"count".as_ptr(), null()];
+    let types = [ty(0)];
+    let rows: Vec<_> = names
+        .iter()
+        .enumerate()
+        .map(|(i, name)| match names.get(i + 1) {
+            Some(next) => RecordRow {
+                alias_of: next.as_ptr(),
+                ..row(name)
+            },
+            None => RecordRow {
+                field_names: fields.as_ptr(),
+                field_types: types.as_ptr(),
+                ..row(name)
+            },
+        })
+        .collect();
+    let rows = Rows(&rows);
+    let source = TestRegistry {
+        rows: &rows,
+        module: c"repo.use",
+    };
+    let registry = registry(&source, &[]);
+    assert!(owner(&registry, c"L0", c"count").is_null());
+    assert!(owner(&registry, c"L1", c"count").is_null());
+    assert_eq!(owner(&registry, c"L2", c"count"), rows.0[7].identity);
+    assert_eq!(typed(&registry, c"L2", c"count"), ty(0));
+}
+
+#[test]
+fn an_untyped_field_defers_to_a_later_typed_entry_of_the_same_name() {
+    let fields = [c"u".as_ptr(), c"t".as_ptr(), c"u".as_ptr(), null()];
+    let types = [null(), ty(0), ty(1)];
+    let mixed = RecordRow {
+        field_names: fields.as_ptr(),
+        field_types: types.as_ptr(),
+        ..row(c"repo.use.Mixed")
+    };
+    let untyped = RecordRow {
+        field_names: fields.as_ptr(),
+        ..row(c"repo.use.Untyped")
+    };
+    let rows = Rows(&[mixed, untyped]);
+    let source = TestRegistry {
+        rows: &rows,
+        module: c"repo.use",
+    };
+    let registry = registry(&source, &[]);
+    assert_eq!(typed(&registry, c"Mixed", c"u"), ty(1));
+    assert_eq!(typed(&registry, c"Mixed", c"t"), ty(0));
+    assert_eq!(owner(&registry, c"Untyped", c"u"), untyped.identity);
+    assert!(typed(&registry, c"Untyped", c"u").is_null());
+}
+
+#[test]
+fn memberless_stubs_resolve_only_when_unique() {
+    let rows = Rows(&[row(c"stub.Lone"), row(c"x.Ghost"), row(c"y.Ghost")]);
+    let source = TestRegistry {
+        rows: &rows,
+        module: c"repo.use",
+    };
+    let registry = registry(&source, &[]);
+    assert_eq!(resolve(&registry, c"Lone"), rows.0[0].identity);
+    assert!(resolve(&registry, c"Ghost").is_null());
+    assert!(owner(&registry, c"Lone", c"count").is_null());
+}
+
+#[test]
+fn local_module_wins_and_an_empty_parent_is_not_a_candidate() {
+    let fields = [c"x".as_ptr(), null()];
+    let local = RecordRow {
+        field_names: fields.as_ptr(),
+        ..row(c"repo.use.Local")
+    };
+    let other = RecordRow {
+        field_names: fields.as_ptr(),
+        ..row(c"z.Local")
+    };
+    let edge = RecordRow {
+        field_names: fields.as_ptr(),
+        ..row(c".Edge")
+    };
+    let rows = Rows(&[other, local, edge]);
+    let local_source = TestRegistry {
+        rows: &rows,
+        module: c"repo.use",
+    };
+    let scoped = registry(&local_source, &[]);
+    assert_eq!(owner(&scoped, c"Local", c"x"), local.identity);
+    assert!(owner(&scoped, c"Edge", c"x").is_null());
+    assert_eq!(owner(&scoped, c".Edge", c"x"), edge.identity);
+    let empty_source = TestRegistry {
+        rows: &rows,
+        module: c"",
+    };
+    let unscoped = registry(&empty_source, &[]);
+    assert!(owner(&unscoped, c"Local", c"x").is_null());
+    assert_eq!(owner(&unscoped, c"Edge", c"x"), edge.identity);
+    let parent_source = TestRegistry {
+        rows: &rows,
+        module: c"repo",
+    };
+    let parent = registry(&parent_source, &[]);
+    assert_eq!(owner(&parent, c"Local", c"x"), local.identity);
+}
