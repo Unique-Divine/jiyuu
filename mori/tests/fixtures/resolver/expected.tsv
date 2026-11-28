@@ -79,6 +79,7 @@ python_annotations/main.py	union	Wheel.spin	Method	328:339	part.spin()	part.spin
 # dict dispatch, a lambda, a local alias, a stdlib module and a nested function
 python_invocation/main.py	Box.build	Box.__init__	Method	228:233	Box()	Box
 python_invocation/main.py	alias_call	helper	Function	673:677	fn()	fn
+python_invocation/main.py	alias_call	helper	Function	655:661	helper	helper	CALL_REFERENCE
 python_invocation/main.py	class_call	Box.create	Method	526:538	Box.create()	Box.create
 python_invocation/main.py	construct	Box.__init__	Method	423:428	Box()	Box
 python_invocation/main.py	construct	Box.grow	Method	440:450	box.grow()	box.grow
