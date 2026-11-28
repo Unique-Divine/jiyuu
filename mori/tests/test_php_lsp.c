@@ -5889,6 +5889,719 @@ TEST(phplsp_project_function_binding_keeps_its_exact_target) {
     PASS();
 }
 
+/* ── Type and method lookup: php_resolver ───────────────────────── */
+
+static int phplookup_report(const char *scene, const char *what, const char *a, const char *b,
+                            const char *expected, const char *actual) {
+    printf("  [%s] %s(%s, %s): expected=%s Rust=%s\n", scene, what, a ? a : "(null)",
+           b ? b : "(null)", expected ? expected : "(null)", actual ? actual : "(null)");
+    return 1;
+}
+
+static bool phplookup_same(const char *expected, const char *actual) {
+    return expected == actual || (expected && actual && strcmp(expected, actual) == 0);
+}
+
+static void phplookup_type(CBMTypeRegistry *reg, const char *qn, const char *short_name,
+                           const char **parents, const char **names, const char **qns) {
+    CBMRegisteredType t;
+    memset(&t, 0, sizeof(t));
+    t.qualified_name = qn;
+    t.short_name = short_name;
+    t.embedded_types = parents;
+    t.method_names = names;
+    t.method_qns = qns;
+    cbm_registry_add_type(reg, t);
+}
+
+static void phplookup_method(CBMTypeRegistry *reg, const char *receiver, const char *name) {
+    CBMRegisteredFunc f;
+    memset(&f, 0, sizeof(f));
+    f.receiver_type = receiver;
+    f.short_name = name;
+    f.qualified_name = receiver ? cbm_arena_sprintf(reg->arena, "%s.%s", receiver, name) : name;
+    f.min_params = -1;
+    cbm_registry_add_func(reg, f);
+}
+
+/* Chain of DEPTH single parents: Deep0 -> Deep1 -> ... The visited bound
+ * stops the walk before the method on the last link. */
+#define PHPLOOKUP_DEPTH 40
+
+typedef struct {
+    const char *name;
+    const char *module_qn;
+    bool external;
+    bool finalize;
+    bool fallback;
+    bool no_registry;
+    bool closed_arena;
+} PHPLookupScene;
+
+static const PHPLookupScene PHPLOOKUP_SCENES[] = {
+    {"module+vendor", "p.app.Main", true, true, false, false, false},
+    {"module", "p.app.Main", false, true, false, false, false},
+    {"unfinalized", "p.app.Main", true, false, false, false, false},
+    {"no module", NULL, true, true, false, false, false},
+    {"empty module", "", false, true, false, false, false},
+    {"other module", "p.lib.Two.Sub", false, true, false, false, false},
+    {"leading dot", ".p.app", false, true, false, false, false},
+    {"fallback", "p.app.Main", true, true, true, false, false},
+    {"no registry", "p.app.Main", true, true, false, true, false},
+    {"closed arena", "p.app.Main", true, true, false, false, true},
+    {"closed arena, no module", NULL, false, true, false, false, true},
+};
+
+/* Expected QNs per scene, recorded from the C reference before its removal:
+ * {scene, query class or type, method (NULL for a type lookup), result}. */
+typedef struct {
+    const char *scene;
+    const char *query;
+    const char *method;
+    bool is_method;
+    const char *expected;
+} PHPLookupCase;
+
+static const PHPLookupCase PHPLOOKUP_CASES[] = {
+    {"module+vendor", "", NULL, false, NULL},
+    {"module+vendor", ".", NULL, false, NULL},
+    {"module+vendor", "Unknown.", NULL, false, NULL},
+    {"module+vendor", "Request", NULL, false, "p.app.Near.Request"},
+    {"module+vendor", "Unknown.Request", NULL, false, "p.app.Near.Request"},
+    {"module+vendor", "Lib.Models.Request", NULL, false, "p.Lib.Models.Request"},
+    {"module+vendor", "p.lib.Two.Request", NULL, false, "p.lib.Two.Request"},
+    {"module+vendor", "Two.Request", NULL, false, "p.app.Near.Request"},
+    {"module+vendor", "Vendor.Http.Request", NULL, false, NULL},
+    {"module+vendor", "Vendor.Http.Request.Seeded", NULL, false, "Vendor.Http.Request.Seeded"},
+    {"module+vendor", "Vendor.Http.Request.Child", NULL, false, NULL},
+    {"module+vendor", "Vendor.Http.RequestOther", NULL, false, "p.lib.RequestOther"},
+    {"module+vendor", "Vendor.Http", NULL, false, NULL},
+    {"module+vendor", "Labeled", NULL, false, "p.app.Labeled"},
+    {"module+vendor", "app.Labeled", NULL, false, "p.app.Labeled"},
+    {"module+vendor", "Main.Base", NULL, false, "p.app.Main.Base"},
+    {"module+vendor", "Base", NULL, false, "p.app.Main.Base"},
+    {"module+vendor", "p.app.Main.Base", NULL, false, "p.app.Main.Base"},
+    {"module+vendor", "Child", NULL, false, "p.app.Main.Child"},
+    {"module+vendor", "Deep0", NULL, false, "p.app.Main.Deep0"},
+    {"module+vendor", "Absent", NULL, false, NULL},
+    {"module+vendor", "x.y.Absent", NULL, false, NULL},
+    {"module+vendor", NULL, "greet", true, NULL},
+    {"module+vendor", "Child", NULL, true, NULL},
+    {"module+vendor", "p.app.Main.Base", "greet", true, "p.app.Main.Base.greet"},
+    {"module+vendor", "Base", "greet", true, "p.app.Main.Base.greet"},
+    {"module+vendor", "Child", "greet", true, "p.app.Main.Base.greet"},
+    {"module+vendor", "Child", "tag", true, "p.app.Labeled.tag"},
+    {"module+vendor", "Child", "label", true, "p.app.Main.Child.label"},
+    {"module+vendor", "Child", "wave", true, "lib.Provenance.wave"},
+    {"module+vendor", "Child", "orphan", true, NULL},
+    {"module+vendor", "Child", "absent", true, NULL},
+    {"module+vendor", "Middle", "greet", true, "p.app.Main.Base.greet"},
+    {"module+vendor", "CycA", "missing", true, NULL},
+    {"module+vendor", "CycA", "cyc", true, "p.app.Main.CycB.cyc"},
+    {"module+vendor", "Deep0", "mid", true, "p.app.Main.Deep10.mid"},
+    {"module+vendor", "Deep0", "bottom", true, NULL},
+    {"module+vendor", "Wide", "w0", true, "p.app.Main.W0.w0"},
+    {"module+vendor", "Wide", "w31", true, "p.app.Main.W31.w31"},
+    {"module+vendor", "Wide", "w33", true, NULL},
+    {"module+vendor", "Vendor.Http.Request", "validated", true, NULL},
+    {"module+vendor", "Unknown.Request", "validated", true, NULL},
+    {"module+vendor", "Request", "validated", true, NULL},
+    {"module+vendor", "Absent", "greet", true, NULL},
+    {"module+vendor", "", "greet", true, NULL},
+    {"module", NULL, NULL, false, NULL},
+    {"module", "", NULL, false, NULL},
+    {"module", ".", NULL, false, NULL},
+    {"module", "Unknown.", NULL, false, NULL},
+    {"module", "Request", NULL, false, "p.app.Near.Request"},
+    {"module", "Unknown.Request", NULL, false, "p.app.Near.Request"},
+    {"module", "Lib.Models.Request", NULL, false, "p.Lib.Models.Request"},
+    {"module", "p.lib.Two.Request", NULL, false, "p.lib.Two.Request"},
+    {"module", "Two.Request", NULL, false, "p.app.Near.Request"},
+    {"module", "Vendor.Http.Request", NULL, false, "p.app.Near.Request"},
+    {"module", "Vendor.Http.Request.Seeded", NULL, false, "Vendor.Http.Request.Seeded"},
+    {"module", "Vendor.Http.Request.Child", NULL, false, "p.app.Main.Child"},
+    {"module", "Vendor.Http.RequestOther", NULL, false, "p.lib.RequestOther"},
+    {"module", "Vendor.Http", NULL, false, NULL},
+    {"module", "Labeled", NULL, false, "p.app.Labeled"},
+    {"module", "app.Labeled", NULL, false, "p.app.Labeled"},
+    {"module", "Main.Base", NULL, false, "p.app.Main.Base"},
+    {"module", "Base", NULL, false, "p.app.Main.Base"},
+    {"module", "p.app.Main.Base", NULL, false, "p.app.Main.Base"},
+    {"module", "Child", NULL, false, "p.app.Main.Child"},
+    {"module", "Deep0", NULL, false, "p.app.Main.Deep0"},
+    {"module", "Absent", NULL, false, NULL},
+    {"module", "x.y.Absent", NULL, false, NULL},
+    {"module", NULL, "greet", true, NULL},
+    {"module", "Child", NULL, true, NULL},
+    {"module", "p.app.Main.Base", "greet", true, "p.app.Main.Base.greet"},
+    {"module", "Base", "greet", true, "p.app.Main.Base.greet"},
+    {"module", "Child", "greet", true, "p.app.Main.Base.greet"},
+    {"module", "Child", "tag", true, "p.app.Labeled.tag"},
+    {"module", "Child", "label", true, "p.app.Main.Child.label"},
+    {"module", "Child", "wave", true, "lib.Provenance.wave"},
+    {"module", "Child", "orphan", true, NULL},
+    {"module", "Child", "absent", true, NULL},
+    {"module", "Middle", "greet", true, "p.app.Main.Base.greet"},
+    {"module", "CycA", "missing", true, NULL},
+    {"module", "CycA", "cyc", true, "p.app.Main.CycB.cyc"},
+    {"module", "Deep0", "mid", true, "p.app.Main.Deep10.mid"},
+    {"module", "Deep0", "bottom", true, NULL},
+    {"module", "Wide", "w0", true, "p.app.Main.W0.w0"},
+    {"module", "Wide", "w31", true, "p.app.Main.W31.w31"},
+    {"module", "Wide", "w33", true, NULL},
+    {"module", "Vendor.Http.Request", "validated", true, NULL},
+    {"module", "Unknown.Request", "validated", true, NULL},
+    {"module", "Request", "validated", true, NULL},
+    {"module", "Absent", "greet", true, NULL},
+    {"module", "", "greet", true, NULL},
+    {"unfinalized", NULL, NULL, false, NULL},
+    {"unfinalized", "", NULL, false, NULL},
+    {"unfinalized", ".", NULL, false, NULL},
+    {"unfinalized", "Unknown.", NULL, false, NULL},
+    {"unfinalized", "Request", NULL, false, "p.app.Near.Request"},
+    {"unfinalized", "Unknown.Request", NULL, false, "p.app.Near.Request"},
+    {"unfinalized", "Lib.Models.Request", NULL, false, "p.Lib.Models.Request"},
+    {"unfinalized", "p.lib.Two.Request", NULL, false, "p.lib.Two.Request"},
+    {"unfinalized", "Two.Request", NULL, false, "p.app.Near.Request"},
+    {"unfinalized", "Vendor.Http.Request", NULL, false, NULL},
+    {"unfinalized", "Vendor.Http.Request.Seeded", NULL, false, "Vendor.Http.Request.Seeded"},
+    {"unfinalized", "Vendor.Http.Request.Child", NULL, false, NULL},
+    {"unfinalized", "Vendor.Http.RequestOther", NULL, false, "p.lib.RequestOther"},
+    {"unfinalized", "Vendor.Http", NULL, false, NULL},
+    {"unfinalized", "Labeled", NULL, false, "p.app.Labeled"},
+    {"unfinalized", "app.Labeled", NULL, false, "p.app.Labeled"},
+    {"unfinalized", "Main.Base", NULL, false, "p.app.Main.Base"},
+    {"unfinalized", "Base", NULL, false, "p.app.Main.Base"},
+    {"unfinalized", "p.app.Main.Base", NULL, false, "p.app.Main.Base"},
+    {"unfinalized", "Child", NULL, false, "p.app.Main.Child"},
+    {"unfinalized", "Deep0", NULL, false, "p.app.Main.Deep0"},
+    {"unfinalized", "Absent", NULL, false, NULL},
+    {"unfinalized", "x.y.Absent", NULL, false, NULL},
+    {"unfinalized", NULL, "greet", true, NULL},
+    {"unfinalized", "Child", NULL, true, NULL},
+    {"unfinalized", "p.app.Main.Base", "greet", true, "p.app.Main.Base.greet"},
+    {"unfinalized", "Base", "greet", true, "p.app.Main.Base.greet"},
+    {"unfinalized", "Child", "greet", true, "p.app.Main.Base.greet"},
+    {"unfinalized", "Child", "tag", true, "p.app.Labeled.tag"},
+    {"unfinalized", "Child", "label", true, "p.app.Main.Child.label"},
+    {"unfinalized", "Child", "wave", true, "lib.Provenance.wave"},
+    {"unfinalized", "Child", "orphan", true, NULL},
+    {"unfinalized", "Child", "absent", true, NULL},
+    {"unfinalized", "Middle", "greet", true, "p.app.Main.Base.greet"},
+    {"unfinalized", "CycA", "missing", true, NULL},
+    {"unfinalized", "CycA", "cyc", true, "p.app.Main.CycB.cyc"},
+    {"unfinalized", "Deep0", "mid", true, "p.app.Main.Deep10.mid"},
+    {"unfinalized", "Deep0", "bottom", true, NULL},
+    {"unfinalized", "Wide", "w0", true, "p.app.Main.W0.w0"},
+    {"unfinalized", "Wide", "w31", true, "p.app.Main.W31.w31"},
+    {"unfinalized", "Wide", "w33", true, NULL},
+    {"unfinalized", "Vendor.Http.Request", "validated", true, NULL},
+    {"unfinalized", "Unknown.Request", "validated", true, NULL},
+    {"unfinalized", "Request", "validated", true, NULL},
+    {"unfinalized", "Absent", "greet", true, NULL},
+    {"unfinalized", "", "greet", true, NULL},
+    {"no module", NULL, NULL, false, NULL},
+    {"no module", "", NULL, false, NULL},
+    {"no module", ".", NULL, false, NULL},
+    {"no module", "Unknown.", NULL, false, NULL},
+    {"no module", "Request", NULL, false, "p.lib.One.Request"},
+    {"no module", "Unknown.Request", NULL, false, "p.lib.One.Request"},
+    {"no module", "Lib.Models.Request", NULL, false, "p.lib.One.Request"},
+    {"no module", "p.lib.Two.Request", NULL, false, "p.lib.Two.Request"},
+    {"no module", "Two.Request", NULL, false, "p.lib.One.Request"},
+    {"no module", "Vendor.Http.Request", NULL, false, NULL},
+    {"no module", "Vendor.Http.Request.Seeded", NULL, false, "Vendor.Http.Request.Seeded"},
+    {"no module", "Vendor.Http.Request.Child", NULL, false, NULL},
+    {"no module", "Vendor.Http.RequestOther", NULL, false, "p.lib.RequestOther"},
+    {"no module", "Vendor.Http", NULL, false, NULL},
+    {"no module", "Labeled", NULL, false, "p.app.Labeled"},
+    {"no module", "app.Labeled", NULL, false, "p.app.Labeled"},
+    {"no module", "Main.Base", NULL, false, "p.app.Main.Base"},
+    {"no module", "Base", NULL, false, "p.app.Main.Base"},
+    {"no module", "p.app.Main.Base", NULL, false, "p.app.Main.Base"},
+    {"no module", "Child", NULL, false, "p.app.Main.Child"},
+    {"no module", "Deep0", NULL, false, "p.app.Main.Deep0"},
+    {"no module", "Absent", NULL, false, NULL},
+    {"no module", "x.y.Absent", NULL, false, NULL},
+    {"no module", NULL, "greet", true, NULL},
+    {"no module", "Child", NULL, true, NULL},
+    {"no module", "p.app.Main.Base", "greet", true, "p.app.Main.Base.greet"},
+    {"no module", "Base", "greet", true, "p.app.Main.Base.greet"},
+    {"no module", "Child", "greet", true, "p.app.Main.Base.greet"},
+    {"no module", "Child", "tag", true, "p.app.Labeled.tag"},
+    {"no module", "Child", "label", true, "p.app.Main.Child.label"},
+    {"no module", "Child", "wave", true, "lib.Provenance.wave"},
+    {"no module", "Child", "orphan", true, NULL},
+    {"no module", "Child", "absent", true, NULL},
+    {"no module", "Middle", "greet", true, "p.app.Main.Base.greet"},
+    {"no module", "CycA", "missing", true, NULL},
+    {"no module", "CycA", "cyc", true, "p.app.Main.CycB.cyc"},
+    {"no module", "Deep0", "mid", true, "p.app.Main.Deep10.mid"},
+    {"no module", "Deep0", "bottom", true, NULL},
+    {"no module", "Wide", "w0", true, "p.app.Main.W0.w0"},
+    {"no module", "Wide", "w31", true, "p.app.Main.W31.w31"},
+    {"no module", "Wide", "w33", true, NULL},
+    {"no module", "Vendor.Http.Request", "validated", true, NULL},
+    {"no module", "Unknown.Request", "validated", true, NULL},
+    {"no module", "Request", "validated", true, NULL},
+    {"no module", "Absent", "greet", true, NULL},
+    {"no module", "", "greet", true, NULL},
+    {"empty module", NULL, NULL, false, NULL},
+    {"empty module", "", NULL, false, NULL},
+    {"empty module", ".", NULL, false, NULL},
+    {"empty module", "Unknown.", NULL, false, NULL},
+    {"empty module", "Request", NULL, false, "p.lib.One.Request"},
+    {"empty module", "Unknown.Request", NULL, false, "p.lib.One.Request"},
+    {"empty module", "Lib.Models.Request", NULL, false, "p.lib.One.Request"},
+    {"empty module", "p.lib.Two.Request", NULL, false, "p.lib.Two.Request"},
+    {"empty module", "Two.Request", NULL, false, "p.lib.One.Request"},
+    {"empty module", "Vendor.Http.Request", NULL, false, "p.lib.One.Request"},
+    {"empty module", "Vendor.Http.Request.Seeded", NULL, false, "Vendor.Http.Request.Seeded"},
+    {"empty module", "Vendor.Http.Request.Child", NULL, false, "p.app.Main.Child"},
+    {"empty module", "Vendor.Http.RequestOther", NULL, false, "p.lib.RequestOther"},
+    {"empty module", "Vendor.Http", NULL, false, NULL},
+    {"empty module", "Labeled", NULL, false, "p.app.Labeled"},
+    {"empty module", "app.Labeled", NULL, false, "p.app.Labeled"},
+    {"empty module", "Main.Base", NULL, false, "p.app.Main.Base"},
+    {"empty module", "Base", NULL, false, "p.app.Main.Base"},
+    {"empty module", "p.app.Main.Base", NULL, false, "p.app.Main.Base"},
+    {"empty module", "Child", NULL, false, "p.app.Main.Child"},
+    {"empty module", "Deep0", NULL, false, "p.app.Main.Deep0"},
+    {"empty module", "Absent", NULL, false, NULL},
+    {"empty module", "x.y.Absent", NULL, false, NULL},
+    {"empty module", NULL, "greet", true, NULL},
+    {"empty module", "Child", NULL, true, NULL},
+    {"empty module", "p.app.Main.Base", "greet", true, "p.app.Main.Base.greet"},
+    {"empty module", "Base", "greet", true, "p.app.Main.Base.greet"},
+    {"empty module", "Child", "greet", true, "p.app.Main.Base.greet"},
+    {"empty module", "Child", "tag", true, "p.app.Labeled.tag"},
+    {"empty module", "Child", "label", true, "p.app.Main.Child.label"},
+    {"empty module", "Child", "wave", true, "lib.Provenance.wave"},
+    {"empty module", "Child", "orphan", true, NULL},
+    {"empty module", "Child", "absent", true, NULL},
+    {"empty module", "Middle", "greet", true, "p.app.Main.Base.greet"},
+    {"empty module", "CycA", "missing", true, NULL},
+    {"empty module", "CycA", "cyc", true, "p.app.Main.CycB.cyc"},
+    {"empty module", "Deep0", "mid", true, "p.app.Main.Deep10.mid"},
+    {"empty module", "Deep0", "bottom", true, NULL},
+    {"empty module", "Wide", "w0", true, "p.app.Main.W0.w0"},
+    {"empty module", "Wide", "w31", true, "p.app.Main.W31.w31"},
+    {"empty module", "Wide", "w33", true, NULL},
+    {"empty module", "Vendor.Http.Request", "validated", true, NULL},
+    {"empty module", "Unknown.Request", "validated", true, NULL},
+    {"empty module", "Request", "validated", true, NULL},
+    {"empty module", "Absent", "greet", true, NULL},
+    {"empty module", "", "greet", true, NULL},
+    {"other module", NULL, NULL, false, NULL},
+    {"other module", "", NULL, false, NULL},
+    {"other module", ".", NULL, false, NULL},
+    {"other module", "Unknown.", NULL, false, NULL},
+    {"other module", "Request", NULL, false, "p.lib.Two.Request"},
+    {"other module", "Unknown.Request", NULL, false, "p.lib.Two.Request"},
+    {"other module", "Lib.Models.Request", NULL, false, "p.Lib.Models.Request"},
+    {"other module", "p.lib.Two.Request", NULL, false, "p.lib.Two.Request"},
+    {"other module", "Two.Request", NULL, false, "p.lib.Two.Request"},
+    {"other module", "Vendor.Http.Request", NULL, false, "p.lib.Two.Request"},
+    {"other module", "Vendor.Http.Request.Seeded", NULL, false, "Vendor.Http.Request.Seeded"},
+    {"other module", "Vendor.Http.Request.Child", NULL, false, "p.app.Main.Child"},
+    {"other module", "Vendor.Http.RequestOther", NULL, false, "p.lib.RequestOther"},
+    {"other module", "Vendor.Http", NULL, false, NULL},
+    {"other module", "Labeled", NULL, false, "p.app.Labeled"},
+    {"other module", "app.Labeled", NULL, false, "p.app.Labeled"},
+    {"other module", "Main.Base", NULL, false, "p.app.Main.Base"},
+    {"other module", "Base", NULL, false, "p.app.Main.Base"},
+    {"other module", "p.app.Main.Base", NULL, false, "p.app.Main.Base"},
+    {"other module", "Child", NULL, false, "p.app.Main.Child"},
+    {"other module", "Deep0", NULL, false, "p.app.Main.Deep0"},
+    {"other module", "Absent", NULL, false, NULL},
+    {"other module", "x.y.Absent", NULL, false, NULL},
+    {"other module", NULL, "greet", true, NULL},
+    {"other module", "Child", NULL, true, NULL},
+    {"other module", "p.app.Main.Base", "greet", true, "p.app.Main.Base.greet"},
+    {"other module", "Base", "greet", true, "p.app.Main.Base.greet"},
+    {"other module", "Child", "greet", true, "p.app.Main.Base.greet"},
+    {"other module", "Child", "tag", true, "p.app.Labeled.tag"},
+    {"other module", "Child", "label", true, "p.app.Main.Child.label"},
+    {"other module", "Child", "wave", true, "lib.Provenance.wave"},
+    {"other module", "Child", "orphan", true, NULL},
+    {"other module", "Child", "absent", true, NULL},
+    {"other module", "Middle", "greet", true, "p.app.Main.Base.greet"},
+    {"other module", "CycA", "missing", true, NULL},
+    {"other module", "CycA", "cyc", true, "p.app.Main.CycB.cyc"},
+    {"other module", "Deep0", "mid", true, "p.app.Main.Deep10.mid"},
+    {"other module", "Deep0", "bottom", true, NULL},
+    {"other module", "Wide", "w0", true, "p.app.Main.W0.w0"},
+    {"other module", "Wide", "w31", true, "p.app.Main.W31.w31"},
+    {"other module", "Wide", "w33", true, NULL},
+    {"other module", "Vendor.Http.Request", "validated", true, NULL},
+    {"other module", "Unknown.Request", "validated", true, NULL},
+    {"other module", "Request", "validated", true, NULL},
+    {"other module", "Absent", "greet", true, NULL},
+    {"other module", "", "greet", true, NULL},
+    {"leading dot", NULL, NULL, false, NULL},
+    {"leading dot", "", NULL, false, NULL},
+    {"leading dot", ".", NULL, false, NULL},
+    {"leading dot", "Unknown.", NULL, false, NULL},
+    {"leading dot", "Request", NULL, false, "p.lib.One.Request"},
+    {"leading dot", "Unknown.Request", NULL, false, "p.lib.One.Request"},
+    {"leading dot", "Lib.Models.Request", NULL, false, "p.lib.One.Request"},
+    {"leading dot", "p.lib.Two.Request", NULL, false, "p.lib.Two.Request"},
+    {"leading dot", "Two.Request", NULL, false, "p.lib.One.Request"},
+    {"leading dot", "Vendor.Http.Request", NULL, false, "p.lib.One.Request"},
+    {"leading dot", "Vendor.Http.Request.Seeded", NULL, false, "Vendor.Http.Request.Seeded"},
+    {"leading dot", "Vendor.Http.Request.Child", NULL, false, "p.app.Main.Child"},
+    {"leading dot", "Vendor.Http.RequestOther", NULL, false, "p.lib.RequestOther"},
+    {"leading dot", "Vendor.Http", NULL, false, NULL},
+    {"leading dot", "Labeled", NULL, false, "p.app.Labeled"},
+    {"leading dot", "app.Labeled", NULL, false, "p.app.Labeled"},
+    {"leading dot", "Main.Base", NULL, false, "p.app.Main.Base"},
+    {"leading dot", "Base", NULL, false, "p.app.Main.Base"},
+    {"leading dot", "p.app.Main.Base", NULL, false, "p.app.Main.Base"},
+    {"leading dot", "Child", NULL, false, "p.app.Main.Child"},
+    {"leading dot", "Deep0", NULL, false, "p.app.Main.Deep0"},
+    {"leading dot", "Absent", NULL, false, NULL},
+    {"leading dot", "x.y.Absent", NULL, false, NULL},
+    {"leading dot", NULL, "greet", true, NULL},
+    {"leading dot", "Child", NULL, true, NULL},
+    {"leading dot", "p.app.Main.Base", "greet", true, "p.app.Main.Base.greet"},
+    {"leading dot", "Base", "greet", true, "p.app.Main.Base.greet"},
+    {"leading dot", "Child", "greet", true, "p.app.Main.Base.greet"},
+    {"leading dot", "Child", "tag", true, "p.app.Labeled.tag"},
+    {"leading dot", "Child", "label", true, "p.app.Main.Child.label"},
+    {"leading dot", "Child", "wave", true, "lib.Provenance.wave"},
+    {"leading dot", "Child", "orphan", true, NULL},
+    {"leading dot", "Child", "absent", true, NULL},
+    {"leading dot", "Middle", "greet", true, "p.app.Main.Base.greet"},
+    {"leading dot", "CycA", "missing", true, NULL},
+    {"leading dot", "CycA", "cyc", true, "p.app.Main.CycB.cyc"},
+    {"leading dot", "Deep0", "mid", true, "p.app.Main.Deep10.mid"},
+    {"leading dot", "Deep0", "bottom", true, NULL},
+    {"leading dot", "Wide", "w0", true, "p.app.Main.W0.w0"},
+    {"leading dot", "Wide", "w31", true, "p.app.Main.W31.w31"},
+    {"leading dot", "Wide", "w33", true, NULL},
+    {"leading dot", "Vendor.Http.Request", "validated", true, NULL},
+    {"leading dot", "Unknown.Request", "validated", true, NULL},
+    {"leading dot", "Request", "validated", true, NULL},
+    {"leading dot", "Absent", "greet", true, NULL},
+    {"leading dot", "", "greet", true, NULL},
+    {"fallback", NULL, NULL, false, NULL},
+    {"fallback", "", NULL, false, NULL},
+    {"fallback", ".", NULL, false, NULL},
+    {"fallback", "Unknown.", NULL, false, NULL},
+    {"fallback", "Request", NULL, false, "p.app.Near.Request"},
+    {"fallback", "Unknown.Request", NULL, false, "p.app.Near.Request"},
+    {"fallback", "Lib.Models.Request", NULL, false, "p.Lib.Models.Request"},
+    {"fallback", "p.lib.Two.Request", NULL, false, "p.lib.Two.Request"},
+    {"fallback", "Two.Request", NULL, false, "p.app.Near.Request"},
+    {"fallback", "Vendor.Http.Request", NULL, false, NULL},
+    {"fallback", "Vendor.Http.Request.Seeded", NULL, false, "Vendor.Http.Request.Seeded"},
+    {"fallback", "Vendor.Http.Request.Child", NULL, false, NULL},
+    {"fallback", "Vendor.Http.RequestOther", NULL, false, "p.lib.RequestOther"},
+    {"fallback", "Vendor.Http", NULL, false, NULL},
+    {"fallback", "Labeled", NULL, false, "p.app.Labeled"},
+    {"fallback", "app.Labeled", NULL, false, "p.app.Labeled"},
+    {"fallback", "Main.Base", NULL, false, "p.app.Main.Base"},
+    {"fallback", "Base", NULL, false, "p.app.Main.Base"},
+    {"fallback", "p.app.Main.Base", NULL, false, "p.app.Main.Base"},
+    {"fallback", "Child", NULL, false, "p.app.Main.Child"},
+    {"fallback", "Deep0", NULL, false, "p.app.Main.Deep0"},
+    {"fallback", "Absent", NULL, false, NULL},
+    {"fallback", "x.y.Absent", NULL, false, NULL},
+    {"fallback", NULL, "greet", true, NULL},
+    {"fallback", "Child", NULL, true, NULL},
+    {"fallback", "p.app.Main.Base", "greet", true, "p.app.Main.Base.greet"},
+    {"fallback", "Base", "greet", true, "p.app.Main.Base.greet"},
+    {"fallback", "Child", "greet", true, "p.app.Main.Base.greet"},
+    {"fallback", "Child", "tag", true, "p.app.Labeled.tag"},
+    {"fallback", "Child", "label", true, "p.app.Main.Child.label"},
+    {"fallback", "Child", "wave", true, "lib.Provenance.wave"},
+    {"fallback", "Child", "orphan", true, NULL},
+    {"fallback", "Child", "absent", true, NULL},
+    {"fallback", "Middle", "greet", true, "p.app.Main.Base.greet"},
+    {"fallback", "CycA", "missing", true, NULL},
+    {"fallback", "CycA", "cyc", true, "p.app.Main.CycB.cyc"},
+    {"fallback", "Deep0", "mid", true, "p.app.Main.Deep10.mid"},
+    {"fallback", "Deep0", "bottom", true, NULL},
+    {"fallback", "Wide", "w0", true, "p.app.Main.W0.w0"},
+    {"fallback", "Wide", "w31", true, "p.app.Main.W31.w31"},
+    {"fallback", "Wide", "w33", true, NULL},
+    {"fallback", "Vendor.Http.Request", "validated", true, NULL},
+    {"fallback", "Unknown.Request", "validated", true, NULL},
+    {"fallback", "Request", "validated", true, NULL},
+    {"fallback", "Absent", "greet", true, NULL},
+    {"fallback", "", "greet", true, NULL},
+    {"no registry", NULL, NULL, false, NULL},
+    {"no registry", "", NULL, false, NULL},
+    {"no registry", ".", NULL, false, NULL},
+    {"no registry", "Unknown.", NULL, false, NULL},
+    {"no registry", "Request", NULL, false, NULL},
+    {"no registry", "Unknown.Request", NULL, false, NULL},
+    {"no registry", "Lib.Models.Request", NULL, false, NULL},
+    {"no registry", "p.lib.Two.Request", NULL, false, NULL},
+    {"no registry", "Two.Request", NULL, false, NULL},
+    {"no registry", "Vendor.Http.Request", NULL, false, NULL},
+    {"no registry", "Vendor.Http.Request.Seeded", NULL, false, NULL},
+    {"no registry", "Vendor.Http.Request.Child", NULL, false, NULL},
+    {"no registry", "Vendor.Http.RequestOther", NULL, false, NULL},
+    {"no registry", "Vendor.Http", NULL, false, NULL},
+    {"no registry", "Labeled", NULL, false, NULL},
+    {"no registry", "app.Labeled", NULL, false, NULL},
+    {"no registry", "Main.Base", NULL, false, NULL},
+    {"no registry", "Base", NULL, false, NULL},
+    {"no registry", "p.app.Main.Base", NULL, false, NULL},
+    {"no registry", "Child", NULL, false, NULL},
+    {"no registry", "Deep0", NULL, false, NULL},
+    {"no registry", "Absent", NULL, false, NULL},
+    {"no registry", "x.y.Absent", NULL, false, NULL},
+    {"no registry", NULL, "greet", true, NULL},
+    {"no registry", "Child", NULL, true, NULL},
+    {"no registry", "p.app.Main.Base", "greet", true, NULL},
+    {"no registry", "Base", "greet", true, NULL},
+    {"no registry", "Child", "greet", true, NULL},
+    {"no registry", "Child", "tag", true, NULL},
+    {"no registry", "Child", "label", true, NULL},
+    {"no registry", "Child", "wave", true, NULL},
+    {"no registry", "Child", "orphan", true, NULL},
+    {"no registry", "Child", "absent", true, NULL},
+    {"no registry", "Middle", "greet", true, NULL},
+    {"no registry", "CycA", "missing", true, NULL},
+    {"no registry", "CycA", "cyc", true, NULL},
+    {"no registry", "Deep0", "mid", true, NULL},
+    {"no registry", "Deep0", "bottom", true, NULL},
+    {"no registry", "Wide", "w0", true, NULL},
+    {"no registry", "Wide", "w31", true, NULL},
+    {"no registry", "Wide", "w33", true, NULL},
+    {"no registry", "Vendor.Http.Request", "validated", true, NULL},
+    {"no registry", "Unknown.Request", "validated", true, NULL},
+    {"no registry", "Request", "validated", true, NULL},
+    {"no registry", "Absent", "greet", true, NULL},
+    {"no registry", "", "greet", true, NULL},
+    {"closed arena", NULL, NULL, false, NULL},
+    {"closed arena", "", NULL, false, NULL},
+    {"closed arena", ".", NULL, false, NULL},
+    {"closed arena", "Unknown.", NULL, false, NULL},
+    {"closed arena", "Request", NULL, false, "p.app.Near.Request"},
+    {"closed arena", "Unknown.Request", NULL, false, "p.app.Near.Request"},
+    {"closed arena", "Lib.Models.Request", NULL, false, "p.app.Near.Request"},
+    {"closed arena", "p.lib.Two.Request", NULL, false, "p.lib.Two.Request"},
+    {"closed arena", "Two.Request", NULL, false, "p.app.Near.Request"},
+    {"closed arena", "Vendor.Http.Request", NULL, false, NULL},
+    {"closed arena", "Vendor.Http.Request.Seeded", NULL, false, "Vendor.Http.Request.Seeded"},
+    {"closed arena", "Vendor.Http.Request.Child", NULL, false, NULL},
+    {"closed arena", "Vendor.Http.RequestOther", NULL, false, "p.lib.RequestOther"},
+    {"closed arena", "Vendor.Http", NULL, false, NULL},
+    {"closed arena", "Labeled", NULL, false, "p.app.Labeled"},
+    {"closed arena", "app.Labeled", NULL, false, "p.app.Labeled"},
+    {"closed arena", "Main.Base", NULL, false, "p.app.Main.Base"},
+    {"closed arena", "Base", NULL, false, "p.app.Main.Base"},
+    {"closed arena", "p.app.Main.Base", NULL, false, "p.app.Main.Base"},
+    {"closed arena", "Child", NULL, false, "p.app.Main.Child"},
+    {"closed arena", "Deep0", NULL, false, "p.app.Main.Deep0"},
+    {"closed arena", "Absent", NULL, false, NULL},
+    {"closed arena", "x.y.Absent", NULL, false, NULL},
+    {"closed arena", NULL, "greet", true, NULL},
+    {"closed arena", "Child", NULL, true, NULL},
+    {"closed arena", "p.app.Main.Base", "greet", true, "p.app.Main.Base.greet"},
+    {"closed arena", "Base", "greet", true, "p.app.Main.Base.greet"},
+    {"closed arena", "Child", "greet", true, "p.app.Main.Base.greet"},
+    {"closed arena", "Child", "tag", true, "p.app.Labeled.tag"},
+    {"closed arena", "Child", "label", true, "p.app.Main.Child.label"},
+    {"closed arena", "Child", "wave", true, "lib.Provenance.wave"},
+    {"closed arena", "Child", "orphan", true, NULL},
+    {"closed arena", "Child", "absent", true, NULL},
+    {"closed arena", "Middle", "greet", true, "p.app.Main.Base.greet"},
+    {"closed arena", "CycA", "missing", true, NULL},
+    {"closed arena", "CycA", "cyc", true, "p.app.Main.CycB.cyc"},
+    {"closed arena", "Deep0", "mid", true, "p.app.Main.Deep10.mid"},
+    {"closed arena", "Deep0", "bottom", true, NULL},
+    {"closed arena", "Wide", "w0", true, "p.app.Main.W0.w0"},
+    {"closed arena", "Wide", "w31", true, "p.app.Main.W31.w31"},
+    {"closed arena", "Wide", "w33", true, NULL},
+    {"closed arena", "Vendor.Http.Request", "validated", true, NULL},
+    {"closed arena", "Unknown.Request", "validated", true, NULL},
+    {"closed arena", "Request", "validated", true, NULL},
+    {"closed arena", "Absent", "greet", true, NULL},
+    {"closed arena", "", "greet", true, NULL},
+    {"closed arena, no module", NULL, NULL, false, NULL},
+    {"closed arena, no module", "", NULL, false, NULL},
+    {"closed arena, no module", ".", NULL, false, NULL},
+    {"closed arena, no module", "Unknown.", NULL, false, NULL},
+    {"closed arena, no module", "Request", NULL, false, "p.lib.One.Request"},
+    {"closed arena, no module", "Unknown.Request", NULL, false, "p.lib.One.Request"},
+    {"closed arena, no module", "Lib.Models.Request", NULL, false, "p.lib.One.Request"},
+    {"closed arena, no module", "p.lib.Two.Request", NULL, false, "p.lib.Two.Request"},
+    {"closed arena, no module", "Two.Request", NULL, false, "p.lib.One.Request"},
+    {"closed arena, no module", "Vendor.Http.Request", NULL, false, "p.lib.One.Request"},
+    {"closed arena, no module", "Vendor.Http.Request.Seeded", NULL, false,
+     "Vendor.Http.Request.Seeded"},
+    {"closed arena, no module", "Vendor.Http.Request.Child", NULL, false, "p.app.Main.Child"},
+    {"closed arena, no module", "Vendor.Http.RequestOther", NULL, false, "p.lib.RequestOther"},
+    {"closed arena, no module", "Vendor.Http", NULL, false, NULL},
+    {"closed arena, no module", "Labeled", NULL, false, "p.app.Labeled"},
+    {"closed arena, no module", "app.Labeled", NULL, false, "p.app.Labeled"},
+    {"closed arena, no module", "Main.Base", NULL, false, "p.app.Main.Base"},
+    {"closed arena, no module", "Base", NULL, false, "p.app.Main.Base"},
+    {"closed arena, no module", "p.app.Main.Base", NULL, false, "p.app.Main.Base"},
+    {"closed arena, no module", "Child", NULL, false, "p.app.Main.Child"},
+    {"closed arena, no module", "Deep0", NULL, false, "p.app.Main.Deep0"},
+    {"closed arena, no module", "Absent", NULL, false, NULL},
+    {"closed arena, no module", "x.y.Absent", NULL, false, NULL},
+    {"closed arena, no module", NULL, "greet", true, NULL},
+    {"closed arena, no module", "Child", NULL, true, NULL},
+    {"closed arena, no module", "p.app.Main.Base", "greet", true, "p.app.Main.Base.greet"},
+    {"closed arena, no module", "Base", "greet", true, "p.app.Main.Base.greet"},
+    {"closed arena, no module", "Child", "greet", true, "p.app.Main.Base.greet"},
+    {"closed arena, no module", "Child", "tag", true, "p.app.Labeled.tag"},
+    {"closed arena, no module", "Child", "label", true, "p.app.Main.Child.label"},
+    {"closed arena, no module", "Child", "wave", true, "lib.Provenance.wave"},
+    {"closed arena, no module", "Child", "orphan", true, NULL},
+    {"closed arena, no module", "Child", "absent", true, NULL},
+    {"closed arena, no module", "Middle", "greet", true, "p.app.Main.Base.greet"},
+    {"closed arena, no module", "CycA", "missing", true, NULL},
+    {"closed arena, no module", "CycA", "cyc", true, "p.app.Main.CycB.cyc"},
+    {"closed arena, no module", "Deep0", "mid", true, "p.app.Main.Deep10.mid"},
+    {"closed arena, no module", "Deep0", "bottom", true, NULL},
+    {"closed arena, no module", "Wide", "w0", true, "p.app.Main.W0.w0"},
+    {"closed arena, no module", "Wide", "w31", true, "p.app.Main.W31.w31"},
+    {"closed arena, no module", "Wide", "w33", true, NULL},
+    {"closed arena, no module", "Vendor.Http.Request", "validated", true, NULL},
+    {"closed arena, no module", "Unknown.Request", "validated", true, NULL},
+    {"closed arena, no module", "Request", "validated", true, NULL},
+    {"closed arena, no module", "Absent", "greet", true, NULL},
+    {"closed arena, no module", "", "greet", true, NULL},
+};
+
+/* Vendor scenes treat these as external: the `use` target and names under it. */
+static const char *const PHPLOOKUP_EXTERNAL[] = {
+    "Vendor.Http.Request", "Vendor.Http.Request.Seeded", "Vendor.Http.Request.Child"};
+
+static int phplookup_compare_scene(const PHPLookupScene *scene) {
+    CBMArena arena;
+    cbm_arena_init(&arena);
+    CBMArena closed;
+    memset(&closed, 0, sizeof(closed));
+
+    CBMTypeRegistry base;
+    cbm_registry_init(&base, &arena);
+    CBMTypeRegistry reg;
+    cbm_registry_init(&reg, &arena);
+    CBMTypeRegistry *outer = scene->fallback ? &base : &reg;
+
+    static const char *middle_parents[] = {"Base", NULL};
+    static const char *child_parents[] = {"Greets", "Named", "Middle", NULL};
+    static const char *named_parents[] = {"Labeled", NULL};
+    static const char *greets_names[] = {"wave", "orphan", "gone", NULL};
+    static const char *greets_qns[] = {"lib.Provenance.wave", "lib.Missing.orphan", NULL, NULL};
+    static const char *cyc_a[] = {"CycB", NULL};
+    static const char *cyc_b[] = {"p.app.Main.CycA", "CycA", NULL};
+
+    phplookup_type(&reg, "p.app.Main.Base", "Base", NULL, NULL, NULL);
+    phplookup_type(&reg, "p.app.Main.Middle", "Middle", middle_parents, NULL, NULL);
+    phplookup_type(&reg, "p.app.Main.Child", "Child", child_parents, NULL, NULL);
+    phplookup_type(&reg, "p.app.Main.Named", "Named", named_parents, NULL, NULL);
+    phplookup_type(outer, "p.app.Labeled", "Labeled", NULL, NULL, NULL);
+    phplookup_type(&reg, "p.app.Main.Greets", "Greets", NULL, greets_names, greets_qns);
+    phplookup_type(&reg, "p.lib.One.Request", "Request", NULL, NULL, NULL);
+    phplookup_type(&reg, "p.lib.Two.Request", "Request", NULL, NULL, NULL);
+    phplookup_type(&reg, "p.app.Near.Request", "Request", NULL, NULL, NULL);
+    phplookup_type(&reg, "p.app.Main.Deep.Request", "Request", NULL, NULL, NULL);
+    phplookup_type(&reg, "p.Lib.Models.Request", "Request", NULL, NULL, NULL);
+    phplookup_type(&reg, "p.lib.Request.Request", "Request", NULL, NULL, NULL);
+    phplookup_type(&reg, "Vendor.Http.Request.Seeded", "Seeded", NULL, NULL, NULL);
+    phplookup_type(&reg, "p.lib.RequestOther", "RequestOther", NULL, NULL, NULL);
+    phplookup_type(&reg, "p.app.Main.CycA", "CycA", cyc_a, NULL, NULL);
+    phplookup_type(&reg, "p.app.Main.CycB", "CycB", cyc_b, NULL, NULL);
+
+    phplookup_method(outer, "p.app.Main.Base", "greet");
+    phplookup_method(&reg, "p.app.Main.Child", "label");
+    phplookup_method(outer, "p.app.Labeled", "tag");
+    phplookup_method(&reg, "lib.Provenance", "wave");
+    phplookup_method(&reg, "p.lib.Request.Request", "validated");
+    phplookup_method(&reg, "p.app.Main.CycB", "cyc");
+
+    /* Deep0 -> Deep1 -> ... -> Deep39; "mid" on Deep10, "bottom" on Deep39. */
+    for (int i = 0; i < PHPLOOKUP_DEPTH; i++) {
+        const char **parents = NULL;
+        if (i + 1 < PHPLOOKUP_DEPTH) {
+            parents = (const char **)cbm_arena_alloc(&arena, 2 * sizeof(char *));
+            parents[0] = cbm_arena_sprintf(&arena, "Deep%d", i + 1);
+            parents[1] = NULL;
+        }
+        const char *qn = cbm_arena_sprintf(&arena, "p.app.Main.Deep%d", i);
+        phplookup_type(&reg, qn, cbm_arena_sprintf(&arena, "Deep%d", i), parents, NULL, NULL);
+        if (i == 10)
+            phplookup_method(&reg, qn, "mid");
+        if (i == PHPLOOKUP_DEPTH - 1)
+            phplookup_method(&reg, qn, "bottom");
+    }
+    /* Wide has more parents than the 32-slot frontier holds. */
+    const char **wide = (const char **)cbm_arena_alloc(&arena, 41 * sizeof(char *));
+    for (int i = 0; i < 40; i++) {
+        wide[i] = cbm_arena_sprintf(&arena, "W%d", i);
+        const char *qn = cbm_arena_sprintf(&arena, "p.app.Main.W%d", i);
+        phplookup_type(&reg, qn, wide[i], NULL, NULL, NULL);
+        phplookup_method(&reg, qn, cbm_arena_sprintf(&arena, "w%d", i));
+    }
+    wide[40] = NULL;
+    phplookup_type(&reg, "p.app.Main.Wide", "Wide", wide, NULL, NULL);
+
+    if (scene->fallback)
+        reg.fallback = &base;
+    if (scene->finalize) {
+        if (scene->fallback)
+            cbm_registry_finalize(&base);
+        cbm_registry_finalize(&reg);
+    }
+
+    PHPLSPContext ctx;
+    php_lsp_init(&ctx, &arena, "", 0, scene->no_registry ? NULL : &reg, scene->module_qn, NULL);
+    static const char *vendor[] = {"Vendor.Http.Request", "Other.Lib"};
+    if (scene->external) {
+        ctx.external_use_qns = vendor;
+        ctx.external_use_count = 2;
+    }
+    if (scene->closed_arena)
+        ctx.arena = &closed;
+
+    int mismatches = 0;
+    for (size_t i = 0; i < sizeof(PHPLOOKUP_CASES) / sizeof(PHPLOOKUP_CASES[0]); i++) {
+        const PHPLookupCase *c = &PHPLOOKUP_CASES[i];
+        if (strcmp(c->scene, scene->name) != 0)
+            continue;
+        if (c->is_method) {
+            const CBMRegisteredFunc *f = php_lookup_method(&ctx, c->query, c->method);
+            const char *actual = f ? f->qualified_name : NULL;
+            if (!phplookup_same(c->expected, actual))
+                mismatches += phplookup_report(scene->name, "method", c->query, c->method,
+                                               c->expected, actual);
+            continue;
+        }
+        const CBMRegisteredType *t = cbm_php_lookup_type(&ctx, c->query);
+        const char *actual = t ? t->qualified_name : NULL;
+        if (!phplookup_same(c->expected, actual))
+            mismatches +=
+                phplookup_report(scene->name, "type", c->query, NULL, c->expected, actual);
+        bool external = false;
+        for (size_t j = 0; scene->external && c->query &&
+                           j < sizeof(PHPLOOKUP_EXTERNAL) / sizeof(PHPLOOKUP_EXTERNAL[0]);
+             j++)
+            external |= strcmp(c->query, PHPLOOKUP_EXTERNAL[j]) == 0;
+        if (cbm_php_external_qn(&ctx, c->query) != external)
+            mismatches +=
+                phplookup_report(scene->name, "external", c->query, NULL,
+                                 external ? "true" : "false", external ? "false" : "true");
+    }
+    cbm_arena_destroy(&arena);
+    return mismatches;
+}
+
+TEST(phplsp_type_and_method_lookup) {
+    int mismatches = 0;
+    for (size_t i = 0; i < sizeof(PHPLOOKUP_SCENES) / sizeof(PHPLOOKUP_SCENES[0]); i++)
+        mismatches += phplookup_compare_scene(&PHPLOOKUP_SCENES[i]);
+    ASSERT_EQ(0, mismatches);
+    PASS();
+}
 SUITE(php_lsp) {
     RUN_TEST(phplsp_project_function_binding_keeps_its_exact_target);
     RUN_TEST(phplsp_vendor_function_and_const_do_not_veto_project_class_alias);
@@ -6192,4 +6905,7 @@ SUITE(php_lsp) {
     RUN_TEST(phplsp_realistic_carbon_chain_in_method);
     RUN_TEST(phplsp_realistic_eloquent_model);
     RUN_TEST(phplsp_ordinary_same_leaf_calls_join_by_exact_site);
+
+    /* Type and method lookup: php_resolver/ */
+    RUN_TEST(phplsp_type_and_method_lookup);
 }

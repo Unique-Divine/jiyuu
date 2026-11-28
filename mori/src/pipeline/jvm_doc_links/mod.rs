@@ -122,6 +122,7 @@ use super::native_graph_buffer::{Node as GraphNode, cbm_gbuf_find_by_qn};
 use super::native_hash_table::{
     HashTable, cbm_ht_count, cbm_ht_create, cbm_ht_free, cbm_ht_get, cbm_ht_set,
 };
+use super::native_type_registry::{Arena, cbm_arena_alloc};
 use java::{java_resolve, java_type_path};
 use kotlin::{ext_key, kotlin_resolve, kotlin_type_path};
 
@@ -129,7 +130,6 @@ use kotlin::{ext_key, kotlin_resolve, kotlin_type_path};
 // through their respective callbacks. The index owns its native arena.
 enum Graph {}
 enum PipelineContext {}
-enum Arena {}
 
 #[repr(C)]
 struct DocLink {
@@ -254,7 +254,6 @@ unsafe fn sort_records<T>(records: *mut T, count: usize, compare: Compare) {
 unsafe extern "C" {
     fn atoi(a0: *const c_char) -> i32;
     fn cbm_alloc(a0: i32, a1: usize) -> *mut c_void;
-    fn cbm_arena_alloc(a0: *mut Arena, a1: usize) -> *mut c_void;
     fn cbm_arena_strdup(a0: *mut Arena, a1: *const c_char) -> *mut c_char;
     fn cbm_calloc(a0: i32, a1: usize) -> *mut c_void;
     fn cbm_doclink_java_norm_type(
