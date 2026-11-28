@@ -740,14 +740,14 @@ static inline int cbm_pipeline_relpath_is_excluded(const char *rel_path, char *c
     return 0;
 }
 
-/* Diagrams (pass_diagrams.c). The DEFINES edge from a Diagram's or a
+/* Diagrams (pipeline/diagrams.rs). The DEFINES edge from a Diagram's or a
  * DiagramElement's container (the Section a diagram block sits in, the
  * Diagram of an element) to the definition's node; nothing for other
  * definitions. */
-void cbm_pipeline_diagram_parent_edge(cbm_pipeline_ctx_t *ctx, const CBMDefinition *def,
-                                      int64_t node_id);
+void mori_pipeline_diagram_parent_edge(cbm_gbuf_t *gbuf, const char *label,
+                                       const char *parent_class, int64_t node_id);
 /* The DIAGRAM_ARROW edges of one file's diagrams. */
-void cbm_pipeline_diagram_arrows(cbm_pipeline_ctx_t *ctx, const CBMFileResult *result);
+void mori_pipeline_diagram_arrows(cbm_gbuf_t *gbuf, const CBMDiagramArrow *arrows, int count);
 
 /* Get the current pipeline's package map (NULL if none). */
 CBMHashTable *cbm_pipeline_get_pkgmap(void);
@@ -1148,17 +1148,6 @@ int cbm_normalize_config_key(const char *key, char *norm_out, size_t norm_sz);
 /* Check if a file path has a config file extension (.toml, .yaml, .env, etc.) */
 bool cbm_has_config_extension(const char *path);
 
-/* ── Enrichment helpers (pass_enrichment.c) ──────────────────────── */
-
-/* Split camelCase string on lowercase→uppercase transitions.
- * Writes substrings to out[]. Returns count. Caller must free each out[i]. */
-int cbm_split_camel_case(const char *s, char **out, int max_out);
-
-/* Tokenize a decorator into lowercase words, filtering stopwords.
- * E.g. "@login_required" → ["login", "required"].
- * Writes words to out[]. Returns count. Caller must free each out[i]. */
-int cbm_tokenize_decorator(const char *dec, char **out, int max_out);
-
 /* ── Compile commands helpers (pass_compile_commands.c) ──────────── */
 
 typedef struct {
@@ -1391,8 +1380,9 @@ int cbm_pipeline_githistory_compute(const char *repo_path, cbm_githistory_result
 /* Apply pre-computed couplings to the graph buffer (main thread only). */
 int cbm_pipeline_githistory_apply(cbm_pipeline_ctx_t *ctx, const cbm_githistory_result_t *result);
 
-/* Pre-dump pass: decorator tags enrichment (operates on gbuf). */
-int cbm_pipeline_pass_decorator_tags(cbm_gbuf_t *gbuf, const char *project);
+/* Pre-dump pass: decorator tags enrichment (operates on gbuf), in
+ * pipeline/decorator_tags. Returns how many nodes it tagged. */
+int mori_pipeline_pass_decorator_tags(cbm_gbuf_t *gbuf, const char *project);
 
 /* Pre-dump pass: config ↔ code linking. */
 int cbm_pipeline_pass_configlink(cbm_pipeline_ctx_t *ctx);

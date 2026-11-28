@@ -516,7 +516,8 @@ jobs:
       MORI_CANDIDATE_SUITES: >-
         edge_types_probe lang_contract cross_repo extraction graph_buffer pipeline yaml language
         config_text_edit doclinks doc_links_pdf watcher daemon_ipc
-        store_graph_digest pipeline_frozen httpd edge_structural importance
+        store_graph_digest pipeline_frozen httpd ts_lsp c_lsp diagrams enrichment
+        edge_structural importance
     steps:
       - name: Unaffected project
         if: needs.changes.outputs.mori != 'true'
@@ -608,6 +609,15 @@ jobs:
         if: needs.changes.outputs.mori == 'true'
         working-directory: mori
         run: scripts/test.sh --suites "doc_mentions_rs doc_mentions_jvm doc_mentions"
+      # The Rust port's C-vs-Rust parity and regression cases for resolver
+      # lookups live in the per-language LSP suites. c_lsp and ts_lsp run with
+      # the candidate suites above.
+      - name: Run LSP resolver suites
+        if: needs.changes.outputs.mori == 'true'
+        working-directory: mori
+        run: >-
+          scripts/test.sh --suites
+          "go_lsp php_lsp perl_lsp py_lsp ruby_lsp rust_lsp"
       # Mori PRs run the same gate against the linked candidate below.
       - name: Smoke-test the candidate standalone executable
         id: standalone-smoke

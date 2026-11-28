@@ -60,7 +60,6 @@ src/pipeline/pass_compile_commands.c	17
 src/pipeline/pass_configlink.c	3
 src/pipeline/pass_cross_repo.c	8
 src/pipeline/pass_definitions.c	11
-src/pipeline/pass_enrichment.c	15
 src/pipeline/pass_ensemble_routing.c	10
 src/pipeline/pass_githistory.c	27
 src/pipeline/pass_infrascan.c	2

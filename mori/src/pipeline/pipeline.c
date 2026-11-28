@@ -2456,7 +2456,7 @@ static void cbm_pipeline_extract_infra_routes(const cbm_pipeline_ctx_t *ctx, cbm
 /* Run decorator_tags, configlink, and route matching passes. */
 typedef void (*predump_pass_fn)(cbm_pipeline_ctx_t *);
 static void predump_deco(cbm_pipeline_ctx_t *ctx) {
-    cbm_pipeline_pass_decorator_tags(ctx->gbuf, ctx->project_name);
+    mori_pipeline_pass_decorator_tags(ctx->gbuf, ctx->project_name);
 }
 static void predump_route(cbm_pipeline_ctx_t *ctx) {
     cbm_pipeline_create_route_nodes(ctx->gbuf);

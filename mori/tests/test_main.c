@@ -1844,6 +1844,7 @@ extern void suite_doc_mentions_ts(void);
 extern void suite_doc_mentions_php(void);
 extern void suite_doc_mentions_c(void);
 extern void suite_diagrams(void);
+extern void suite_enrichment(void);
 extern void suite_openapi(void);
 extern void suite_infrascan(void);
 extern void suite_cli(void);
@@ -2587,6 +2588,7 @@ int main(int argc, char **argv) {
     RUN_SELECTED_SUITE(doc_mentions_php);
     RUN_SELECTED_SUITE(doc_mentions_c);
     RUN_SELECTED_SUITE(diagrams);
+    RUN_SELECTED_SUITE(enrichment);
     RUN_SELECTED_SUITE(openapi);
 
     /* Infrastructure scanning */
