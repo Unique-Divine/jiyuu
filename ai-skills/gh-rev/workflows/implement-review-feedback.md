@@ -110,7 +110,8 @@ Give that reviewer:
 - the original findings and which concerns were accepted or declined;
 - the verification already performed.
 
-Ask for actionable P0-P2 correctness findings with concrete evidence. Require
+Ask for actionable correctness findings with concrete evidence, each rated P0
+to P3 under the Severity section of the `gh-pr-review` skill. Require
 the reviewer to distinguish the observed problem from any suggested
 remediation. The reviewer must not edit files.
 
