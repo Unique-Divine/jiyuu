@@ -3,6 +3,7 @@
 #include "arena.h" // CBMArena, cbm_arena_alloc/strdup/strndup/sprintf
 #include "cbm.h"   // CBMExtractCtx, CBMLanguage, CBM_LANG_*, EFCEntry, EFC_SIZE
 #include "lang_specs.h"
+#include "native_tree_ffi.h"
 #include "tree_sitter/api.h" // TSNode, ts_node_*
 #include "foundation/constants.h"
 #include "foundation/compat.h"   // CBM_TLS
@@ -14,7 +15,6 @@ enum {
     MIN_ROUTE_LEN = 3,
     MIN_SYS_PATH_LEN = 4,
     MAX_ROUTE_SCAN = 20,
-    NOEXT_BUF = 256,
     MIN_HEX_LEN = 3,
     MAX_HEX_NAME_LEN = 64,
     INIT_FILE_LEN = 8,  /* strlen("__init__") */
@@ -53,17 +53,6 @@ void *cbm_memmem(const void *haystack, size_t haystack_len, const void *needle, 
         }
     }
     return NULL;
-}
-
-// --- Node text extraction ---
-
-char *cbm_node_text(CBMArena *a, TSNode node, const char *source) {
-    uint32_t start = ts_node_start_byte(node);
-    uint32_t end = ts_node_end_byte(node);
-    if (end <= start) {
-        return cbm_arena_strdup(a, "");
-    }
-    return cbm_arena_strndup(a, source + start, end - start);
 }
 
 // --- Keyword sets per language ---
@@ -368,128 +357,16 @@ bool cbm_is_exported(const char *name, CBMLanguage lang) {
     }
 }
 
-// --- Test file detection ---
-
-static bool has_suffix(const char *str, const char *suffix) {
-    size_t slen = strlen(str);
-    size_t xlen = strlen(suffix);
-    if (xlen > slen) {
-        return false;
-    }
-    return strcmp(str + slen - xlen, suffix) == 0;
-}
-
-static bool has_prefix(const char *str, const char *prefix) {
-    return strncmp(str, prefix, strlen(prefix)) == 0;
-}
-
-// Extract basename from path
-static const char *path_basename(const char *path) {
-    const char *last = strrchr(path, '/');
-    return last ? last + SKIP_ONE : path;
-}
-
-// Strip extension from basename
-static void strip_ext(const char *base, char *buf, size_t buflen) {
-    const char *dot = strrchr(base, '.');
-    if (dot && dot != base) {
-        size_t len = (size_t)(dot - base);
-        if (len >= buflen) {
-            len = buflen - SKIP_ONE;
-        }
-        memcpy(buf, base, len);
-        buf[len] = '\0';
-    } else {
-        snprintf(buf, buflen, "%s", base);
-    }
-}
-
-bool cbm_is_test_file(const char *rel_path, CBMLanguage lang) {
-    if (!rel_path) {
-        return false;
-    }
-    const char *base = path_basename(rel_path);
-
-    /* Directory-based, language-agnostic: a file under a conventional test
-     * directory is a test file regardless of its own basename (e.g.
-     * tests/helpers/fixtures.c, which no per-language suffix/prefix rule
-     * below would otherwise catch). Mirrors the directory set cbm_is_test_path
-     * (src/pipeline/pass_tests.c) already uses for TESTS-edge detection, so
-     * the extraction-time is_test_file flag agrees with it (#1294). */
-    if (strstr(rel_path, "__tests__/") || strstr(rel_path, "/tests/") ||
-        strstr(rel_path, "/test/") || strstr(rel_path, "/spec/") ||
-        has_prefix(rel_path, "tests/") || has_prefix(rel_path, "test/") ||
-        has_prefix(rel_path, "spec/") || has_prefix(rel_path, "__tests__/")) {
-        return true;
-    }
-
-    switch (lang) {
-    case CBM_LANG_GO:
-        return has_suffix(base, "_test.go");
-    case CBM_LANG_PYTHON:
-        return has_prefix(base, "test_") || has_suffix(base, "_test.py");
-    case CBM_LANG_JAVASCRIPT:
-    case CBM_LANG_TYPESCRIPT:
-    case CBM_LANG_TSX:
-    case CBM_LANG_ARKTS: {
-        char noext[NOEXT_BUF];
-        strip_ext(base, noext, sizeof(noext));
-        return has_suffix(noext, ".test") || has_suffix(noext, ".spec") ||
-               has_suffix(noext, "_test") || has_suffix(noext, "_spec") ||
-               has_prefix(base, "test_");
-    }
-    case CBM_LANG_JAVA:
-    case CBM_LANG_KOTLIN:
-    case CBM_LANG_SCALA:
-        return has_suffix(base, "Test.java") || has_suffix(base, "Tests.java") ||
-               has_suffix(base, "Spec.java") || has_suffix(base, "Test.kt") ||
-               has_suffix(base, "Spec.kt") || has_suffix(base, "Test.scala") ||
-               has_suffix(base, "Spec.scala");
-    case CBM_LANG_RUST:
-        // Rust tests are typically mod tests inside the file, but test files too
-        return has_suffix(base, "_test.rs") || has_prefix(base, "test_");
-    case CBM_LANG_RUBY:
-        return has_suffix(base, "_test.rb") || has_suffix(base, "_spec.rb") ||
-               has_prefix(base, "test_");
-    case CBM_LANG_PHP:
-        return has_suffix(base, "Test.php");
-    case CBM_LANG_CSHARP:
-        return has_suffix(base, "Tests.cs") || has_suffix(base, "Test.cs");
-    case CBM_LANG_CPP:
-    case CBM_LANG_C:
-        return has_suffix(base, "_test.c") || has_suffix(base, "_test.cc") ||
-               has_suffix(base, "_test.cpp") || has_prefix(base, "test_");
-    case CBM_LANG_MATLAB:
-        return has_prefix(base, "test_") || has_prefix(base, "Test");
-    default:
-        return false;
-    }
-}
-
 // --- AST traversal helpers ---
 
-TSNode cbm_find_child_by_kind(TSNode parent, const char *kind) {
-    uint32_t count = ts_node_child_count(parent);
-    for (uint32_t i = 0; i < count; i++) {
-        TSNode child = ts_node_child(parent, i);
-        if (strcmp(ts_node_type(child), kind) == 0) {
-            return child;
-        }
-    }
-    TSNode null_node = {0};
-    return null_node;
-}
+/* Mark the complete Rust output before returning TSNode by value to C. */
+extern void cbm_rust_find_child_by_kind(const TSNode *parent, const char *kind, TSNode *out);
 
-int cbm_find_children_by_kind(TSNode parent, const char *kind, TSNode *out, int max) {
-    int n = 0;
-    uint32_t count = ts_node_child_count(parent);
-    for (uint32_t i = 0; i < count && n < max; i++) {
-        TSNode child = ts_node_child(parent, i);
-        if (strcmp(ts_node_type(child), kind) == 0) {
-            out[n++] = child;
-        }
-    }
-    return n;
+TSNode cbm_find_child_by_kind(TSNode parent, const char *kind) {
+    TSNode child;
+    cbm_rust_find_child_by_kind(&parent, kind, &child);
+    cbm_ffi_ts_node_written(&child);
+    return child;
 }
 
 /* ── Node-type classification: TSSymbol bitset acceleration ───────────────
@@ -601,19 +478,6 @@ bool cbm_kind_in_set(TSNode node, const char **types) {
     return kind_in_set_strcmp(node, (const char *const *)types);
 }
 
-bool cbm_is_namespace_scope_kind(CBMLanguage lang, const char *kind) {
-    if (!kind) {
-        return false;
-    }
-    if (lang == CBM_LANG_CPP || lang == CBM_LANG_CUDA) {
-        return strcmp(kind, "namespace_definition") == 0;
-    }
-    if (lang == CBM_LANG_TYPESCRIPT || lang == CBM_LANG_TSX || lang == CBM_LANG_ARKTS) {
-        return strcmp(kind, "internal_module") == 0;
-    }
-    return false;
-}
-
 /* Free the calling thread's node-type bitset cache (the calloc'd `bits` arrays
  * that cbm_kind_in_set builds lazily). The cache is thread-local, so each worker
  * thread and the main thread must call this at teardown (worker exit / process
@@ -627,21 +491,6 @@ void cbm_kind_in_set_free_cache(void) {
         ks_cache[i].nsyms = 0;
         ks_cache[i].exact = false;
     }
-}
-
-bool cbm_has_ancestor_kind(TSNode node, const char *kind, int max_depth) {
-    TSNode cur = node;
-    for (int i = 0; i < max_depth; i++) {
-        TSNode parent = ts_node_parent(cur);
-        if (ts_node_is_null(parent)) {
-            return false;
-        }
-        if (strcmp(ts_node_type(parent), kind) == 0) {
-            return true;
-        }
-        cur = parent;
-    }
-    return false;
 }
 
 bool cbm_walk_stack_reserve(void **items, int *cap, int need, size_t elem_size,
@@ -721,24 +570,6 @@ int cbm_count_branching(TSNode node, const char **branching_types) {
         return 0;
     }
     return count_branching_iter(node, branching_types);
-}
-
-// Loop node-type names across tree-sitter grammars, for loop-nesting depth.
-bool cbm_is_loop_node_type(const char *kind) {
-    static const char *const loops[] = {
-        "for_statement", "while_statement", "do_statement", "do_while_statement",
-        "for_in_statement", "for_of_statement", "for_each_statement", "foreach_statement",
-        "enhanced_for_statement", "for_range_loop", "c_style_for_statement", "for_expression",
-        "while_expression", "loop_expression", "while_let_expression", "repeat_statement",
-        "repeat_while_statement",
-        // Pkl: `for (x in xs) { ... }` inside an object body.
-        "forGenerator", "until", "while_modifier", "until_modifier", "for", "while", NULL};
-    for (const char *const *l = loops; *l; l++) {
-        if (strcmp(kind, *l) == 0) {
-            return true;
-        }
-    }
-    return false;
 }
 
 // Is `kind` a chained member/subscript access node? Language-agnostic generic

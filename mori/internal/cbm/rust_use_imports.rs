@@ -30,10 +30,7 @@ fn append_path(path: &mut Vec<u8>, text: &[u8]) {
 
 unsafe fn text(node: Option<RawNode>, source: &[u8]) -> &[u8] {
     // SAFETY: Every node and byte span belongs to the caller's live tree.
-    unsafe {
-        node.and_then(|node| source.get(node.range()))
-            .unwrap_or_default()
-    }
+    unsafe { node.and_then(|node| node.text(source)).unwrap_or_default() }
 }
 
 unsafe fn walk(

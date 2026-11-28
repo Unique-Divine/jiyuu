@@ -61,12 +61,8 @@ unsafe extern "C" fn mori_go_extract_imports(
     // SAFETY: The input node and source are valid for the callback.
     let root = unsafe { BorrowedNode::from_root(&root) };
     let emit = |spec: BorrowedNode<'_>| {
-        let path = spec
-            .field(c"path")
-            .and_then(|node| source.get(node.range()));
-        let alias = spec
-            .field(c"name")
-            .and_then(|node| source.get(node.range()));
+        let path = spec.field(c"path").and_then(|node| node.text(source));
+        let alias = spec.field(c"name").and_then(|node| node.text(source));
         let import = path.and_then(|path| GoImport::from_spelling(path, alias));
         if let Some(GoImport {
             module_path,
