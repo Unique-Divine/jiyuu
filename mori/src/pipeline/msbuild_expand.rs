@@ -388,7 +388,10 @@ mod tests {
             (b"$(Long4095)$(Empty)", Some(repeat(b'l', 4095))),
             (b"$(Long4095)x", None),
             (b"$(Long4095)x$(Later)", None),
-            (b"$(Utf)\xc3\xa9", Some("\u{e9}t\u{e9}\u{e9}".as_bytes().to_vec())),
+            (
+                b"$(Utf)\xc3\xa9",
+                Some("\u{e9}t\u{e9}\u{e9}".as_bytes().to_vec()),
+            ),
             (b"$(Pr\xc3\xa9)", None),
             (&long_name, None),
         ];
