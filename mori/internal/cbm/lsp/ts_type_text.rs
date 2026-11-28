@@ -87,7 +87,7 @@ fn comma_parts<'a>(
     open: &'a [u8],
     close: &'a [u8],
 ) -> impl Iterator<Item = &'a [u8]> + 'a {
-    let bytes = text.iter().copied().chain([b',']).enumerate();
+    let bytes = text.iter().copied().chain(*b",").enumerate();
     let mut start = 0;
     top_level(bytes, open, close)
         .filter(|&(_, b)| b == b',')
