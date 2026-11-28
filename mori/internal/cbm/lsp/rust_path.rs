@@ -209,7 +209,13 @@ impl Resolver<'_> {
         if let Some(split) = separator(raw) {
             let head = &raw[..split];
             let tail = &raw[split + 2..];
-            if let Some(alias) = self.alias(self.arena.copy(head)) {
+            let name = self.arena.copy(head);
+            if name.is_null() {
+                // Without a copy of the head, neither a use alias nor the
+                // prelude can match it: keep the dotted spelling.
+                return self.arena.normalize(path);
+            }
+            if let Some(alias) = self.alias(name) {
                 let prefix = self.arena.normalize(alias);
                 // SAFETY: Normalization returns either a fresh terminated
                 // arena string or the original terminated alias on failure.
