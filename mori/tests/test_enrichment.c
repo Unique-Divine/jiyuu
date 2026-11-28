@@ -11,7 +11,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* ── Rust parity ─────────────────────────────────────────────────── */
+/* ── Decorator tags ─────────────────────────────────────────────────── */
 
 typedef struct {
     const char *label;
@@ -32,22 +32,12 @@ static cbm_gbuf_t *en_graph(const en_node_t *nodes, int count) {
     return gb;
 }
 
-/* Runs the C and the Rust pass on two copies of one fixture: the same
- * return value and the same graph. */
-static int en_compare(const en_node_t *nodes, int count, const char *what, int *tagged) {
-    cbm_gbuf_t *c_gb = en_graph(nodes, count);
-    cbm_gbuf_t *rust_gb = en_graph(nodes, count);
-    int c_tagged = cbm_pipeline_pass_decorator_tags(c_gb, "p");
-    int rust_tagged = mori_pipeline_pass_decorator_tags(rust_gb, "p");
-    int rc = tg_dumps_differ(c_gb, rust_gb, what);
-    if (c_tagged != rust_tagged) {
-        printf("  %s: C tagged %d, Rust %d\n", what, c_tagged, rust_tagged);
-        rc = 1;
-    }
-    *tagged = rust_tagged;
-    cbm_gbuf_free(c_gb);
-    cbm_gbuf_free(rust_gb);
-    return rc;
+/* Runs the pass on the first `count` fixture nodes and returns the tagged count. */
+static int en_run(const en_node_t *nodes, int count) {
+    cbm_gbuf_t *gb = en_graph(nodes, count);
+    int tagged = mori_pipeline_pass_decorator_tags(gb, "p");
+    cbm_gbuf_free(gb);
+    return tagged;
 }
 
 /* The properties of `name` after the Rust pass on the whole fixture. */
@@ -76,7 +66,7 @@ static void en_long_decorator(char *out, size_t cap, const char *fill, size_t le
     snprintf(out + pos, cap - pos, "\"]}");
 }
 
-TEST(decorator_tags_rust_matches_c) {
+TEST(decorator_tags_fixture) {
     /* Past the 255-byte cut: one ASCII word, and one that ends inside a
      * two-byte UTF-8 sequence (a tag yyjson cannot write). */
     static char long_ascii_a[1024];
@@ -148,9 +138,6 @@ TEST(decorator_tags_rust_matches_c) {
         {"Function", "utf8_b", "{\"decorators\":[\"@Caf\xc3\xa9\"]}"},
     };
     int count = (int)(sizeof(nodes) / sizeof(nodes[0]));
-    int tagged = 0;
-    ASSERT_EQ(en_compare(nodes, count, "full fixture", &tagged), 0);
-    ASSERT_EQ(tagged, 23);
     cbm_gbuf_t *full = en_graph(nodes, count);
     ASSERT_EQ(mori_pipeline_pass_decorator_tags(full, "p"), 23);
     int wrong = 0;
@@ -198,6 +185,13 @@ TEST(decorator_tags_rust_matches_c) {
         "\"bb\",\"cc\",\"dd\",\"ee\",\"ff\",\"gg\",\"hh\",\"ii\",\"jj\",\"kk\",\"ll\",\"mm\","
         "\"nn\","
         "\"oo\",\"pp\"]}");
+    wrong += en_props_are(
+        full, "many_words_a",
+        "{\"decorators\":[\"@aa.bb.cc.dd.ee.ff.gg.hh.ii.jj.kk.ll.mm.nn.oo.pp.qq.rr.ss.tt.uu.vv"
+        ".ww.xx.yy.zz.ab.ac.ad.ae.af.ag.ah.ai.aj\"],\"decorator_tags\":[\"aa\",\"ab\",\"ac\","
+        "\"ad\",\"ae\",\"af\",\"ag\",\"bb\",\"cc\",\"dd\",\"ee\",\"ff\",\"gg\",\"hh\",\"ii\","
+        "\"jj\",\"kk\",\"ll\",\"mm\",\"nn\",\"oo\",\"pp\",\"qq\",\"rr\",\"ss\",\"tt\",\"uu\","
+        "\"vv\",\"ww\",\"xx\",\"yy\",\"zz\"]}");
     /* the shared word of the long ASCII decorators: its first 255 bytes */
     char want_long[1024];
     char word[300] = "shared";
@@ -210,53 +204,48 @@ TEST(decorator_tags_rust_matches_c) {
     wrong += en_props_are(full, "long_ascii_a", want_long);
     ASSERT_EQ(wrong, 0);
     cbm_gbuf_free(full);
-    /* each prefix: the tag vocabulary changes as nodes join */
-    for (int k = 0; k < count; k++) {
-        char what[64];
-        snprintf(what, sizeof(what), "first %d nodes", k);
-        ASSERT_EQ(en_compare(nodes, k, what, &tagged), 0);
-    }
+    /* The tag vocabulary changes as nodes join. */
+    ASSERT_EQ(en_run(nodes, 0), 0);
+    ASSERT_EQ(en_run(nodes, 1), 0);
+    ASSERT_EQ(en_run(nodes, 2), 2);
+    ASSERT_EQ(en_run(nodes, 5), 4);
     /* decorated, but no word shared: nothing tagged */
     const en_node_t lonely[] = {
         {"Function", "a", "{\"decorators\":[\"@alpha\"]}"},
         {"Function", "b", "{\"decorators\":[\"@beta\"]}"},
     };
-    ASSERT_EQ(en_compare(lonely, 2, "no shared words", &tagged), 0);
-    ASSERT_EQ(tagged, 0);
+    ASSERT_EQ(en_run(lonely, 2), 0);
     /* NULL graph or project */
     cbm_gbuf_t *gb = en_graph(nodes, 4);
-    ASSERT_EQ(cbm_pipeline_pass_decorator_tags(NULL, "p"), 0);
     ASSERT_EQ(mori_pipeline_pass_decorator_tags(NULL, "p"), 0);
-    ASSERT_EQ(cbm_pipeline_pass_decorator_tags(gb, NULL), 0);
     ASSERT_EQ(mori_pipeline_pass_decorator_tags(gb, NULL), 0);
     cbm_gbuf_free(gb);
     PASS();
 }
 
 /* Running the pass twice changes nothing the second time. */
-TEST(decorator_tags_rerun_rust_matches_c) {
+TEST(decorator_tags_rerun) {
     const en_node_t nodes[] = {
         {"Function", "a", "{\"decorators\":[\"@login_required\"]}"},
         {"Function", "b", "{\"decorators\":[\"@login_required\",\"@cache\"]}"},
         {"Method", "c", "{\"decorators\":[\"@cache\"]}"},
     };
-    cbm_gbuf_t *c_gb = en_graph(nodes, 3);
-    cbm_gbuf_t *rust_gb = en_graph(nodes, 3);
-    ASSERT_EQ(cbm_pipeline_pass_decorator_tags(c_gb, "p"), 3);
-    ASSERT_EQ(mori_pipeline_pass_decorator_tags(rust_gb, "p"), 3);
-    ASSERT_EQ(cbm_pipeline_pass_decorator_tags(c_gb, "p"), 3);
-    ASSERT_EQ(mori_pipeline_pass_decorator_tags(rust_gb, "p"), 3);
-    ASSERT_EQ(tg_dumps_differ(c_gb, rust_gb, "second run"), 0);
-    const cbm_gbuf_node_t *b = cbm_gbuf_find_by_qn(rust_gb, "p.mod.b");
+    cbm_gbuf_t *once = en_graph(nodes, 3);
+    cbm_gbuf_t *twice = en_graph(nodes, 3);
+    ASSERT_EQ(mori_pipeline_pass_decorator_tags(once, "p"), 3);
+    ASSERT_EQ(mori_pipeline_pass_decorator_tags(twice, "p"), 3);
+    ASSERT_EQ(mori_pipeline_pass_decorator_tags(twice, "p"), 3);
+    ASSERT_EQ(tg_dumps_differ(once, twice, "second run"), 0);
+    const cbm_gbuf_node_t *b = cbm_gbuf_find_by_qn(twice, "p.mod.b");
     ASSERT_NOT_NULL(b);
     ASSERT_STR_EQ(b->properties_json, "{\"decorators\":[\"@login_required\",\"@cache\"],"
                                       "\"decorator_tags\":[\"cache\",\"login\",\"required\"]}");
-    cbm_gbuf_free(c_gb);
-    cbm_gbuf_free(rust_gb);
+    cbm_gbuf_free(once);
+    cbm_gbuf_free(twice);
     PASS();
 }
 
 SUITE(enrichment) {
-    RUN_TEST(decorator_tags_rust_matches_c);
-    RUN_TEST(decorator_tags_rerun_rust_matches_c);
+    RUN_TEST(decorator_tags_fixture);
+    RUN_TEST(decorator_tags_rerun);
 }

@@ -1148,17 +1148,6 @@ int cbm_normalize_config_key(const char *key, char *norm_out, size_t norm_sz);
 /* Check if a file path has a config file extension (.toml, .yaml, .env, etc.) */
 bool cbm_has_config_extension(const char *path);
 
-/* ── Enrichment helpers (pass_enrichment.c) ──────────────────────── */
-
-/* Split camelCase string on lowercase→uppercase transitions.
- * Writes substrings to out[]. Returns count. Caller must free each out[i]. */
-int cbm_split_camel_case(const char *s, char **out, int max_out);
-
-/* Tokenize a decorator into lowercase words, filtering stopwords.
- * E.g. "@login_required" → ["login", "required"].
- * Writes words to out[]. Returns count. Caller must free each out[i]. */
-int cbm_tokenize_decorator(const char *dec, char **out, int max_out);
-
 /* ── Compile commands helpers (pass_compile_commands.c) ──────────── */
 
 typedef struct {
@@ -1387,9 +1376,6 @@ int cbm_pipeline_githistory_apply(cbm_pipeline_ctx_t *ctx, const cbm_githistory_
 /* Pre-dump pass: decorator tags enrichment (operates on gbuf), in
  * pipeline/decorator_tags. Returns how many nodes it tagged. */
 int mori_pipeline_pass_decorator_tags(cbm_gbuf_t *gbuf, const char *project);
-/* Its C reference (pass_enrichment.c), kept only for the Rust parity test in
- * tests/test_enrichment.c. */
-int cbm_pipeline_pass_decorator_tags(cbm_gbuf_t *gbuf, const char *project);
 
 /* Pre-dump pass: config ↔ code linking. */
 int cbm_pipeline_pass_configlink(cbm_pipeline_ctx_t *ctx);

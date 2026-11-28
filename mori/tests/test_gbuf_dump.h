@@ -1,6 +1,6 @@
 /*
  * test_gbuf_dump.h -- a graph buffer as sorted text lines, for tests that
- * compare two buffers (a C pass and its Rust port run on the same fixture).
+ * compare two buffers.
  */
 #ifndef TEST_GBUF_DUMP_H
 #define TEST_GBUF_DUMP_H
@@ -81,16 +81,16 @@ static inline char *tg_dump(const cbm_gbuf_t *gb) {
 }
 
 /* Prints both dumps when they differ. 0 when equal. */
-static inline int tg_dumps_differ(const cbm_gbuf_t *c_gb, const cbm_gbuf_t *rust_gb,
+static inline int tg_dumps_differ(const cbm_gbuf_t *a_gb, const cbm_gbuf_t *b_gb,
                                   const char *what) {
-    char *c = tg_dump(c_gb);
-    char *rust = tg_dump(rust_gb);
-    int rc = strcmp(c, rust) != 0;
+    char *a = tg_dump(a_gb);
+    char *b = tg_dump(b_gb);
+    int rc = strcmp(a, b) != 0;
     if (rc) {
-        printf("  %s: C and Rust graphs differ\n--- C\n%s--- Rust\n%s", what, c, rust);
+        printf("  %s: graphs differ\n--- first\n%s--- second\n%s", what, a, b);
     }
-    free(c);
-    free(rust);
+    free(a);
+    free(b);
     return rc;
 }
 
