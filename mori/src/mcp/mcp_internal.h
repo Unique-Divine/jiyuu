@@ -30,6 +30,13 @@ void cbm_mcp_project_catalog_close(cbm_mcp_project_catalog_t *catalog);
 
 char *cbm_rust_mcp_list_projects(cbm_mcp_server_t *server, const char *args_json);
 
+/* The native dispatcher owns the request scope and ends the read batch. */
+char *cbm_rust_mcp_get_file_outline(cbm_mcp_server_t *server, const char *args_json);
+char *cbm_mcp_resolve_project_arg(const char *args_json);
+cbm_store_t *cbm_mcp_resolve_read_store(cbm_mcp_server_t *server, const char *project, char **error);
+bool cbm_mcp_read_request_cancelled(void *context);
+bool cbm_mcp_normalize_read_path(const char *path, char *normalized, size_t capacity);
+
 typedef struct {
     const char *fts_query;
     const char *project;
@@ -152,6 +159,8 @@ typedef void (*cbm_mcp_snippet_candidate_sink_fn)(void *context,
                                                   const cbm_mcp_snippet_candidate_t *candidate);
 void cbm_mcp_snippet_visit_candidates(cbm_store_t *store, const cbm_node_t *node, bool by_section,
                                       cbm_mcp_snippet_candidate_sink_fn emit, void *context);
+void cbm_mcp_visit_path_candidates(cbm_store_t *store, const char *project, const char *path,
+                                   cbm_mcp_snippet_candidate_sink_fn emit, void *context);
 void cbm_mcp_snippet_free_tree(char *tree);
 char *mori_snippet_response(const cbm_mcp_snippet_input_t *input);
 char *mori_snippet_suggestions(const char *input, const cbm_node_t *nodes, int count);
