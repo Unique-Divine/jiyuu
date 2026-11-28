@@ -55,7 +55,11 @@ static const CBMRegisteredFunc *rust_lookup_method_in_trait(RustLSPContext *ctx,
                                                             const char *method_name,
                                                             bool allow_abstract);
 static char *rust_node_text(RustLSPContext *ctx, TSNode node);
-static const char *convert_path_to_qn(CBMArena *arena, const char *path);
+extern const char *cbm_rust_path_normalize(CBMArena *arena, const char *path);
+extern const char *cbm_rust_path_leaf(const char *path);
+extern const char *cbm_rust_path_prelude(const char *name);
+extern void cbm_rust_path_strip_turbofish(char *path);
+extern void cbm_rust_path_strip_impl_args(char *path);
 static bool rust_type_derefs_to_first_arg(const char *type_qn);
 static const char *rust_lookup_type_param_bound(RustLSPContext *ctx, const char *name);
 static void rust_collect_bounds_from_text(RustLSPContext *ctx, const char *text);
@@ -233,96 +237,6 @@ static bool is_prelude_trait_method(const char *method_name) {
  * 3. Path & use resolution
  * ════════════════════════════════════════════════════════════════════ */
 
-/* Return the last `::`-separated segment of a Rust path (`std::io::Read` →
- * `Read`). Pointer aliases into `path` — caller does not own. */
-static const char *path_last_segment(const char *path) {
-    if (!path || !path[0]) {
-        return path;
-    }
-    const char *p = path;
-    const char *last = path;
-    while (*p) {
-        if (p[0] == ':' && p[1] == ':') {
-            last = p + 2;
-            p += 2;
-            continue;
-        }
-        p++;
-    }
-    return last;
-}
-
-/* Convert a Rust path with `::` separators into our internal QN form using
- * `.` separators. Always allocates a fresh string. */
-static const char *convert_path_to_qn(CBMArena *arena, const char *path) {
-    if (!path || !path[0]) {
-        return path;
-    }
-    size_t len = strlen(path);
-    char *out = (char *)cbm_arena_alloc(arena, len + 1);
-    if (!out) {
-        return path;
-    }
-    size_t j = 0;
-    for (size_t i = 0; i < len; i++) {
-        if (path[i] == ':' && i + 1 < len && path[i + 1] == ':') {
-            out[j++] = '.';
-            i++;
-        } else {
-            out[j++] = path[i];
-        }
-    }
-    out[j] = '\0';
-    return out;
-}
-
-/* In-place strip turbofish segments (`::<...>`) from a Rust path. The
- * grammar exposes paths like `Vec::<i32>::new` or `parse::<u32>(s)` —
- * the LSP cares about the underlying name, not the explicit type
- * arguments, so we collapse `head::<args>::tail` to `head::tail`.
- *
- * Modifies `path` in place. Safe on NULL. */
-static void rust_strip_turbofish(char *path) {
-    if (!path)
-        return;
-    char *read = path;
-    char *write = path;
-    while (*read) {
-        if (read[0] == ':' && read[1] == ':' && read[2] == '<') {
-            /* Skip ::< … > balanced. */
-            int depth = 1;
-            const char *p = read + 3;
-            while (*p && depth > 0) {
-                if (*p == '<')
-                    depth++;
-                else if (*p == '>')
-                    depth--;
-                p++;
-            }
-            read = (char *)p;
-            continue;
-        }
-        *write++ = *read++;
-    }
-    *write = '\0';
-}
-
-/* In place: `Gen<T>` -> `Gen`, `foo::Bar<'a, T>` -> `foo::Bar` (#763). An
- * impl's self type keeps its generic arguments in the source text, but every
- * def-side QN (a method's receiver, the extractor's call scope) strips them.
- * Unstripped, the LSP's caller QN, `self`/`Self` dispatch and the return-type
- * harvest never matched a generic impl's methods. Text starting with `<` (a
- * qualified path) is left alone. Safe on NULL. */
-static void rust_strip_impl_type_args(char *type_text) {
-    if (!type_text) {
-        return;
-    }
-    char *lt = strchr(type_text, '<');
-    if (lt && lt > type_text) {
-        *lt = '\0';
-    }
-}
-
 /* Look up a `use` alias and return its fully-qualified module path,
  * or NULL if absent. The returned pointer aliases into the use map. */
 static const char *rust_resolve_use(RustLSPContext *ctx, const char *local_name) {
@@ -334,75 +248,6 @@ static const char *rust_resolve_use(RustLSPContext *ctx, const char *local_name)
     int i = cbm_name_rows_first(&ctx->use_rows, ctx->arena, ctx->use_local_names, ctx->use_count,
                                 local_name);
     return i >= 0 ? ctx->use_module_paths[i] : NULL;
-}
-
-/* The Rust prelude is auto-imported into every module. We map each name
- * to its canonical QN so bare references (`String`, `Vec::new`, …)
- * resolve without an explicit `use`. The list mirrors `core::prelude::v1`
- * + `alloc::prelude` + `std::prelude::v1`. The mapping is consulted before
- * the project-local fallback so prelude names always win. */
-typedef struct {
-    const char *name;
-    const char *qn;
-} RustPreludeEntry;
-
-static const RustPreludeEntry RUST_PRELUDE[] = {{"String", "alloc.string.String"},
-                                                {"ToString", "alloc.string.ToString"},
-                                                {"Vec", "alloc.vec.Vec"},
-                                                {"VecDeque", "alloc.collections.VecDeque"},
-                                                {"HashMap", "alloc.collections.HashMap"},
-                                                {"BTreeMap", "alloc.collections.BTreeMap"},
-                                                {"HashSet", "alloc.collections.HashSet"},
-                                                {"BTreeSet", "alloc.collections.BTreeSet"},
-                                                {"Box", "alloc.boxed.Box"},
-                                                {"Rc", "alloc.rc.Rc"},
-                                                {"Arc", "alloc.sync.Arc"},
-                                                {"Option", "core.option.Option"},
-                                                {"Some", "core.option.Option.Some"},
-                                                {"None", "core.option.Option.None"},
-                                                {"Result", "core.result.Result"},
-                                                {"Ok", "core.result.Result.Ok"},
-                                                {"Err", "core.result.Result.Err"},
-                                                {"Iterator", "core.iter.Iterator"},
-                                                {"IntoIterator", "core.iter.IntoIterator"},
-                                                {"Future", "core.future.Future"},
-                                                {"Clone", "core.clone.Clone"},
-                                                {"Copy", "core.marker.Copy"},
-                                                {"Send", "core.marker.Send"},
-                                                {"Sync", "core.marker.Sync"},
-                                                {"Default", "core.default.Default"},
-                                                {"PartialEq", "core.cmp.PartialEq"},
-                                                {"Eq", "core.cmp.Eq"},
-                                                {"PartialOrd", "core.cmp.PartialOrd"},
-                                                {"Ord", "core.cmp.Ord"},
-                                                {"Hash", "core.hash.Hash"},
-                                                {"Display", "core.fmt.Display"},
-                                                {"Debug", "core.fmt.Debug"},
-                                                {"From", "core.convert.From"},
-                                                {"Into", "core.convert.Into"},
-                                                {"TryFrom", "core.convert.TryFrom"},
-                                                {"TryInto", "core.convert.TryInto"},
-                                                {"AsRef", "core.convert.AsRef"},
-                                                {"AsMut", "core.convert.AsMut"},
-                                                {"Borrow", "core.borrow.Borrow"},
-                                                {"BorrowMut", "core.borrow.BorrowMut"},
-                                                {"Deref", "core.ops.Deref"},
-                                                {"DerefMut", "core.ops.DerefMut"},
-                                                {"Drop", "core.ops.Drop"},
-                                                {"RefCell", "core.cell.RefCell"},
-                                                {"Cell", "core.cell.Cell"},
-                                                {"Mutex", "std.sync.Mutex"},
-                                                {"RwLock", "std.sync.RwLock"},
-                                                {NULL, NULL}};
-
-static const char *rust_lookup_prelude(const char *name) {
-    if (!name)
-        return NULL;
-    for (const RustPreludeEntry *e = RUST_PRELUDE; e->name; e++) {
-        if (strcmp(e->name, name) == 0)
-            return e->qn;
-    }
-    return NULL;
 }
 
 /* Canonical trait-name index used while registries are still under
@@ -482,7 +327,7 @@ static const char *rust_canonical_impl_trait(CBMArena *arena, const CBMTypeRegis
     } else if (strncmp(raw_trait, "impl ", 5) == 0) {
         raw_trait += 5;
     }
-    const char *normalized = convert_path_to_qn(arena, raw_trait);
+    const char *normalized = cbm_rust_path_normalize(arena, raw_trait);
     if (!normalized || !normalized[0]) {
         return NULL;
     }
@@ -510,7 +355,7 @@ static const char *rust_canonical_impl_trait(CBMArena *arena, const CBMTypeRegis
     /* Prelude traits have canonical external QNs.  This remains fail-closed:
      * the canonical QN must actually be registered in this registry. */
     if (!strchr(normalized, '.')) {
-        const char *prelude = rust_lookup_prelude(normalized);
+        const char *prelude = cbm_rust_path_prelude(normalized);
         const char *prelude_qn = rust_trait_name_index_lookup(index, reg, prelude);
         if (prelude_qn) {
             return prelude_qn;
@@ -585,12 +430,234 @@ static const char *skip_ref_prefix(const char *text) {
     return text;
 }
 
+void *cbm_rust_path_arena_alloc(CBMArena *arena, size_t bytes) {
+    return cbm_arena_alloc(arena, bytes);
+}
+
+typedef struct {
+    const char *(*use_alias)(RustLSPContext *, const char *);
+    bool (*declared_module)(RustLSPContext *, const char *);
+    bool (*registered_type)(RustLSPContext *, const char *);
+} RustPathLookups;
+
+extern const char *cbm_rust_path_resolve(CBMArena *arena, RustLSPContext *ctx,
+                                        const RustPathLookups *lookups, const char *path,
+                                        const char *module, const char *self_type, bool type_path);
+
+static bool rust_path_declared_module(RustLSPContext *ctx, const char *name) {
+    return ctx->registry && cbm_idxmemo_get(&ctx->declared_modules, name) >= 0;
+}
+
+static bool rust_path_registered_type(RustLSPContext *ctx, const char *qn) {
+    return ctx->registry && cbm_registry_lookup_type(ctx->registry, qn);
+}
+
+static const RustPathLookups RUST_PATH_LOOKUPS = {
+    .use_alias = rust_resolve_use,
+    .declared_module = rust_path_declared_module,
+    .registered_type = rust_path_registered_type,
+};
+
+static const char *rust_resolve_path_expr(RustLSPContext *ctx, const char *path) {
+    return ctx ? cbm_rust_path_resolve(ctx->arena, ctx, &RUST_PATH_LOOKUPS, path, ctx->module_qn,
+                                       ctx->self_type_qn, false)
+               : path;
+}
+
+/* ════════════════════════════════════════════════════════════════════
+ * 4. Type-AST → CBMType
+ * ════════════════════════════════════════════════════════════════════ */
+
+/* Reconstruct the textual Rust path under a `scoped_type_identifier` /
+ * `scoped_identifier` node. We deliberately walk the named children
+ * rather than using the literal source text so we do not preserve
+ * whitespace or trailing turbofish noise. */
+static char *gather_scoped_path(RustLSPContext *ctx, TSNode node) {
+    /* Fall back to the raw source text — the grammar already produces a
+     * tight `path::to::name` literal under the node. */
+    return rust_node_text(ctx, node);
+}
+
+/* Resolve a textual Rust path (with `::`) into a registered type's QN, or
+ * NULL if no match. */
+static const char *resolve_path_to_type_qn(RustLSPContext *ctx, const char *path) {
+    if (!ctx || !path || !path[0] || is_rust_primitive(path)) {
+        return NULL;
+    }
+    return cbm_rust_path_resolve(ctx->arena, ctx, &RUST_PATH_LOOKUPS, path, ctx->module_qn,
+                                 ctx->self_type_qn, true);
+}
+
+#ifdef CBM_ENABLE_TEST_SEAMS
+/* C reference for the scoped-path helpers that moved to rust_path.rs. Seam
+ * builds keep it so tests can compare the two implementations on the same
+ * inputs; production calls only the Rust exports above. */
+
+/* Return the last `::`-separated segment of a Rust path (`std::io::Read` →
+ * `Read`). Pointer aliases into `path` — caller does not own. */
+static const char *ref_path_last_segment(const char *path) {
+    if (!path || !path[0]) {
+        return path;
+    }
+    const char *p = path;
+    const char *last = path;
+    while (*p) {
+        if (p[0] == ':' && p[1] == ':') {
+            last = p + 2;
+            p += 2;
+            continue;
+        }
+        p++;
+    }
+    return last;
+}
+
+/* Convert a Rust path with `::` separators into our internal QN form using
+ * `.` separators. Always allocates a fresh string. */
+static const char *ref_convert_path_to_qn(CBMArena *arena, const char *path) {
+    if (!path || !path[0]) {
+        return path;
+    }
+    size_t len = strlen(path);
+    char *out = (char *)cbm_arena_alloc(arena, len + 1);
+    if (!out) {
+        return path;
+    }
+    size_t j = 0;
+    for (size_t i = 0; i < len; i++) {
+        if (path[i] == ':' && i + 1 < len && path[i + 1] == ':') {
+            out[j++] = '.';
+            i++;
+        } else {
+            out[j++] = path[i];
+        }
+    }
+    out[j] = '\0';
+    return out;
+}
+
+/* In-place strip turbofish segments (`::<...>`) from a Rust path. The
+ * grammar exposes paths like `Vec::<i32>::new` or `parse::<u32>(s)` —
+ * the LSP cares about the underlying name, not the explicit type
+ * arguments, so we collapse `head::<args>::tail` to `head::tail`.
+ *
+ * Modifies `path` in place. Safe on NULL. */
+static void ref_rust_strip_turbofish(char *path) {
+    if (!path)
+        return;
+    char *read = path;
+    char *write = path;
+    while (*read) {
+        if (read[0] == ':' && read[1] == ':' && read[2] == '<') {
+            /* Skip ::< … > balanced. */
+            int depth = 1;
+            const char *p = read + 3;
+            while (*p && depth > 0) {
+                if (*p == '<')
+                    depth++;
+                else if (*p == '>')
+                    depth--;
+                p++;
+            }
+            read = (char *)p;
+            continue;
+        }
+        *write++ = *read++;
+    }
+    *write = '\0';
+}
+
+/* In place: `Gen<T>` -> `Gen`, `foo::Bar<'a, T>` -> `foo::Bar` (#763). An
+ * impl's self type keeps its generic arguments in the source text, but every
+ * def-side QN (a method's receiver, the extractor's call scope) strips them.
+ * Unstripped, the LSP's caller QN, `self`/`Self` dispatch and the return-type
+ * harvest never matched a generic impl's methods. Text starting with `<` (a
+ * qualified path) is left alone. Safe on NULL. */
+static void ref_rust_strip_impl_type_args(char *type_text) {
+    if (!type_text) {
+        return;
+    }
+    char *lt = strchr(type_text, '<');
+    if (lt && lt > type_text) {
+        *lt = '\0';
+    }
+}
+
+/* The Rust prelude is auto-imported into every module. We map each name
+ * to its canonical QN so bare references (`String`, `Vec::new`, …)
+ * resolve without an explicit `use`. The list mirrors `core::prelude::v1`
+ * + `alloc::prelude` + `std::prelude::v1`. The mapping is consulted before
+ * the project-local fallback so prelude names always win. */
+typedef struct {
+    const char *name;
+    const char *qn;
+} ref_RustPreludeEntry;
+
+static const ref_RustPreludeEntry ref_RUST_PRELUDE[] = {{"String", "alloc.string.String"},
+                                                {"ToString", "alloc.string.ToString"},
+                                                {"Vec", "alloc.vec.Vec"},
+                                                {"VecDeque", "alloc.collections.VecDeque"},
+                                                {"HashMap", "alloc.collections.HashMap"},
+                                                {"BTreeMap", "alloc.collections.BTreeMap"},
+                                                {"HashSet", "alloc.collections.HashSet"},
+                                                {"BTreeSet", "alloc.collections.BTreeSet"},
+                                                {"Box", "alloc.boxed.Box"},
+                                                {"Rc", "alloc.rc.Rc"},
+                                                {"Arc", "alloc.sync.Arc"},
+                                                {"Option", "core.option.Option"},
+                                                {"Some", "core.option.Option.Some"},
+                                                {"None", "core.option.Option.None"},
+                                                {"Result", "core.result.Result"},
+                                                {"Ok", "core.result.Result.Ok"},
+                                                {"Err", "core.result.Result.Err"},
+                                                {"Iterator", "core.iter.Iterator"},
+                                                {"IntoIterator", "core.iter.IntoIterator"},
+                                                {"Future", "core.future.Future"},
+                                                {"Clone", "core.clone.Clone"},
+                                                {"Copy", "core.marker.Copy"},
+                                                {"Send", "core.marker.Send"},
+                                                {"Sync", "core.marker.Sync"},
+                                                {"Default", "core.default.Default"},
+                                                {"PartialEq", "core.cmp.PartialEq"},
+                                                {"Eq", "core.cmp.Eq"},
+                                                {"PartialOrd", "core.cmp.PartialOrd"},
+                                                {"Ord", "core.cmp.Ord"},
+                                                {"Hash", "core.hash.Hash"},
+                                                {"Display", "core.fmt.Display"},
+                                                {"Debug", "core.fmt.Debug"},
+                                                {"From", "core.convert.From"},
+                                                {"Into", "core.convert.Into"},
+                                                {"TryFrom", "core.convert.TryFrom"},
+                                                {"TryInto", "core.convert.TryInto"},
+                                                {"AsRef", "core.convert.AsRef"},
+                                                {"AsMut", "core.convert.AsMut"},
+                                                {"Borrow", "core.borrow.Borrow"},
+                                                {"BorrowMut", "core.borrow.BorrowMut"},
+                                                {"Deref", "core.ops.Deref"},
+                                                {"DerefMut", "core.ops.DerefMut"},
+                                                {"Drop", "core.ops.Drop"},
+                                                {"RefCell", "core.cell.RefCell"},
+                                                {"Cell", "core.cell.Cell"},
+                                                {"Mutex", "std.sync.Mutex"},
+                                                {"RwLock", "std.sync.RwLock"},
+                                                {NULL, NULL}};
+
+static const char *ref_rust_lookup_prelude(const char *name) {
+    if (!name)
+        return NULL;
+    for (const ref_RustPreludeEntry *e = ref_RUST_PRELUDE; e->name; e++) {
+        if (strcmp(e->name, name) == 0)
+            return e->qn;
+    }
+    return NULL;
+}
+
 /* Resolve an otherwise-relative multi-segment type only when its head is an
  * explicit top-level `mod head;` declaration and exactly one graph-qualified
  * candidate exists. Rust filename-stem QNs do not encode whether a source is
  * a crate root, so both the child and sibling layouts are tested and any
  * ambiguity stays unresolved. No short-name/suffix guess is admitted. */
-static const char *rust_registered_relative_path(RustLSPContext *ctx, const char *normalized) {
+static const char *ref_rust_registered_relative_path(RustLSPContext *ctx, const char *normalized) {
     if (!ctx || !ctx->arena || !ctx->registry || !ctx->module_qn || !normalized || !normalized[0]) {
         return NULL;
     }
@@ -630,7 +697,7 @@ static const char *rust_registered_relative_path(RustLSPContext *ctx, const char
  *
  * The returned string is arena-owned; in case (6) we return the input
  * with `::` already converted to `.`. */
-static const char *rust_resolve_path_expr(RustLSPContext *ctx, const char *path) {
+static const char *ref_rust_resolve_path_expr(RustLSPContext *ctx, const char *path) {
     if (!ctx || !path || !path[0]) {
         return path;
     }
@@ -638,7 +705,7 @@ static const char *rust_resolve_path_expr(RustLSPContext *ctx, const char *path)
     /* Self:: handling — we treat the receiver type's QN as the head. */
     if (strncmp(path, "Self::", 6) == 0 && ctx->self_type_qn) {
         return cbm_arena_sprintf(ctx->arena, "%s.%s", ctx->self_type_qn,
-                                 convert_path_to_qn(ctx->arena, path + 6));
+                                 ref_convert_path_to_qn(ctx->arena, path + 6));
     }
     if (strcmp(path, "Self") == 0 && ctx->self_type_qn) {
         return ctx->self_type_qn;
@@ -664,7 +731,7 @@ static const char *rust_resolve_path_expr(RustLSPContext *ctx, const char *path)
             second_dot ? (size_t)(second_dot - ctx->module_qn) : strlen(ctx->module_qn);
         char *crate_buf = cbm_arena_strndup(ctx->arena, ctx->module_qn, crate_len);
         return cbm_arena_sprintf(ctx->arena, "%s.%s", crate_buf,
-                                 convert_path_to_qn(ctx->arena, path + 7));
+                                 ref_convert_path_to_qn(ctx->arena, path + 7));
     }
 
     /* super:: → drop last segment of module_qn. */
@@ -674,7 +741,7 @@ static const char *rust_resolve_path_expr(RustLSPContext *ctx, const char *path)
             char *parent =
                 cbm_arena_strndup(ctx->arena, ctx->module_qn, (size_t)(dot - ctx->module_qn));
             return cbm_arena_sprintf(ctx->arena, "%s.%s", parent,
-                                     convert_path_to_qn(ctx->arena, path + 7));
+                                     ref_convert_path_to_qn(ctx->arena, path + 7));
         }
     }
 
@@ -683,10 +750,10 @@ static const char *rust_resolve_path_expr(RustLSPContext *ctx, const char *path)
     if (!sep) {
         const char *full = rust_resolve_use(ctx, path);
         if (full) {
-            return convert_path_to_qn(ctx->arena, full);
+            return ref_convert_path_to_qn(ctx->arena, full);
         }
         /* Prelude name (e.g. `String`, `Vec`)? */
-        const char *prelude = rust_lookup_prelude(path);
+        const char *prelude = ref_rust_lookup_prelude(path);
         if (prelude) {
             return prelude;
         }
@@ -704,16 +771,16 @@ static const char *rust_resolve_path_expr(RustLSPContext *ctx, const char *path)
     if (full) {
         /* The use-map's full path already includes `head` as the last
          * segment; concat its parent with the rest. */
-        const char *full_dotted = convert_path_to_qn(ctx->arena, full);
-        const char *tail_dotted = convert_path_to_qn(ctx->arena, tail);
+        const char *full_dotted = ref_convert_path_to_qn(ctx->arena, full);
+        const char *tail_dotted = ref_convert_path_to_qn(ctx->arena, tail);
         return cbm_arena_sprintf(ctx->arena, "%s.%s", full_dotted, tail_dotted);
     }
 
     /* Prelude head: `String::from` → `alloc.string.String.from`. */
-    const char *prelude = rust_lookup_prelude(head);
+    const char *prelude = ref_rust_lookup_prelude(head);
     if (prelude) {
         return cbm_arena_sprintf(ctx->arena, "%s.%s", prelude,
-                                 convert_path_to_qn(ctx->arena, tail));
+                                 ref_convert_path_to_qn(ctx->arena, tail));
     }
 
     /* Cargo-manifest aware routing — when a Cargo.toml has been parsed
@@ -727,7 +794,7 @@ static const char *rust_resolve_path_expr(RustLSPContext *ctx, const char *path)
             /* Workspace member: route to `<member_name>.<tail>` so the
              * pipeline's cross-crate resolution can match it. */
             return cbm_arena_sprintf(ctx->arena, "%s.%s", head,
-                                     convert_path_to_qn(ctx->arena, tail));
+                                     ref_convert_path_to_qn(ctx->arena, tail));
         }
         if (cbm_cargo_is_known_dep(m, head)) {
             /* Declared dependency: same canonical form. The actual
@@ -735,7 +802,7 @@ static const char *rust_resolve_path_expr(RustLSPContext *ctx, const char *path)
              * otherwise the call is correctly attributed to an
              * external crate rather than fabricated locally. */
             return cbm_arena_sprintf(ctx->arena, "%s.%s", head,
-                                     convert_path_to_qn(ctx->arena, tail));
+                                     ref_convert_path_to_qn(ctx->arena, tail));
         }
     }
 
@@ -743,49 +810,65 @@ static const char *rust_resolve_path_expr(RustLSPContext *ctx, const char *path)
      * Type parsing performs the narrower exact project-relative probe; doing
      * it here would reclassify `Type::method` as a direct free-function call
      * before the UFCS/constructor dispatch logic sees it. */
-    return convert_path_to_qn(ctx->arena, path);
-}
-
-/* ════════════════════════════════════════════════════════════════════
- * 4. Type-AST → CBMType
- * ════════════════════════════════════════════════════════════════════ */
-
-/* Reconstruct the textual Rust path under a `scoped_type_identifier` /
- * `scoped_identifier` node. We deliberately walk the named children
- * rather than using the literal source text so we do not preserve
- * whitespace or trailing turbofish noise. */
-static char *gather_scoped_path(RustLSPContext *ctx, TSNode node) {
-    /* Fall back to the raw source text — the grammar already produces a
-     * tight `path::to::name` literal under the node. */
-    return rust_node_text(ctx, node);
+    return ref_convert_path_to_qn(ctx->arena, path);
 }
 
 /* Resolve a textual Rust path (with `::`) into a registered type's QN, or
  * NULL if no match. */
-static const char *resolve_path_to_type_qn(RustLSPContext *ctx, const char *path) {
+static const char *ref_resolve_path_to_type_qn(RustLSPContext *ctx, const char *path) {
     if (!ctx || !path || !path[0]) {
         return NULL;
     }
     if (is_rust_primitive(path)) {
         return NULL;
     }
-    const char *qn = rust_resolve_path_expr(ctx, path);
+    const char *qn = ref_rust_resolve_path_expr(ctx, path);
     if (!qn) {
         return NULL;
     }
     if (cbm_registry_lookup_type(ctx->registry, qn)) {
         return qn;
     }
-    const char *normalized = convert_path_to_qn(ctx->arena, path);
+    const char *normalized = ref_convert_path_to_qn(ctx->arena, path);
     if (!normalized || strcmp(qn, normalized) != 0) {
         return qn;
     }
-    const char *relative = rust_registered_relative_path(ctx, normalized);
+    const char *relative = ref_rust_registered_relative_path(ctx, normalized);
     if (relative) {
         return relative;
     }
     return qn; /* may not be registered yet but caller can still wrap as NAMED */
 }
+
+const char *cbm_rust_path_test_resolve(RustLSPContext *ctx, const char *path, bool type_path,
+                                       bool c_reference) {
+    if (c_reference) {
+        return type_path ? ref_resolve_path_to_type_qn(ctx, path)
+                         : ref_rust_resolve_path_expr(ctx, path);
+    }
+    return type_path ? resolve_path_to_type_qn(ctx, path) : rust_resolve_path_expr(ctx, path);
+}
+
+const char *cbm_rust_path_c_normalize(CBMArena *arena, const char *path) {
+    return ref_convert_path_to_qn(arena, path);
+}
+
+const char *cbm_rust_path_c_leaf(const char *path) {
+    return ref_path_last_segment(path);
+}
+
+const char *cbm_rust_path_c_prelude(const char *name) {
+    return ref_rust_lookup_prelude(name);
+}
+
+void cbm_rust_path_c_strip_turbofish(char *path) {
+    ref_rust_strip_turbofish(path);
+}
+
+void cbm_rust_path_c_strip_impl_args(char *path) {
+    ref_rust_strip_impl_type_args(path);
+}
+#endif
 
 const CBMType *rust_parse_type_node(RustLSPContext *ctx, TSNode node) {
     if (ts_node_is_null(node)) {
@@ -1204,7 +1287,7 @@ static const CBMType *parse_type_text_with_params(CBMArena *arena, const char *t
     /* Has `::` → absolute path; treat dotted paths as already-qualified
      * QNs (cross-file callers pass module-qualified text directly). */
     if (strstr(text, "::")) {
-        return cbm_type_named(arena, convert_path_to_qn(arena, text));
+        return cbm_type_named(arena, cbm_rust_path_normalize(arena, text));
     }
     if (strchr(text, '.')) {
         return cbm_type_named(arena, text);
@@ -1497,7 +1580,7 @@ const CBMType *rust_eval_expr_type(RustLSPContext *ctx, TSNode node) {
         /* Use-aliased symbol: resolve path then look up. */
         const char *full = rust_resolve_use(ctx, name);
         if (full) {
-            const char *qn = convert_path_to_qn(ctx->arena, full);
+            const char *qn = cbm_rust_path_normalize(ctx->arena, full);
             const CBMRegisteredFunc *uf = cbm_registry_lookup_func(ctx->registry, qn);
             if (uf && uf->signature) {
                 return uf->signature;
@@ -1600,7 +1683,7 @@ const CBMType *rust_eval_expr_type(RustLSPContext *ctx, TSNode node) {
                 /* Strip ALL turbofish (`::<...>`) so the lookup below
                  * ignores explicit type arguments — handles forms like
                  * `Vec::<i32>::new` and `parse::<u32>`. */
-                rust_strip_turbofish(path);
+                cbm_rust_path_strip_turbofish(path);
                 const char *qn = rust_resolve_path_expr(ctx, path);
                 if (qn) {
                     const CBMRegisteredType *rt = cbm_registry_lookup_type(ctx->registry, qn);
@@ -4302,7 +4385,7 @@ static void rust_resolve_call_expression_inner(RustLSPContext *ctx, TSNode node)
             return;
         /* Strip turbofish from the method name in case the grammar
          * embedded it as part of the field token. */
-        rust_strip_turbofish(mname);
+        cbm_rust_path_strip_turbofish(mname);
 
         const CBMType *recv = rust_eval_expr_type(ctx, value);
         const CBMType *base = recv;
@@ -4449,7 +4532,7 @@ static void rust_resolve_call_expression_inner(RustLSPContext *ctx, TSNode node)
         if (!path)
             return;
         /* Strip ALL turbofish (`Vec::<i32>::new` → `Vec::new`). */
-        rust_strip_turbofish(path);
+        cbm_rust_path_strip_turbofish(path);
 
         if (strcmp(ts_node_type(actual_func), "identifier") == 0) {
             const char *alias_target = cbm_scope_lookup_callable(ctx->current_scope, path);
@@ -5291,7 +5374,7 @@ static void rust_process_impl(RustLSPContext *ctx, TSNode impl_node) {
     char *type_text = rust_node_text(ctx, type_node);
     if (!type_text)
         return;
-    rust_strip_impl_type_args(type_text);
+    cbm_rust_path_strip_impl_args(type_text);
 
     /* Detect blanket impl: `impl<T: Trait> ForeignTrait for T { ... }`
      * where type_text is a name that appears in the impl's type
@@ -5473,7 +5556,7 @@ static void rust_collect_uses(RustLSPContext *ctx, TSNode root) {
                 size_t flen = strlen(full);
                 if (flen >= 3 && strcmp(full + flen - 3, "::*") == 0) {
                     char *mod = cbm_arena_strndup(ctx->arena, full, flen - 3);
-                    rust_lsp_add_glob(ctx, convert_path_to_qn(ctx->arena, mod));
+                    rust_lsp_add_glob(ctx, cbm_rust_path_normalize(ctx->arena, mod));
                 } else if (flen >= 1 && full[flen - 1] == '}') {
                     /* Brace list: prefix::{a, b as c, d}. */
                     char *lbr = strchr(full, '{');
@@ -5511,7 +5594,7 @@ static void rust_collect_uses(RustLSPContext *ctx, TSNode root) {
                                 while (*alias == ' ')
                                     alias++;
                             } else {
-                                alias = (char *)path_last_segment(tok);
+                                alias = (char *)cbm_rust_path_leaf(tok);
                             }
                             char *full_path =
                                 (strcmp(tok, "self") == 0)
@@ -5532,7 +5615,7 @@ static void rust_collect_uses(RustLSPContext *ctx, TSNode root) {
                         while (*alias == ' ')
                             alias++;
                     } else {
-                        alias = (char *)path_last_segment(full);
+                        alias = (char *)cbm_rust_path_leaf(full);
                     }
                     rust_lsp_add_use(ctx, alias, path_part);
                 }
@@ -6120,7 +6203,7 @@ void cbm_rust_build_local_registry(CBMArena *arena, CBMTypeRegistry *reg, CBMFil
             if (ts_node_is_null(type_node) || ts_node_is_null(body))
                 continue;
             char *type_name = cbm_node_text(arena, type_node, source);
-            rust_strip_impl_type_args(type_name);
+            cbm_rust_path_strip_impl_args(type_name);
             if (!type_name || !type_name[0])
                 continue;
             const char *type_qn = cbm_arena_sprintf(arena, "%s.%s", module_qn, type_name);

@@ -380,4 +380,18 @@ typedef struct {
 void cbm_batch_rust_lsp_cross(CBMArena *arena, CBMBatchRustLSPFile *files, int file_count,
                               CBMResolvedCallArray *out);
 
+#ifdef CBM_ENABLE_TEST_SEAMS
+/* Scoped-path resolution through the Rust exports in rust_path.rs, or through
+ * the C reference kept for comparison when `c_reference` is set. `type_path`
+ * selects type-position resolution instead of expression resolution. */
+const char *cbm_rust_path_test_resolve(RustLSPContext *ctx, const char *path, bool type_path,
+                                       bool c_reference);
+/* C reference spellings of the rust_path.rs exports `cbm_rust_path_*`. */
+const char *cbm_rust_path_c_normalize(CBMArena *arena, const char *path);
+const char *cbm_rust_path_c_leaf(const char *path);
+const char *cbm_rust_path_c_prelude(const char *name);
+void cbm_rust_path_c_strip_turbofish(char *path);
+void cbm_rust_path_c_strip_impl_args(char *path);
+#endif
+
 #endif /* CBM_LSP_RUST_LSP_H */
