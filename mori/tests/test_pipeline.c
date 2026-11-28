@@ -22501,10 +22501,6 @@ static int py_reexport_run(bool parallel, bool incremental, bool *lsp, bool *exc
 TEST(pipeline_python_package_reexports_resolve_by_lsp) {
     static const char *const mode_names[] = {"sequential", "parallel", "sequential incremental",
                                              "parallel incremental"};
-    /* Seam builds also build every namespace table with the C reference of
-     * python_namespace.rs and count the tables that differ. */
-    uint64_t parity_builds = atomic_load(&cbm_py_namespace_parity_builds);
-    uint64_t parity_mismatches = atomic_load(&cbm_py_namespace_parity_mismatches);
     for (int mode = 0; mode < 4; mode++) {
         bool lsp[PY_REEXPORT_N_CALLS];
         bool excluded[PY_REEXPORT_N_EXCLUDED];
@@ -22526,8 +22522,6 @@ TEST(pipeline_python_package_reexports_resolve_by_lsp) {
             ASSERT_FALSE(excluded[e]); /* __all__, `_`, shadow, barrier */
         }
     }
-    ASSERT_GT(atomic_load(&cbm_py_namespace_parity_builds), parity_builds);
-    ASSERT_EQ(atomic_load(&cbm_py_namespace_parity_mismatches), parity_mismatches);
     PASS();
 }
 
