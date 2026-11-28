@@ -21,7 +21,6 @@
 #include "ui/embedded_assets.h"
 #include "ui/layout3d.h"
 #include "ui/atlas.h"
-#include "ui/xrepo.h"
 #include "mcp/mcp.h"
 #include "store/store.h"
 #include "pipeline/pass_cross_repo.h"
@@ -2463,63 +2462,6 @@ static void atlas_reply_json(ui_response_t *c, char *json, int missing_status,
     cbm_free(CBM_MEM_CLASS_OTHER, json);
 }
 
-/* GET /api/xrepo/summary — repos and cross-repo links across every project
- * index in the cache directory (read-only query stores). */
-static void handle_xrepo_summary(ui_response_t *c) {
-    const char *dir = cbm_resolve_cache_dir();
-    atlas_reply_json(c, cbm_xrepo_summary_json(dir ? dir : cbm_tmpdir()), 500,
-                     "{\"error\":\"cannot read the project cache\"}");
-}
-
-/* True when the query string gives `key` a non-empty value. */
-static bool xrepo_query_has(const char *query, const char *key) {
-    size_t n = strlen(key);
-    for (const char *p = query; p && *p;) {
-        if (strncmp(p, key, n) == 0 && p[n] == '=' && p[n + 1] != '&' && p[n + 1] != '\0')
-            return true;
-        p = strchr(p, '&');
-        if (p)
-            p++;
-    }
-    return false;
-}
-
-/* GET /api/xrepo/links?from=A&to=B&type=CROSS_X&limit=&offset= — the
- * individual links behind one summary arc, paged. */
-static void handle_xrepo_links(ui_response_t *c, const cbm_http_req_t *req) {
-    char from[256] = {0}, to[256] = {0}, type[64] = {0}, num[32] = {0};
-    if (!cbm_ui_http_query_param(req->query, "from", from, (int)sizeof(from)) || !from[0]) {
-        replyf(c, 400, c->cors_json, "{\"error\":\"missing from parameter\"}");
-        return;
-    }
-    /* A given to/type that does not parse (too long, bad escape) is an
-     * error, not "any": widening would answer a question nobody asked. */
-    if ((xrepo_query_has(req->query, "to") &&
-         !cbm_ui_http_query_param(req->query, "to", to, (int)sizeof(to))) ||
-        (xrepo_query_has(req->query, "type") &&
-         !cbm_ui_http_query_param(req->query, "type", type, (int)sizeof(type)))) {
-        replyf(c, 400, c->cors_json, "{\"error\":\"invalid to or type\"}");
-        return;
-    }
-    int limit = 0, offset = 0;
-    if (cbm_ui_http_query_param(req->query, "limit", num, (int)sizeof(num)))
-        limit = atoi(num);
-    if (cbm_ui_http_query_param(req->query, "offset", num, (int)sizeof(num)))
-        offset = atoi(num);
-    const char *dir = cbm_resolve_cache_dir();
-    int status = 500;
-    char *json = cbm_xrepo_links_json(dir ? dir : cbm_tmpdir(), from, to, type, limit, offset,
-                                      &status);
-    if (!json) {
-        replyf(c, status, c->cors_json, "{\"error\":\"%s\"}",
-               status == 400   ? "invalid from, to or type"
-               : status == 404 ? "project not found"
-                               : "cannot read links");
-        return;
-    }
-    atlas_reply_json(c, json, 500, "");
-}
-
 /* GET /api/tree?project=X&path=src/foo — Modules aggregates. */
 static void handle_atlas_tree(ui_response_t *c, const cbm_http_req_t *req) {
     char project[256] = {0};
@@ -3341,6 +3283,10 @@ static void handle_runtime_config(cbm_http_server_t *srv, ui_response_t *c,
     cbm_free(CBM_MEM_CLASS_OTHER, json);
 }
 
+/* A NULL query selects the summary. An empty query still selects links. */
+extern void mori_ui_xrepo_reply(const char *cache, const char *query, cbm_ui_http_reply_fn reply,
+                                void *context, const char *headers, int deadline_ms);
+
 void cbm_http_server_dispatch(cbm_http_server_t *srv, const cbm_http_req_t *req,
                               cbm_ui_http_reply_fn reply, void *context) {
     ui_response_t response = {.send = reply, .context = context};
@@ -3349,7 +3295,8 @@ void cbm_http_server_dispatch(cbm_http_server_t *srv, const cbm_http_req_t *req,
         return;
 
     const bool is_post = strcmp(req->method, "POST") == 0;
-    switch (cbm_ui_route_select(req->method, req->path, srv->read_only)) {
+    const cbm_ui_route_t route = cbm_ui_route_select(req->method, req->path, srv->read_only);
+    switch (route) {
     case UI_ROUTE_PREFLIGHT:
         replyf(c, 204, c->cors, "%s", "");
         return;
@@ -3369,11 +3316,13 @@ void cbm_http_server_dispatch(cbm_http_server_t *srv, const cbm_http_req_t *req,
         handle_layout(c, req);
         return;
     case UI_ROUTE_XREPO_SUMMARY:
-        handle_xrepo_summary(c);
+    case UI_ROUTE_XREPO_LINKS: {
+        const char *cache = cbm_resolve_cache_dir();
+        const char *query = route == UI_ROUTE_XREPO_LINKS ? req->query : NULL;
+        mori_ui_xrepo_reply(cache ? cache : cbm_tmpdir(), query, c->send, c->context,
+                            c->cors_json, c->send_deadline_ms);
         return;
-    case UI_ROUTE_XREPO_LINKS:
-        handle_xrepo_links(c, req);
-        return;
+    }
     case UI_ROUTE_TREE:
         handle_atlas_tree(c, req);
         return;
