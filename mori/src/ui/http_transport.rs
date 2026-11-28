@@ -30,7 +30,7 @@ const SEND_MS: c_int = 1000;
 const SEND_SLICE: usize = 64 * 1024;
 const MAX_REPLY_HEAD: usize = 1024;
 
-type Reply = unsafe extern "C" fn(
+pub(super) type Reply = unsafe extern "C" fn(
     *mut c_void,
     c_int,
     *const c_char,

@@ -6768,6 +6768,244 @@ TEST(rustlsp_followup_b_pathological_no_hang) {
     cbm_free_result(r); PASS();
 }
 
+/* ── Scoped paths (rust_path.rs) ─────────────────────────────────── */
+
+extern const char *cbm_rust_path_normalize(CBMArena *arena, const char *path);
+extern const char *cbm_rust_path_leaf(const char *path);
+extern const char *cbm_rust_path_prelude(const char *name);
+extern void cbm_rust_path_strip_turbofish(char *path);
+extern void cbm_rust_path_strip_impl_args(char *path);
+
+static bool rustpath_same(const char *want, const char *got) {
+    return want == got || (want && got && strcmp(want, got) == 0);
+}
+
+static int rustpath_report(const char *what, const char *input, const char *want,
+                           const char *got) {
+    printf("  %s(%s): want=%s got=%s\n", what, input ? input : "(null)",
+           want ? want : "(null)", got ? got : "(null)");
+    return 1;
+}
+
+typedef struct {
+    const char *module_qn;
+    const char *self_type_qn;
+    bool registry;
+    bool manifest;
+    bool closed_arena;
+} RustPathScene;
+
+/* Expected expression and type-position results. The cases were checked
+ * against the C resolver before rust_path.rs replaced it. */
+typedef struct {
+    const char *path;
+    const char *expr;
+    const char *type;
+} RustPathCase;
+
+static void rustpath_add_type(CBMTypeRegistry *reg, const char *qn, const char *short_name) {
+    CBMRegisteredType t;
+    memset(&t, 0, sizeof(t));
+    t.qualified_name = qn;
+    t.short_name = short_name;
+    cbm_registry_add_type(reg, t);
+}
+
+static int rustpath_check_scene(const RustPathScene *scene, const RustPathCase *cases,
+                                size_t count) {
+    CBMArena arena;
+    cbm_arena_init(&arena);
+    CBMArena closed;
+    memset(&closed, 0, sizeof(closed));
+
+    CBMTypeRegistry reg;
+    cbm_registry_init(&reg, &arena);
+    rustpath_add_type(&reg, "proj.crate.foo.bar.util.Thing", "Thing");
+    rustpath_add_type(&reg, "proj.crate.foo.bar.both.T", "T");
+    rustpath_add_type(&reg, "proj.crate.foo.both.T", "T");
+    rustpath_add_type(&reg, "proj.crate.foo.up.T", "T");
+    rustpath_add_type(&reg, "proj.crate.util.Thing", "Thing");
+    rustpath_add_type(&reg, "std.io.Read", "Read");
+    rustpath_add_type(&reg, "proj.crate.foo.bar.Local", "Local");
+
+    const char *toml = "[package]\n"
+                       "name = \"app\"\n"
+                       "[dependencies]\n"
+                       "serde = \"1.0\"\n"
+                       "[workspace]\n"
+                       "members = [\"crates/member_a\"]\n";
+    CBMCargoManifest manifest;
+    cbm_cargo_parse(&arena, toml, (int)strlen(toml), &manifest);
+
+    RustLSPContext ctx;
+    rust_lsp_init(&ctx, &arena, "", 0, scene->registry ? &reg : NULL, scene->module_qn, NULL);
+    ctx.self_type_qn = scene->self_type_qn;
+    ctx.cargo_manifest = scene->manifest ? &manifest : NULL;
+    rust_lsp_add_use(&ctx, "Map", "std::collections::HashMap");
+    rust_lsp_add_use(&ctx, "io", "std::io");
+    rust_lsp_add_use(&ctx, "Empty", "");
+    const char *modules[] = {"util", "both", "up"};
+    for (size_t i = 0; i < sizeof(modules) / sizeof(modules[0]); i++) {
+        cbm_idxmemo_put_if_absent(&ctx.declared_modules, &arena, modules[i], 1);
+    }
+    if (scene->closed_arena) {
+        ctx.arena = &closed;
+    }
+
+    int mismatches = 0;
+    for (size_t i = 0; i < count; i++) {
+        const RustPathCase *c = &cases[i];
+        const char *expr = cbm_rust_path_test_resolve(&ctx, c->path, false);
+        if (!rustpath_same(c->expr, expr)) {
+            mismatches += rustpath_report("expr", c->path, c->expr, expr);
+        }
+        const char *type = cbm_rust_path_test_resolve(&ctx, c->path, true);
+        if (!rustpath_same(c->type, type)) {
+            mismatches += rustpath_report("type", c->path, c->type, type);
+        }
+    }
+    cbm_arena_destroy(&arena);
+    return mismatches;
+}
+
+TEST(rustlsp_scoped_path_resolution) {
+    const RustPathScene module_scene = {"proj.crate.foo.bar", "proj.crate.foo.bar.S", true, true,
+                                        false};
+    const RustPathCase module_cases[] = {
+        {NULL, NULL, NULL},
+        {"", "", NULL},
+        {"Self", "proj.crate.foo.bar.S", "proj.crate.foo.bar.S"},
+        {"Self::new", "proj.crate.foo.bar.S.new", "proj.crate.foo.bar.S.new"},
+        {"crate::a::b", "proj.crate.a.b", "proj.crate.a.b"},
+        {"crate::", "proj.crate.", "proj.crate."},
+        {"super::x::y", "proj.crate.foo.x.y", "proj.crate.foo.x.y"},
+        {"Local", "proj.crate.foo.bar.Local", "proj.crate.foo.bar.Local"},
+        {"String", "alloc.string.String", "alloc.string.String"},
+        {"Map", "std.collections.HashMap", "std.collections.HashMap"},
+        {"Map::new", "std.collections.HashMap.new", "std.collections.HashMap.new"},
+        {"io::Read", "std.io.Read", "std.io.Read"},
+        {"Empty::x", ".x", ".x"},
+        {"String::from", "alloc.string.String.from", "alloc.string.String.from"},
+        {"serde::Serialize", "serde.Serialize", "serde.Serialize"},
+        {"member_a::thing", "member_a.thing", "member_a.thing"},
+        {"util::Thing", "util.Thing", "proj.crate.foo.bar.util.Thing"},
+        {"util::Missing", "util.Missing", "util.Missing"},
+        {"both::T", "both.T", "both.T"},
+        {"up::T", "up.T", "proj.crate.foo.up.T"},
+        {"u8", "proj.crate.foo.bar.u8", NULL},
+        {"a:::b", "a.:b", "a.:b"},
+    };
+    const RustPathScene bare_scene = {NULL, NULL, true, false, false};
+    const RustPathCase bare_cases[] = {
+        {"Self", "Self", "Self"},
+        {"Self::new", "Self.new", "Self.new"},
+        {"crate::a::b", "crate.a.b", "crate.a.b"},
+        {"super::x", "super.x", "super.x"},
+        {"foo", "foo", "foo"},
+        {"util::Thing", "util.Thing", "util.Thing"},
+    };
+    const RustPathScene root_scene = {"proj", NULL, true, true, false};
+    const RustPathCase root_cases[] = {
+        {"crate::a", "proj.a", "proj.a"},
+        {"super::a", "super.a", "super.a"},
+    };
+    /* An arena that cannot allocate: static and borrowed spellings survive,
+     * fresh ones fail, and an uncopyable scoped head keeps the input. */
+    const RustPathScene closed_scene = {"proj.crate.foo.bar", "proj.crate.foo.bar.S", true, true,
+                                        true};
+    const RustPathCase closed_cases[] = {
+        {"Self", "proj.crate.foo.bar.S", "proj.crate.foo.bar.S"},
+        {"Self::new", NULL, NULL},
+        {"String", "alloc.string.String", "alloc.string.String"},
+        {"String::from", "String::from", "String::from"},
+        {"Map", "std::collections::HashMap", "std::collections::HashMap"},
+        {"Local", NULL, NULL},
+    };
+
+    int mismatches = 0;
+    mismatches += rustpath_check_scene(&module_scene, module_cases,
+                                       sizeof(module_cases) / sizeof(module_cases[0]));
+    mismatches += rustpath_check_scene(&bare_scene, bare_cases,
+                                       sizeof(bare_cases) / sizeof(bare_cases[0]));
+    mismatches += rustpath_check_scene(&root_scene, root_cases,
+                                       sizeof(root_cases) / sizeof(root_cases[0]));
+    mismatches += rustpath_check_scene(&closed_scene, closed_cases,
+                                       sizeof(closed_cases) / sizeof(closed_cases[0]));
+    if (cbm_rust_path_test_resolve(NULL, "a::b", false) == NULL ||
+        strcmp(cbm_rust_path_test_resolve(NULL, "a::b", false), "a::b") != 0 ||
+        cbm_rust_path_test_resolve(NULL, "a::b", true) != NULL) {
+        mismatches += rustpath_report("null context", "a::b", "a::b / (null)", "?");
+    }
+    ASSERT_EQ(0, mismatches);
+    PASS();
+}
+
+TEST(rustlsp_scoped_path_helpers) {
+    CBMArena arena;
+    cbm_arena_init(&arena);
+    CBMArena closed;
+    memset(&closed, 0, sizeof(closed));
+
+    ASSERT_STR_EQ("a.b", cbm_rust_path_normalize(&arena, "a::b"));
+    ASSERT_STR_EQ("a.:b", cbm_rust_path_normalize(&arena, "a:::b"));
+    ASSERT_STR_EQ(".", cbm_rust_path_normalize(&arena, "::"));
+    const char *empty = "";
+    ASSERT(cbm_rust_path_normalize(&arena, empty) == empty);
+    const char *scoped = "std::io::Read";
+    ASSERT(cbm_rust_path_normalize(&closed, scoped) == scoped);
+    ASSERT_NULL(cbm_rust_path_normalize(&arena, NULL));
+
+    /* The leaf aliases into its input. */
+    ASSERT(cbm_rust_path_leaf(scoped) == scoped + 9);
+    const char *trailing = "a::";
+    ASSERT(cbm_rust_path_leaf(trailing) == trailing + 3);
+    const char *colons = ":::";
+    ASSERT(cbm_rust_path_leaf(colons) == colons + 2);
+    const char *plain = "plain";
+    ASSERT(cbm_rust_path_leaf(plain) == plain);
+    ASSERT_NULL(cbm_rust_path_leaf(NULL));
+
+    ASSERT_STR_EQ("alloc.vec.Vec", cbm_rust_path_prelude("Vec"));
+    ASSERT_STR_EQ("core.option.Option.Some", cbm_rust_path_prelude("Some"));
+    ASSERT_STR_EQ("std.sync.RwLock", cbm_rust_path_prelude("RwLock"));
+    ASSERT_NULL(cbm_rust_path_prelude("Write"));
+    ASSERT_NULL(cbm_rust_path_prelude("Vec::new"));
+    ASSERT_NULL(cbm_rust_path_prelude(""));
+    ASSERT_NULL(cbm_rust_path_prelude(NULL));
+
+    const struct {
+        const char *in;
+        const char *turbofish;
+        const char *impl_args;
+    } texts[] = {
+        {"Vec::<i32>::new", "Vec::new", "Vec::"},
+        {"parse::<u32>", "parse", "parse::"},
+        {"a::<B<C>>::d", "a::d", "a::"},
+        {"a::<b>::<c>", "a", "a::"},
+        {"x::<unterminated", "x", "x::"},
+        {"::<>", "", "::"},
+        {"Gen<T>", "Gen<T>", "Gen"},
+        {"<T as Trait>::X", "<T as Trait>::X", "<T as Trait>::X"},
+        {"foo::Bar<'a, T>", "foo::Bar<'a, T>", "foo::Bar"},
+        {"x<", "x<", "x"},
+        {"", "", ""},
+    };
+    for (size_t i = 0; i < sizeof(texts) / sizeof(texts[0]); i++) {
+        char buf[64];
+        snprintf(buf, sizeof(buf), "%s", texts[i].in);
+        cbm_rust_path_strip_turbofish(buf);
+        ASSERT_STR_EQ(texts[i].turbofish, buf);
+        snprintf(buf, sizeof(buf), "%s", texts[i].in);
+        cbm_rust_path_strip_impl_args(buf);
+        ASSERT_STR_EQ(texts[i].impl_args, buf);
+    }
+    cbm_rust_path_strip_turbofish(NULL);
+    cbm_rust_path_strip_impl_args(NULL);
+
+    cbm_arena_destroy(&arena);
+    PASS();
+}
+
 void suite_rust_lsp(void) {
     /* Free function dispatch */
     RUN_TEST(rustlsp_free_function_call);
@@ -7386,4 +7624,8 @@ void suite_rust_lsp(void) {
 
     /* FOLLOWUP B: eval-step hardening */
     RUN_TEST(rustlsp_followup_b_pathological_no_hang);
+
+    /* Scoped paths: rust_path.rs */
+    RUN_TEST(rustlsp_scoped_path_resolution);
+    RUN_TEST(rustlsp_scoped_path_helpers);
 }
