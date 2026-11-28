@@ -16628,6 +16628,45 @@ TEST(clsp_field_lookup_rust_matches_c) {
     PASS();
 }
 
+TEST(clsp_field_lookup_arena_fallback_matches_c) {
+    enum { STACK_KEY_SIZE = 1024, STACK_MODULE_LEN = STACK_KEY_SIZE - sizeof(".T") };
+    CBMArena arena;
+    cbm_arena_init(&arena);
+    CBMArena closed = {0};
+    const char *fields[] = {"count", NULL};
+
+    for (size_t len = STACK_MODULE_LEN; len <= STACK_MODULE_LEN + 1; len++) {
+        char module[STACK_MODULE_LEN + 2];
+        memset(module, 'm', len);
+        module[len] = '\0';
+        const char *fallback = cbm_arena_sprintf(&arena, "%s.nested.T", module);
+        const char *exact = cbm_arena_sprintf(&arena, "%s.T", module);
+        ASSERT_NOT_NULL(fallback);
+        ASSERT_NOT_NULL(exact);
+
+        // The unfinalized registry scans the first local short-name match.
+        CBMTypeRegistry registry;
+        cbm_registry_init(&registry, &arena);
+        c_field_parity_add(&registry, fallback, "T", fields, NULL, NULL, NULL);
+        c_field_parity_add(&registry, exact, "T", fields, NULL, NULL, NULL);
+
+        for (int closed_arena = 0; closed_arena < 2; closed_arena++) {
+            CBMArena *lookup_arena = closed_arena ? &closed : &arena;
+            const CBMRegisteredType *c_owner = cbm_c_lsp_test_field_lookup(
+                lookup_arena, &registry, module, NULL, 0, "T", "count", NULL, true);
+            const CBMRegisteredType *rust_owner = cbm_c_lsp_test_field_lookup(
+                lookup_arena, &registry, module, NULL, 0, "T", "count", NULL, false);
+            ASSERT(c_owner == rust_owner);
+            ASSERT_NOT_NULL(rust_owner);
+            ASSERT_STR_EQ(rust_owner->qualified_name,
+                          closed_arena && len > STACK_MODULE_LEN ? fallback : exact);
+        }
+    }
+
+    cbm_arena_destroy(&arena);
+    PASS();
+}
+
 TEST(clsp_c_preprocessed_coordinate_collision_isolated) {
     /* The raw fp call and macro-hidden expanded fp call both occupy 180:186
      * (comment payload sized against the preprocessed buffer's spacing), but
@@ -17369,6 +17408,7 @@ SUITE(c_lsp) {
     RUN_TEST(clsp_cuda_preprocessed_coordinate_collision_isolated);
     RUN_TEST(clsp_cpp_field_dispatch_preserves_raw_and_expanded_spans);
     RUN_TEST(clsp_field_lookup_rust_matches_c);
+    RUN_TEST(clsp_field_lookup_arena_fallback_matches_c);
     RUN_TEST(clsp_preprocessed_destructor_rewrite_respects_origin_during_rewrite);
     RUN_TEST(clsp_tier2_shared_registry_readonly_c);
     RUN_TEST(clsp_tier2_shared_registry_readonly_cpp);
