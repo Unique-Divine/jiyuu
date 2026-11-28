@@ -8773,6 +8773,8 @@ static bool prepare_config_parent(const char *path) {
     return cbm_mkdir_p_ex(parent, CLI_OCTAL_PERM, CBM_MKDIR_FOLLOW_OWNED);
 }
 
+/* Keep this ABI in sync with tiered_profiles/native.rs. The installer owns the
+ * plan and error counters used by these callbacks. */
 typedef struct {
     const char *label;
     const char *verify_path;
@@ -8782,14 +8784,79 @@ typedef struct {
     bool force_handoff;
 } cbm_tiered_profile_set_t;
 
-static void install_tiered_agent_profiles(cbm_tiered_profile_set_t profiles, bool dry_run);
-static void uninstall_tiered_agent_profiles(cbm_tiered_profile_set_t profiles, bool dry_run);
+typedef enum {
+    TIERED_PROFILE_PLAN,
+    TIERED_PROFILE_PREVIEW_INSTALL,
+    TIERED_PROFILE_INSTALL,
+    TIERED_PROFILE_PREVIEW_UNINSTALL,
+    TIERED_PROFILE_UNINSTALL,
+} tiered_profile_action_t;
+
+typedef struct {
+    void (*record_plan)(const char *agent, const char *kind, const char *path);
+    void (*record_error)(bool uninstalling, const char *agent, const char *operation,
+                         const char *path);
+    bool (*prepare_parent)(const char *path);
+    void (*free_rendered)(void *content);
+} tiered_profile_services_t;
+
+extern void cbm_rust_tiered_profiles(const cbm_tiered_profile_set_t *profiles,
+                                    const tiered_profile_services_t *services,
+                                    tiered_profile_action_t action, bool prompts, FILE *out);
+
+static void free_rendered_profile(void *content) {
+    free(content);
+}
+
+static const tiered_profile_services_t tiered_profile_services = {
+    .record_plan = plan_record,
+    .record_error = record_agent_config_error,
+    .prepare_parent = prepare_config_parent,
+    .free_rendered = free_rendered_profile,
+};
+
+static tiered_profile_action_t tiered_profile_install_action(bool dry_run) {
+    return g_install_plan ? TIERED_PROFILE_PLAN
+                          : (dry_run ? TIERED_PROFILE_PREVIEW_INSTALL : TIERED_PROFILE_INSTALL);
+}
+
+static void install_tiered_agent_profiles(cbm_tiered_profile_set_t profiles, bool dry_run) {
+    cbm_rust_tiered_profiles(&profiles, &tiered_profile_services,
+                            tiered_profile_install_action(dry_run), false, stdout);
+}
+
+static void uninstall_tiered_agent_profiles(cbm_tiered_profile_set_t profiles, bool dry_run) {
+    cbm_rust_tiered_profiles(&profiles, &tiered_profile_services,
+                            dry_run ? TIERED_PROFILE_PREVIEW_UNINSTALL : TIERED_PROFILE_UNINSTALL,
+                            false, stdout);
+}
+
 static void install_tiered_profile_prompts(const char *label, const char *verify_path,
                                            cbm_graph_profile_dialect_t dialect,
-                                           const char *legacy_verify_content, bool dry_run);
+                                           const char *legacy_verify_content, bool dry_run) {
+    cbm_tiered_profile_set_t profiles = {
+        .label = label,
+        .verify_path = verify_path,
+        .legacy_verify_content = legacy_verify_content,
+        .dialect = dialect,
+    };
+    cbm_rust_tiered_profiles(&profiles, &tiered_profile_services,
+                            tiered_profile_install_action(dry_run), true, stdout);
+}
+
 static void uninstall_tiered_profile_prompts(const char *label, const char *verify_path,
                                              cbm_graph_profile_dialect_t dialect,
-                                             const char *legacy_verify_content, bool dry_run);
+                                             const char *legacy_verify_content, bool dry_run) {
+    cbm_tiered_profile_set_t profiles = {
+        .label = label,
+        .verify_path = verify_path,
+        .legacy_verify_content = legacy_verify_content,
+        .dialect = dialect,
+    };
+    cbm_rust_tiered_profiles(&profiles, &tiered_profile_services,
+                            dry_run ? TIERED_PROFILE_PREVIEW_UNINSTALL : TIERED_PROFILE_UNINSTALL,
+                            true, stdout);
+}
 
 static int remove_claude_owned_hook_scripts(const char *config_dir, const char *binary_path,
                                             bool uninstall) {
@@ -9463,277 +9530,6 @@ static void install_codex_skill(const char *home, const char *config_dir, bool f
     if (remove_legacy && cbm_remove_codex_managed_skill(paths.legacy_dir, paths.legacy_file, false,
                                                         false, "legacy_skill_cleanup")) {
         printf("  legacy Codex skill: %s (removed)\n", paths.legacy_file);
-    }
-}
-
-/* Derive tier siblings only from the exact shipped Verify basename. This keeps
- * vendor-specific suffixes such as .agent.md, .toml, and .json intact. */
-static int cbm_tiered_profile_path(const char *verify_path, cbm_graph_tier_t tier, char *output,
-                                   size_t output_size) {
-    static const char verify_basename[] = "codebase-memory";
-    if (!verify_path || !verify_path[0] || !output || output_size == 0U) {
-        return CLI_ERR;
-    }
-    const char *basename = strrchr(verify_path, '/');
-    const char *backslash = strrchr(verify_path, '\\');
-    if (backslash && (!basename || backslash > basename)) {
-        basename = backslash;
-    }
-    basename = basename ? basename + 1U : verify_path;
-    size_t verify_len = strlen(verify_basename);
-    if (strncmp(basename, verify_basename, verify_len) != 0 || basename[verify_len] != '.') {
-        return CLI_ERR;
-    }
-    const char *slug = cbm_graph_tier_slug(tier);
-    if (!slug) {
-        return CLI_ERR;
-    }
-    const char *suffix = basename + verify_len;
-    size_t directory_len = (size_t)(basename - verify_path);
-    size_t slug_len = strlen(slug);
-    size_t suffix_len = strlen(suffix);
-    if (directory_len >= output_size || slug_len > output_size - directory_len - 1U ||
-        suffix_len > output_size - directory_len - slug_len - 1U) {
-        return CLI_ERR;
-    }
-    memcpy(output, verify_path, directory_len);
-    memcpy(output + directory_len, slug, slug_len);
-    memcpy(output + directory_len + slug_len, suffix, suffix_len + 1U);
-    return CLI_OK;
-}
-
-static cbm_graph_access_t cbm_tiered_profile_access(cbm_graph_profile_dialect_t dialect) {
-    return cbm_graph_dialect_direct_capable(dialect) ? CBM_GRAPH_ACCESS_DIRECT
-                                                     : CBM_GRAPH_ACCESS_HANDOFF;
-}
-
-static cbm_graph_access_t cbm_tiered_profile_set_access(cbm_tiered_profile_set_t profiles) {
-    return !profiles.force_handoff && cbm_graph_dialect_direct_capable(profiles.dialect)
-               ? CBM_GRAPH_ACCESS_DIRECT
-               : CBM_GRAPH_ACCESS_HANDOFF;
-}
-
-/* Every earlier rendering of one tier's profile that install/uninstall must
- * still recognise as ours: the other access mode, both access modes under the
- * names used before the Mori rename, the v0.9.1-rc.1 Codex shape, the
- * pre-tier Verify file, and the v0.10.8 OpenCode shape (#2264). */
-typedef struct {
-    char *owned[6];
-    size_t owned_count;
-    const char *content[7];
-    size_t count;
-} tiered_released_profiles_t;
-
-static void tiered_released_profiles_keep(tiered_released_profiles_t *released, char *rendered) {
-    if (rendered) {
-        released->owned[released->owned_count++] = rendered;
-        released->content[released->count++] = rendered;
-    }
-}
-
-static void tiered_released_profiles_collect(cbm_tiered_profile_set_t profiles,
-                                             cbm_graph_tier_t tier, cbm_graph_access_t access,
-                                             tiered_released_profiles_t *released) {
-    memset(released, 0, sizeof(*released));
-    cbm_graph_access_t alternate_access =
-        access == CBM_GRAPH_ACCESS_DIRECT ? CBM_GRAPH_ACCESS_HANDOFF : CBM_GRAPH_ACCESS_DIRECT;
-    tiered_released_profiles_keep(
-        released,
-        cbm_render_graph_profile(profiles.dialect, tier, alternate_access, profiles.binary_path));
-    tiered_released_profiles_keep(
-        released,
-        cbm_render_graph_profile_legacy(profiles.dialect, tier, access, profiles.binary_path));
-    tiered_released_profiles_keep(released, cbm_render_graph_profile_legacy(profiles.dialect, tier,
-                                                                            alternate_access,
-                                                                            profiles.binary_path));
-    if (profiles.dialect == CBM_GRAPH_DIALECT_CODEX && access == CBM_GRAPH_ACCESS_DIRECT) {
-        tiered_released_profiles_keep(released, cbm_render_graph_profile_codex_rc1(tier));
-    }
-    if (profiles.dialect == CBM_GRAPH_DIALECT_OPENCODE) {
-        tiered_released_profiles_keep(released,
-                                      cbm_render_graph_profile_opencode_v0108(tier, access));
-        tiered_released_profiles_keep(
-            released, cbm_render_graph_profile_opencode_v0108(tier, alternate_access));
-    }
-    if (tier == CBM_GRAPH_TIER_VERIFY && profiles.legacy_verify_content) {
-        released->content[released->count++] = profiles.legacy_verify_content;
-    }
-}
-
-static void tiered_released_profiles_free(tiered_released_profiles_t *released) {
-    for (size_t i = 0U; i < released->owned_count; i++) {
-        free(released->owned[i]);
-    }
-    released->owned_count = 0U;
-    released->count = 0U;
-}
-
-static void install_tiered_agent_profiles(cbm_tiered_profile_set_t profiles, bool dry_run) {
-    cbm_graph_access_t access = cbm_tiered_profile_set_access(profiles);
-    for (int value = 0; value < (int)CBM_GRAPH_TIER_COUNT; value++) {
-        cbm_graph_tier_t tier = (cbm_graph_tier_t)value;
-        char path[CLI_BUF_1K];
-        if (cbm_tiered_profile_path(profiles.verify_path, tier, path, sizeof(path)) != CLI_OK) {
-            record_agent_config_error(false, profiles.label, "agent_path", profiles.verify_path);
-            continue;
-        }
-        if (g_install_plan) {
-            plan_record(profiles.label, "agent", path);
-            continue;
-        }
-        if (dry_run) {
-            printf("  agent: %s\n", path);
-            continue;
-        }
-        char *current =
-            cbm_render_graph_profile(profiles.dialect, tier, access, profiles.binary_path);
-        if (!current) {
-            record_agent_config_error(false, profiles.label, "agent_render", path);
-            continue;
-        }
-        tiered_released_profiles_t released;
-        tiered_released_profiles_collect(profiles, tier, access, &released);
-        int result =
-            prepare_config_parent(path)
-                ? cbm_text_migrate_owned_document(path, current, released.content, released.count)
-                : CLI_ERR;
-        tiered_released_profiles_free(&released);
-        free(current);
-        if (result != CLI_OK) {
-            if (result > CLI_OK) {
-                printf("  agent: preserved modified profile %s\n", path);
-            }
-            record_agent_config_error(false, profiles.label, "agent_install", path);
-            continue;
-        }
-        printf("  agent: %s\n", path);
-    }
-}
-
-static void uninstall_tiered_agent_profiles(cbm_tiered_profile_set_t profiles, bool dry_run) {
-    cbm_graph_access_t access = cbm_tiered_profile_set_access(profiles);
-    for (int value = 0; value < (int)CBM_GRAPH_TIER_COUNT; value++) {
-        cbm_graph_tier_t tier = (cbm_graph_tier_t)value;
-        char path[CLI_BUF_1K];
-        if (cbm_tiered_profile_path(profiles.verify_path, tier, path, sizeof(path)) != CLI_OK) {
-            record_agent_config_error(true, profiles.label, "agent_path", profiles.verify_path);
-            continue;
-        }
-        if (dry_run) {
-            printf("  %s agent: would remove owned profile %s\n", profiles.label, path);
-            continue;
-        }
-        char *current =
-            cbm_render_graph_profile(profiles.dialect, tier, access, profiles.binary_path);
-        if (!current) {
-            record_agent_config_error(true, profiles.label, "agent_render", path);
-            continue;
-        }
-        tiered_released_profiles_t released;
-        tiered_released_profiles_collect(profiles, tier, access, &released);
-        int result =
-            cbm_text_remove_owned_document_any(path, current, released.content, released.count);
-        tiered_released_profiles_free(&released);
-        free(current);
-        if (result < CLI_OK) {
-            record_agent_config_error(true, profiles.label, "agent_uninstall", path);
-        } else if (result > CLI_OK) {
-            printf("  %s agent: preserved modified profile %s\n", profiles.label, path);
-        } else {
-            printf("  %s agent: removed owned profile %s\n", profiles.label, path);
-        }
-    }
-}
-
-static void install_tiered_profile_prompts(const char *label, const char *verify_path,
-                                           cbm_graph_profile_dialect_t dialect,
-                                           const char *legacy_verify_content, bool dry_run) {
-    cbm_graph_access_t access = cbm_tiered_profile_access(dialect);
-    for (int value = 0; value < (int)CBM_GRAPH_TIER_COUNT; value++) {
-        cbm_graph_tier_t tier = (cbm_graph_tier_t)value;
-        char path[CLI_BUF_1K];
-        if (cbm_tiered_profile_path(verify_path, tier, path, sizeof(path)) != CLI_OK) {
-            record_agent_config_error(false, label, "prompt_path", verify_path);
-            continue;
-        }
-        if (g_install_plan) {
-            plan_record(label, "prompt", path);
-            continue;
-        }
-        if (dry_run) {
-            printf("  prompt: %s\n", path);
-            continue;
-        }
-        char *current = cbm_render_graph_prompt(tier, access);
-        if (!current) {
-            record_agent_config_error(false, label, "prompt_render", path);
-            continue;
-        }
-        /* The prompt as releases before the Mori rename wrote it is ours too. */
-        char *legacy = cbm_render_graph_prompt_legacy(tier, access);
-        const char *released[2];
-        size_t released_count = 0U;
-        if (legacy) {
-            released[released_count++] = legacy;
-        }
-        if (tier == CBM_GRAPH_TIER_VERIFY && legacy_verify_content) {
-            released[released_count++] = legacy_verify_content;
-        }
-        int result = prepare_config_parent(path)
-                         ? cbm_text_migrate_owned_document(path, current, released, released_count)
-                         : CLI_ERR;
-        free(legacy);
-        free(current);
-        if (result != CLI_OK) {
-            if (result > CLI_OK) {
-                printf("  prompt: preserved modified profile %s\n", path);
-            }
-            record_agent_config_error(false, label, "prompt_install", path);
-            continue;
-        }
-        printf("  prompt: %s\n", path);
-    }
-}
-
-static void uninstall_tiered_profile_prompts(const char *label, const char *verify_path,
-                                             cbm_graph_profile_dialect_t dialect,
-                                             const char *legacy_verify_content, bool dry_run) {
-    cbm_graph_access_t access = cbm_tiered_profile_access(dialect);
-    for (int value = 0; value < (int)CBM_GRAPH_TIER_COUNT; value++) {
-        cbm_graph_tier_t tier = (cbm_graph_tier_t)value;
-        char path[CLI_BUF_1K];
-        if (cbm_tiered_profile_path(verify_path, tier, path, sizeof(path)) != CLI_OK) {
-            record_agent_config_error(true, label, "prompt_path", verify_path);
-            continue;
-        }
-        if (dry_run) {
-            printf("  %s prompt: would remove owned profile %s\n", label, path);
-            continue;
-        }
-        char *current = cbm_render_graph_prompt(tier, access);
-        if (!current) {
-            record_agent_config_error(true, label, "prompt_render", path);
-            continue;
-        }
-        char *legacy = cbm_render_graph_prompt_legacy(tier, access);
-        const char *released[2];
-        size_t released_count = 0U;
-        if (legacy) {
-            released[released_count++] = legacy;
-        }
-        if (tier == CBM_GRAPH_TIER_VERIFY && legacy_verify_content) {
-            released[released_count++] = legacy_verify_content;
-        }
-        int result = cbm_text_remove_owned_document_any(path, current, released, released_count);
-        free(legacy);
-        free(current);
-        if (result < CLI_OK) {
-            record_agent_config_error(true, label, "prompt_uninstall", path);
-        } else if (result > CLI_OK) {
-            printf("  %s prompt: preserved modified profile %s\n", label, path);
-        } else {
-            printf("  %s prompt: removed owned profile %s\n", label, path);
-        }
     }
 }
 
