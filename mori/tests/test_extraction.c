@@ -8,7 +8,9 @@
 #include "test_framework.h"
 #include "cbm.h"
 #include "doclink.h"
+#include "foundation/mem_core.h"
 #include "foundation/platform.h"
+#include "foundation/slab_alloc.h"
 #include "foundation/constants.h"     /* CBM_SZ_* */
 #include "preprocessor.h"             /* cbm_export_macro_candidates (#1989) */
 #include "../src/foundation/compat.h" /* cbm_clock_gettime (wide-flat scaling guard) */
@@ -26,7 +28,9 @@
 #include "pipeline/worker_pool.h"            /* CBM_WORKER_STACK_SIZE */
 #include "../src/foundation/compat_thread.h" /* cbm_thread_create */
 #if !defined(_WIN32)
+#include <signal.h>
 #include <sys/wait.h> /* fork/waitpid */
+#include <unistd.h>
 #endif
 
 /* ── Helpers ───────────────────────────────────────────────────── */
@@ -15859,9 +15863,34 @@ TEST(extraction_marker_round_trips_non_ascii_environment_path) {
 }
 #endif
 
+#if !defined(_WIN32) && defined(CBM_MEM_TEST_API) && CBM_MEM_TEST_API
+extern void *(*ts_current_malloc)(size_t);
+
+TEST(extraction_tree_sitter_slab_malloc_aborts_on_failure) {
+    const size_t heap_size = 128; /* Above the 64-byte slab threshold. */
+    pid_t child = fork();
+    ASSERT_GTE(child, 0);
+    if (child == 0) {
+        cbm_slab_install();
+        cbm_mem_test_fail_alloc_size(CBM_MEM_CLASS_TS_TREE, heap_size);
+        (void)ts_current_malloc(heap_size);
+        _exit(0);
+    }
+
+    int status = 0;
+    ASSERT_EQ(waitpid(child, &status, 0), child);
+    ASSERT_TRUE(WIFSIGNALED(status));
+    ASSERT_EQ(WTERMSIG(status), SIGABRT);
+    PASS();
+}
+#endif
+
 SUITE(extraction) {
 #ifdef _WIN32
     RUN_TEST(extraction_marker_round_trips_non_ascii_environment_path);
+#endif
+#if !defined(_WIN32) && defined(CBM_MEM_TEST_API) && CBM_MEM_TEST_API
+    RUN_TEST(extraction_tree_sitter_slab_malloc_aborts_on_failure);
 #endif
     RUN_TEST(extract_compact_keeps_every_field_and_shrinks_the_arena);
     RUN_TEST(extract_compact_is_idempotent_and_survives_empty_results);
