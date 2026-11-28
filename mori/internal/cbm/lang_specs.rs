@@ -4724,3 +4724,7 @@ pub extern "C" fn cbm_ts_language(lang: c_int) -> *const RawLanguage {
         None => ptr::null(),
     }
 }
+
+#[cfg(all(test, feature = "c-backend"))]
+#[path = "lang_specs_tests.rs"]
+mod tests;

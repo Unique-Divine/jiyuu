@@ -9469,7 +9469,7 @@ static bool elixir_node_text_is(TSNode n, const char *source, const char *lit) {
 /* Elixir has no branching NODE TYPES. `if`, `unless`, `case`, `cond`, `with`,
  * `for`, `try` and `receive` are ordinary `call` nodes told apart only by the
  * identifier in callee position, and every case/cond/fn/rescue arm is a
- * `stab_clause`. lang_specs.c cannot express that — the Elixir branch table is
+ * `stab_clause`. lang_specs.rs cannot express that — the Elixir branch table is
  * `{"call"}`, which would score every function call as a decision — and
  * cbm_compute_complexity matches on node type, so the generic path is unusable
  * and every Elixir function shipped complexity 0.

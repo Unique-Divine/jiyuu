@@ -427,7 +427,6 @@ EXTRACTION_SRCS = \
     $(CBM_DIR)/cpp_branch_views.c \
     $(CBM_DIR)/result_compact.c \
     $(CBM_DIR)/result_spill.c \
-    $(CBM_DIR)/lang_specs.c \
     $(CBM_DIR)/macro_table.c \
     $(CBM_DIR)/iris_export_xml.c \
     $(CBM_DIR)/service_patterns.c \
@@ -791,7 +790,6 @@ TEST_FOUNDATION_SRCS = \
 
 TEST_EXTRACTION_SRCS = \
     tests/test_extraction.c \
-    tests/test_lang_specs.c \
     tests/test_callable_sig.c \
     tests/test_test_conventions.c \
     tests/test_extraction_inheritance.c \

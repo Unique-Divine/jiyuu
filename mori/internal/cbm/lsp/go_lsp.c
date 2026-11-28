@@ -3320,7 +3320,7 @@ static void extract_type_params_from_ast(CBMArena *arena, CBMTypeRegistry *reg, 
     cbm_arena_destroy(&func_rows.arena);
 }
 
-// Forward: tree-sitter Go language (from lang_specs.c)
+// Forward: tree-sitter Go language (from the vendored grammar object)
 extern const TSLanguage *tree_sitter_go(void);
 
 void cbm_run_go_lsp_cross(CBMArena *arena, const char *source, int source_len,

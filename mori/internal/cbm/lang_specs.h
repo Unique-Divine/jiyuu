@@ -65,12 +65,4 @@ const CBMLangSpec *cbm_lang_spec(CBMLanguage lang);
 // These resolve at link time to grammar symbols from Go tree-sitter modules.
 const TSLanguage *cbm_ts_language(CBMLanguage lang);
 
-#ifdef CBM_ENABLE_TEST_SEAMS
-// The C tables in lang_specs.c, kept for the parity test against the Rust
-// tables in lang_specs.rs that serve the three accessors above.
-const CBMLangSpec *cbm_c_reference_lang_spec(CBMLanguage lang);
-const TSLanguage *cbm_c_reference_ts_language(CBMLanguage lang);
-const char **cbm_c_reference_conditional_block_types(CBMLanguage lang);
-#endif
-
 #endif // CBM_LANG_SPECS_H
