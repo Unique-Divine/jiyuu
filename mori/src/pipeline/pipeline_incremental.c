@@ -2090,7 +2090,7 @@ static int incr_file_run_step(incremental_file_run_t *run, incremental_file_phas
     case INCR_DOC_LINKS:
         return cbm_pipeline_pass_doc_links(run->ctx, run->files, run->count);
     case INCR_TESTS:
-        return cbm_pipeline_pass_tests(run->ctx, run->files, run->count);
+        return mori_pipeline_pass_tests(run->ctx->gbuf, run->ctx->project_name);
     case INCR_DECORATOR_TAGS:
         return cbm_pipeline_pass_decorator_tags(run->ctx->gbuf, run->project);
     case INCR_CONFIGLINK:
@@ -2104,7 +2104,7 @@ static int incr_file_run_step(incremental_file_run_t *run, incremental_file_phas
     case INCR_SEMANTIC_EDGES:
         return cbm_pipeline_pass_semantic_edges(run->ctx);
     case INCR_IMPORTANCE:
-        cbm_pipeline_pass_importance(run->ctx);
+        mori_pipeline_pass_importance(run->ctx->gbuf);
         return 0;
     }
     return CBM_NOT_FOUND;

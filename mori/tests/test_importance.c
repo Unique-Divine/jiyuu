@@ -1,5 +1,5 @@
 /*
- * test_importance.c — index-time per-symbol importance score (pass_importance.c).
+ * test_importance.c — index-time per-symbol importance score (importance.rs).
  *
  * Formula under test:
  *   importance = sqrt(num_refs) * priv * generic * distinct * test_penalty
@@ -71,14 +71,7 @@ static int imp_key_count(const char *json) {
 }
 
 static void imp_run_pass(cbm_gbuf_t *gb) {
-    atomic_int cancelled = 0;
-    cbm_pipeline_ctx_t ctx = {
-        .project_name = "test-proj",
-        .repo_path = "/tmp/test",
-        .gbuf = gb,
-        .cancelled = &cancelled,
-    };
-    cbm_pipeline_pass_importance(&ctx);
+    mori_pipeline_pass_importance(gb);
 }
 
 /* Every stored node of the given label must carry exactly `expect` copies of

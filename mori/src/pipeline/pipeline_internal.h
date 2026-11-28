@@ -1362,7 +1362,14 @@ int cbm_pipeline_pass_usages(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t *fil
 int cbm_pipeline_pass_semantic(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t *files,
                                int file_count);
 
-int cbm_pipeline_pass_tests(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t *files, int file_count);
+/* TESTS and TESTS_FILE edges (test_edges.rs). Reads CALLS edges, so it runs
+ * after the calls pass. `project` names the File QNs it looks up. Returns 0.
+ * The test-path and test-name rules it exports (cbm_is_test_path,
+ * cbm_is_test_func_name, cbm_node_is_test, cbm_pipeline_caller_is_test)
+ * also live in Rust; test_edges.rs hardcodes CBM_LANG_PYTHON. */
+int mori_pipeline_pass_tests(cbm_gbuf_t *gb, const char *project);
+_Static_assert(sizeof(CBMLanguage) == sizeof(int) && CBM_LANG_PYTHON == 1,
+               "test_edges.rs language ABI");
 
 int cbm_pipeline_pass_githistory(cbm_pipeline_ctx_t *ctx);
 
@@ -1600,7 +1607,7 @@ void cbm_pipeline_pass_complexity(cbm_pipeline_ctx_t *ctx);
  * earlier would see zero TESTS edges and num_refs = 0 everywhere. It is
  * therefore registered last in run_predump_passes and last in the incremental
  * post-pass sequence. */
-void cbm_pipeline_pass_importance(cbm_pipeline_ctx_t *ctx);
+void mori_pipeline_pass_importance(cbm_gbuf_t *gb);
 
 /* Gathered inputs for one symbol. Each scoring route fills this its own way
  * (gbuf lookups, or SQL aggregates) and then calls the ONE rule below. */
@@ -1612,12 +1619,7 @@ typedef struct {
     bool tests_target;       /* has an incoming TESTS edge */
 } cbm_importance_inputs_t;
 
-/* Both gathering routes use the same scorer. Register a replacement before
- * any indexing worker starts. The C build uses the native rule by default. */
-typedef double (*cbm_importance_scorer_fn)(int num_refs, int name_distinct_files,
-                                           bool private_name, bool distinctive_name,
-                                           bool test_scaffolding);
-void cbm_pipeline_set_importance_scorer(cbm_importance_scorer_fn scorer);
+/* Both gathering routes use this one rule (importance.rs). */
 double cbm_pipeline_importance_score(const cbm_importance_inputs_t *in);
 
 /* Produce a copy of `json` with the numeric "importance" key set to `score`,
@@ -1654,6 +1656,23 @@ extern _Atomic uint64_t g_importance_name_visits;
 /* Rows rescored by the SQL-level store recompute. Lets a test prove the
  * closure-delta route actually took that path instead of passing vacuously. */
 extern _Atomic uint64_t g_importance_store_rows;
+
+#if defined(CBM_ENABLE_TEST_SEAMS) && CBM_ENABLE_TEST_SEAMS
+/* The C references for the TESTS and importance passes (pass_tests.c,
+ * pass_importance.c), kept for the Rust parity suite. */
+bool cbm_node_is_test_c_ref(const cbm_gbuf_node_t *n);
+bool cbm_pipeline_caller_is_test_c_ref(const cbm_gbuf_node_t *source, const char *rel,
+                                       CBMLanguage lang);
+bool cbm_is_test_path_c_ref(const char *path);
+bool cbm_is_test_func_name_c_ref(const char *name);
+int cbm_pipeline_pass_tests_c_ref(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t *files,
+                                  int file_count);
+void cbm_pipeline_pass_importance_c_ref(cbm_pipeline_ctx_t *ctx);
+double cbm_pipeline_importance_score_c_ref(const cbm_importance_inputs_t *in);
+char *cbm_pipeline_importance_set_prop_c_ref(const char *json, double score);
+void cbm_pipeline_importance_append_prop_c_ref(cbm_gbuf_node_t *node, double score);
+int cbm_pipeline_importance_recompute_store_c_ref(cbm_store_t *store, const char *project);
+#endif
 
 /* Work counters of the infra resolvers, gated by the complexity suite:
  * candidate objects the K8s pass examines for references, selectors and

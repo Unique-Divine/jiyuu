@@ -43,10 +43,6 @@ mod trace_predecessor;
 mod index_route;
 
 #[cfg(any(feature = "c-backend", test))]
-#[path = "pipeline/importance.rs"]
-mod importance;
-
-#[cfg(any(feature = "c-backend", test))]
 #[path = "../internal/cbm/lsp/go_results.rs"]
 mod go_results;
 

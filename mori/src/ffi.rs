@@ -295,7 +295,6 @@ pub unsafe extern "C" fn main(argc: c_int, argv: *mut *mut c_char) -> c_int {
         {
             jiyuu_mori::mori_register_ts_static_imports();
         }
-        crate::importance::register();
         crate::go_results::register();
         crate::query_cli::c_args::register();
         crate::cli_output::register();

@@ -1,5 +1,11 @@
 /*
- * pass_tests.c — Create TESTS edges from test functions to production functions.
+ * pass_tests.c — The C reference for the TESTS pass (test_edges.rs).
+ *
+ * Production runs mori_pipeline_pass_tests and the test rules exported from
+ * Rust. This copy stays compiled only in test-seam builds, under _c_ref
+ * names, so the parity suite can compare the two on the same graphs.
+ *
+ * Create TESTS edges from test functions to production functions.
  *
  * Scans CALLS edges in the graph buffer: if the source function has
  * is_test=true and the target does not, creates a TESTS edge.
@@ -36,6 +42,8 @@ enum {
 #include <stdlib.h>
 #include <string.h>
 
+#if defined(CBM_ENABLE_TEST_SEAMS) && CBM_ENABLE_TEST_SEAMS
+
 static const char *itoa_log(int val) {
     static char bufs[PT_RING][CBM_SZ_32];
     static int idx = 0;
@@ -46,15 +54,16 @@ static const char *itoa_log(int val) {
 }
 
 /* Check if a node has is_test:true in its properties JSON. */
-bool cbm_node_is_test(const cbm_gbuf_node_t *n) {
+bool cbm_node_is_test_c_ref(const cbm_gbuf_node_t *n) {
     if (!n || !n->properties_json) {
         return false;
     }
     return strstr(n->properties_json, "\"is_test\":true") != NULL;
 }
 
-bool cbm_pipeline_caller_is_test(const cbm_gbuf_node_t *source, const char *rel, CBMLanguage lang) {
-    return cbm_node_is_test(source) || cbm_is_test_file(rel, lang) ||
+bool cbm_pipeline_caller_is_test_c_ref(const cbm_gbuf_node_t *source, const char *rel,
+                                       CBMLanguage lang) {
+    return cbm_node_is_test_c_ref(source) || cbm_is_test_file(rel, lang) ||
            cbm_registry_test_double_path(rel);
 }
 
@@ -65,7 +74,7 @@ static bool str_ends_with(const char *s, size_t slen, const char *suffix) {
 }
 
 /* Check if a file path looks like a test file (language-agnostic). */
-bool cbm_is_test_path(const char *path) {
+bool cbm_is_test_path_c_ref(const char *path) {
     if (!path) {
         return false;
     }
@@ -119,7 +128,7 @@ bool cbm_is_test_path(const char *path) {
 }
 
 /* Check if a function name looks like a test function (language-agnostic). */
-bool cbm_is_test_func_name(const char *name) {
+bool cbm_is_test_func_name_c_ref(const char *name) {
     if (!name) {
         return false;
     }
@@ -250,7 +259,7 @@ static const cbm_gbuf_node_t *enclosing_python_test_func(const cbm_gbuf_t *gb,
         }
         if (outer->label &&
             (strcmp(outer->label, "Function") == 0 || strcmp(outer->label, "Method") == 0) &&
-            cbm_is_test_func_name(outer->name)) {
+            cbm_is_test_func_name_c_ref(outer->name)) {
             return outer;
         }
     }
@@ -275,20 +284,20 @@ static int create_tests_edges(cbm_pipeline_ctx_t *ctx) {
             continue;
         }
 
-        bool src_is_test =
-            cbm_node_is_test(src) || (src->file_path && cbm_is_test_path(src->file_path));
+        bool src_is_test = cbm_node_is_test_c_ref(src) ||
+                           (src->file_path && cbm_is_test_path_c_ref(src->file_path));
         if (!src_is_test) {
             continue;
         }
 
-        bool tgt_is_test =
-            cbm_node_is_test(tgt) || (tgt->file_path && cbm_is_test_path(tgt->file_path));
+        bool tgt_is_test = cbm_node_is_test_c_ref(tgt) ||
+                           (tgt->file_path && cbm_is_test_path_c_ref(tgt->file_path));
         if (tgt_is_test) {
             continue;
         }
 
         const cbm_gbuf_node_t *test_src = src;
-        if (!cbm_is_test_func_name(src->name)) {
+        if (!cbm_is_test_func_name_c_ref(src->name)) {
             test_src = enclosing_python_test_func(ctx->gbuf, src);
             if (!test_src) {
                 continue;
@@ -313,7 +322,7 @@ static int create_tests_file_edges(cbm_pipeline_ctx_t *ctx) {
 
     for (int i = 0; i < file_node_count; i++) {
         const cbm_gbuf_node_t *fnode = file_nodes[i];
-        if (!fnode->file_path || !cbm_is_test_path(fnode->file_path)) {
+        if (!fnode->file_path || !cbm_is_test_path_c_ref(fnode->file_path)) {
             continue;
         }
 
@@ -335,7 +344,8 @@ static int create_tests_file_edges(cbm_pipeline_ctx_t *ctx) {
     return count;
 }
 
-int cbm_pipeline_pass_tests(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t *files, int file_count) {
+int cbm_pipeline_pass_tests_c_ref(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t *files,
+                                  int file_count) {
     cbm_log_info("pass.start", "pass", "tests");
     (void)files;
     (void)file_count;
@@ -347,3 +357,5 @@ int cbm_pipeline_pass_tests(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t *file
                  itoa_log(tests_file_count));
     return 0;
 }
+
+#endif /* CBM_ENABLE_TEST_SEAMS */
