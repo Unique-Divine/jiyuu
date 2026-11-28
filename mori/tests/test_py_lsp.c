@@ -16,86 +16,10 @@
 
 /* ── Helpers — same shape as test_go_lsp.c ──────────────────────── */
 
-static CBMFileResult *extract_py_once(const char *source) {
+static CBMFileResult *extract_py(const char *source) {
     return cbm_extract_file(source, (int)strlen(source), CBM_LANG_PYTHON,
                             "test", "main.py", 0, NULL, NULL);
 }
-
-#ifdef CBM_ENABLE_TEST_SEAMS
-/* While the C reference of a Rust Python resolver stays compiled in, every
- * extract_py also extracts with the C reference and returns NULL when the
- * resolved calls, synthetic calls or usages differ, so each test below that
- * extracts a file doubles as a parity case. */
-static bool pyparity_str(const char *what, int i, const char *c, const char *rust) {
-    if (c == rust || (c && rust && strcmp(c, rust) == 0))
-        return true;
-    printf("  parity %s[%d]: C=%s Rust=%s\n", what, i, c ? c : "(null)",
-           rust ? rust : "(null)");
-    return false;
-}
-
-static bool pyparity_int(const char *what, int i, long long c, long long rust) {
-    if (c == rust)
-        return true;
-    printf("  parity %s[%d]: C=%lld Rust=%lld\n", what, i, c, rust);
-    return false;
-}
-
-static bool pyparity_same(const CBMFileResult *c, const CBMFileResult *r) {
-    bool same = pyparity_int("resolved_calls.count", 0, c->resolved_calls.count,
-                             r->resolved_calls.count);
-    for (int i = 0; same && i < c->resolved_calls.count; i++) {
-        const CBMResolvedCall *a = &c->resolved_calls.items[i];
-        const CBMResolvedCall *b = &r->resolved_calls.items[i];
-        same = pyparity_str("caller", i, a->caller_qn, b->caller_qn) &&
-               pyparity_str("callee", i, a->callee_qn, b->callee_qn) &&
-               pyparity_str("strategy", i, a->strategy, b->strategy) &&
-               pyparity_str("reason", i, a->reason, b->reason) &&
-               pyparity_str("callee_sig", i, a->callee_sig, b->callee_sig) &&
-               pyparity_int("confidence", i, (long long)(a->confidence * 1000.0f),
-                            (long long)(b->confidence * 1000.0f)) &&
-               pyparity_int("kind", i, a->kind, b->kind) &&
-               pyparity_int("site_start", i, a->site_start_byte, b->site_start_byte) &&
-               pyparity_int("site_end", i, a->site_end_byte, b->site_end_byte);
-    }
-    same = same && pyparity_int("calls.count", 0, c->calls.count, r->calls.count);
-    for (int i = 0; same && i < c->calls.count; i++) {
-        const CBMCall *a = &c->calls.items[i];
-        const CBMCall *b = &r->calls.items[i];
-        same = pyparity_str("call.callee", i, a->callee_name, b->callee_name) &&
-               pyparity_str("call.caller", i, a->enclosing_func_qn, b->enclosing_func_qn) &&
-               pyparity_int("call.site", i, a->site_start_byte, b->site_start_byte);
-    }
-    same = same && pyparity_int("usages.count", 0, c->usages.count, r->usages.count);
-    for (int i = 0; same && i < c->usages.count; i++) {
-        const CBMUsage *a = &c->usages.items[i];
-        const CBMUsage *b = &r->usages.items[i];
-        same = pyparity_str("usage.name", i, a->ref_name, b->ref_name) &&
-               pyparity_str("usage.caller", i, a->enclosing_func_qn, b->enclosing_func_qn) &&
-               pyparity_int("usage.kind", i, a->kind, b->kind) &&
-               pyparity_int("usage.site", i, a->site_start_byte, b->site_start_byte);
-    }
-    return same && pyparity_int("has_error", 0, c->has_error, r->has_error);
-}
-
-static CBMFileResult *extract_py(const char *source) {
-    cbm_py_lsp_test_use_c_reference(true);
-    CBMFileResult *c = extract_py_once(source);
-    cbm_py_lsp_test_use_c_reference(false);
-    CBMFileResult *r = extract_py_once(source);
-    if (!c != !r || (c && !pyparity_same(c, r))) {
-        printf("  parity mismatch for source:\n%s\n", source);
-        cbm_free_result(r);
-        r = NULL;
-    }
-    cbm_free_result(c);
-    return r;
-}
-#else
-static CBMFileResult *extract_py(const char *source) {
-    return extract_py_once(source);
-}
-#endif
 
 static int find_resolved(const CBMFileResult *r, const char *callerSub, const char *calleeSub) {
     for (int i = 0; i < r->resolved_calls.count; i++) {
@@ -6018,9 +5942,8 @@ TEST(pylsp_callable_value_fixture_extracts) {
 }
 
 
-/* The walk resolver fixture, extracted through both the C reference and
- * Rust by extract_py. */
-TEST(pylsp_walk_fixture_matches_c_reference) {
+/* The walk resolver fixture, extracted under the sanitizers. */
+TEST(pylsp_walk_fixture_extracts) {
     CBMFileResult *r = extract_py(
         "class Vector:\n"
         "    def __add__(self, other):\n"
@@ -6199,7 +6122,7 @@ SUITE(py_lsp) {
     RUN_TEST(pylsp_annotation_cases);
     RUN_TEST(pylsp_invocation_fixture_extracts);
     RUN_TEST(pylsp_callable_value_fixture_extracts);
-    RUN_TEST(pylsp_walk_fixture_matches_c_reference);
+    RUN_TEST(pylsp_walk_fixture_extracts);
     RUN_TEST(pylsp_pep695_generic_class);
     /* Phase 9 — cross-file + batch */
     RUN_TEST(pylsp_crossfile_method_dispatch);
