@@ -3886,7 +3886,8 @@ static CBMFileResult *extract_file_ex_body(const char *source, int source_len, C
                                            const CBMMacroTable *macro_table,
                                            const CBMReturnTypeTable *return_type_table,
                                            CBMArena *scratch,
-                                           const cbm_test_declarations_t *test_declarations) {
+                                           const cbm_test_declarations_t *test_declarations,
+                                           const _Atomic int *cancelled) {
     // Allocate result on heap (arena inside for all string data)
     CBMFileResult *result = cbm_result_alloc();
     if (!result) {
@@ -4194,7 +4195,10 @@ static CBMFileResult *extract_file_ex_body(const char *source, int source_len, C
     uint64_t lsp_start = now_ns();
     if (!result->lsp_skipped) {
         if (language == CBM_LANG_GO) {
-            cbm_run_go_lsp(a, result, source, source_len, root, rel_path);
+            CBMGoResolveStatus status =
+                cbm_run_go_lsp_status(a, result, source, source_len, root, rel_path, cancelled);
+            if (status != CBM_GO_RESOLVE_COMPLETE)
+                result->lsp_skipped = true;
         }
         if (language == CBM_LANG_C || language == CBM_LANG_CPP || language == CBM_LANG_CUDA) {
             if (!cbm_run_c_lsp_with_test_owners(a, result, source, source_len, root,
@@ -4962,6 +4966,17 @@ CBMFileResult *cbm_extract_file_ex_with_tests(
     const char *rel_path, int64_t timeout_micros, const char **extra_defines,
     const char **include_paths, const CBMMacroTable *macro_table,
     const CBMReturnTypeTable *return_type_table, const cbm_test_declarations_t *test_declarations) {
+    return cbm_extract_file_ex_with_tests_cancellable(
+        source, source_len, language, project, rel_path, timeout_micros, extra_defines,
+        include_paths, macro_table, return_type_table, test_declarations, NULL);
+}
+
+CBMFileResult *cbm_extract_file_ex_with_tests_cancellable(
+    const char *source, int source_len, CBMLanguage language, const char *project,
+    const char *rel_path, int64_t timeout_micros, const char **extra_defines,
+    const char **include_paths, const CBMMacroTable *macro_table,
+    const CBMReturnTypeTable *return_type_table, const cbm_test_declarations_t *test_declarations,
+    const _Atomic int *cancelled) {
     CBMArena scratch;
     if (tl_scratch_live && tl_scratch_slot) {
         scratch = *tl_scratch_slot;
@@ -4972,7 +4987,7 @@ CBMFileResult *cbm_extract_file_ex_with_tests(
     }
     CBMFileResult *result = extract_file_ex_body(
         source, source_len, language, project, rel_path, timeout_micros, extra_defines,
-        include_paths, macro_table, return_type_table, &scratch, test_declarations);
+        include_paths, macro_table, return_type_table, &scratch, test_declarations, cancelled);
     /* Even early parse/quarantine exits publish conservative Python metadata.
      * No tree is reparsed, and existing best-effort extraction flags stay intact. */
     if (result && language == CBM_LANG_PYTHON &&

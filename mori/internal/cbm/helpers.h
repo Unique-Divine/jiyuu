@@ -197,7 +197,7 @@ char *cbm_cpp_out_of_line_parent_class(CBMArena *a, TSNode node, const char *sou
  * receiver type_identifier (unwrapping pointer_type / generic_type). Shared by
  * def extraction (extract_defs.c) and call-scope attribution
  * (extract_unified.c) so the receiver-qualified method QN has ONE formula. */
-char *cbm_go_receiver_type_name(CBMArena *a, TSNode recv, const char *source);
+char *cbm_go_receiver_type_name(CBMArena *a, TSNode recv, const char *source, int source_len);
 
 // Find a child node by kind string.
 TSNode cbm_find_child_by_kind(TSNode parent, const char *kind);
@@ -322,7 +322,7 @@ bool cbm_is_module_level_p(TSNode parent, CBMLanguage lang);
  * for the def extractor, compute_func_qn and the Go LSP's enclosing-function
  * QN. A NULL base_qn or rel_path returns base_qn unchanged. */
 const char *cbm_go_init_qn(CBMArena *a, const char *base_qn, const char *rel_path, TSNode fn_node,
-                           const char *source);
+                           const char *source, int source_len);
 
 // --- FQN computation ---
 

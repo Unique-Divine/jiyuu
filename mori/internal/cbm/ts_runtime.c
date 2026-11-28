@@ -28,14 +28,20 @@ TSNode cbm_ffi_ts_node_child(const TSNode *node, uint32_t index) {
     return ts_node_child(*node, index);
 }
 
+bool cbm_ffi_ts_node_is_named(const TSNode *node) {
+    cbm_ffi_ts_node_written(node);
+    return ts_node_is_named(*node);
+}
+
 TSNode cbm_ffi_ts_node_parent(const TSNode *node) {
     cbm_ffi_ts_node_written(node);
     return ts_node_parent(*node);
 }
 
-bool cbm_ffi_ts_node_is_named(const TSNode *node) {
-    cbm_ffi_ts_node_written(node);
-    return ts_node_is_named(*node);
+bool cbm_ffi_ts_node_eq(const TSNode *left, const TSNode *right) {
+    cbm_ffi_ts_node_written(left);
+    cbm_ffi_ts_node_written(right);
+    return ts_node_eq(*left, *right);
 }
 
 TSNode cbm_ffi_ts_node_child_by_field_name(const TSNode *node, const char *name, uint32_t length) {
@@ -75,6 +81,11 @@ void cbm_ffi_ts_tree_cursor_delete(TSTreeCursor *cursor) {
 TSNode cbm_ffi_ts_tree_cursor_current_node(const TSTreeCursor *cursor) {
     cbm_ffi_ts_cursor_written(cursor);
     return ts_tree_cursor_current_node(cursor);
+}
+
+const char *cbm_ffi_ts_tree_cursor_current_field_name(const TSTreeCursor *cursor) {
+    cbm_ffi_ts_cursor_written(cursor);
+    return ts_tree_cursor_current_field_name(cursor);
 }
 
 bool cbm_ffi_ts_tree_cursor_goto_first_child(TSTreeCursor *cursor) {
