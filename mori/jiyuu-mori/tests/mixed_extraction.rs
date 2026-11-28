@@ -11,7 +11,6 @@ use serde_json::{Value, json};
 
 const SELECTORS: &[(&str, &str)] = &[
     ("MORI_IMPL_GRAPHQL_EXTRACT", "extract.graphql_field_spans"),
-    ("MORI_IMPL_GO_IMPORTS", "extract.go_imports"),
     ("MORI_IMPL_TS_STATIC_IMPORTS", "extract.ts_static_import"),
     ("MORI_IMPL_PYTHON_IMPORTS", "extract.python_imports"),
     ("MORI_IMPL_RUST_IMPORTS", "extract.rust_imports"),
@@ -199,6 +198,8 @@ fn mixed_language_extraction_matches_native_graph_rows() {
     let markdown = "msg=extract.markdown_sections implementation=rust";
     assert!(native_logs.contains(markdown), "{native_logs}");
     assert!(rust_logs.contains(markdown), "{rust_logs}");
+    let go_marker = "msg=extract.go_imports implementation=rust";
+    assert!(native_logs.contains(go_marker) && rust_logs.contains(go_marker));
     for (_, event) in SELECTORS {
         let marker = format!("msg={event} implementation=rust");
         assert!(

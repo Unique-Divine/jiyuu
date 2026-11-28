@@ -26,6 +26,9 @@ perl_inherited/main.pl	inherited_occurrence_probe	greet	Function	211:226,232:247
 # phplsp_ordinary_same_leaf_calls_join_by_exact_site
 php/main.php	OccurrenceProbe.run	Alpha.render	Method	195:211	$alpha->render()	$alpha.render
 php/main.php	OccurrenceProbe.run	Beta.render	Method	221:236	$beta->render()	$beta.render
+# php_inherited: grandparent class method and parent-interface method (#488)
+php_inherited/main.php	InheritedProbe.run	Base.greet	Method	546:561	$child->greet()	$child.greet
+php_inherited/main.php	InheritedProbe.run	Labeled.tag	Method	571:584	$named->tag()	$named.tag
 # clsp_c_reassigned_function_pointer_calls_join_exact_occurrences
 reassigned/main.c	occurrence_probe	alpha_target	Function	169:173	fp()	fp
 reassigned/main.c	occurrence_probe	bravo_target	Function	217:221	fp()	fp
