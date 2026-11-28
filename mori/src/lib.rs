@@ -83,6 +83,9 @@ mod rust_doc_path;
 #[path = "mcp/search_code_request/mod.rs"]
 mod search_code_request;
 #[cfg(any(feature = "native-engine-abi", test))]
+#[path = "pipeline/semantic_admission.rs"]
+mod semantic_admission;
+#[cfg(any(feature = "native-engine-abi", test))]
 #[path = "pipeline/semantic_candidates.rs"]
 mod semantic_candidates;
 #[cfg(feature = "native-engine-abi")]
