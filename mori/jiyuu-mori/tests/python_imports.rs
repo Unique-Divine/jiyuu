@@ -48,6 +48,27 @@ impl Fixture {
                 ),
             ),
             (
+                "forms.py",
+                concat!(
+                    "import alpha.tools as deep_tools\n",
+                    "import beta, wildcards\n",
+                    "from pkg import (shared, nested)\n",
+                    "from pkg.nested import helper as nested_helper, extra\n",
+                    "try:\n    import runtime\nexcept ImportError:\n",
+                    "    runtime = None\n",
+                    "\ndef local():\n    import typed\n",
+                    "    return typed.OnlyTyped()\n",
+                ),
+            ),
+            (
+                "pkg/nested/more.py",
+                concat!(
+                    "from .. import shared\n",
+                    "from ..shared import *\n",
+                    "from .helper import (local_tool, local_tool as again)\n",
+                ),
+            ),
+            (
                 "contracts.py",
                 "class Contract:\n    def process_batch(self) -> None:\n        ...\n",
             ),
@@ -165,7 +186,8 @@ fn index(backend: &str) -> (Vec<Edge>, String) {
             "SELECT e.type, s.file_path, s.name, t.file_path, t.name, e.properties \
              FROM edges e JOIN nodes s ON s.id=e.source_id JOIN nodes t ON t.id=e.target_id \
              WHERE e.type IN ('IMPORTS','CALLS') \
-               AND s.file_path IN ('pkg/nested/imports.py','loop.py','trainer.py','shadow.py') \
+               AND s.file_path IN ('pkg/nested/imports.py','loop.py','trainer.py','shadow.py', \
+                 'forms.py','pkg/nested/more.py') \
              ORDER BY 1,2,3,4,5,6",
         )
         .expect("select import and call edges");
@@ -222,6 +244,43 @@ fn python_imports_match_c_for_aliases_relative_paths_and_type_checking() {
             "missing import {alias} -> {target}: {rust:?}"
         );
     }
+    let mut form_imports: Vec<_> = rust
+        .iter()
+        .filter(|edge| {
+            edge.kind == "IMPORTS"
+                && matches!(
+                    edge.source_path.as_str(),
+                    "forms.py" | "pkg/nested/more.py"
+                )
+        })
+        .map(|edge| {
+            let local = edge.property("local_name");
+            format!(
+                "{} -> {} as {}",
+                edge.source_path,
+                edge.target_path,
+                local.as_str().unwrap_or_default()
+            )
+        })
+        .collect();
+    form_imports.sort();
+    // C bound only the first name of `import beta, wildcards` and skipped
+    // imports nested in try blocks and functions; Rust keeps that behavior.
+    assert_eq!(
+        form_imports,
+        [
+            "forms.py -> alpha as deep_tools",
+            "forms.py -> beta.py as beta",
+            "forms.py -> pkg as nested",
+            "forms.py -> pkg as shared",
+            "forms.py -> pkg/nested as extra",
+            "forms.py -> pkg/nested as nested_helper",
+            "pkg/nested/more.py -> pkg/nested/helper.py as again",
+            "pkg/nested/more.py -> pkg/nested/helper.py as local_tool",
+            "pkg/nested/more.py -> pkg/shared.py as shared",
+        ],
+        "{rust:?}"
+    );
     let filtered_imports: Vec<_> = rust
         .iter()
         .filter(|edge| edge.kind == "IMPORTS" && edge.source_path == "shadow.py")
