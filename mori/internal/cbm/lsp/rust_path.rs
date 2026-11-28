@@ -140,7 +140,7 @@ impl PathArena {
         };
         self.write(
             capacity,
-            prefix.iter().copied().chain([b'.']).chain(normalized(tail)),
+            prefix.iter().copied().chain(*b".").chain(normalized(tail)),
         )
     }
 
