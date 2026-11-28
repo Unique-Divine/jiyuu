@@ -4454,7 +4454,7 @@ static void rust_resolve_calls_in_node(RustLSPContext *ctx, TSNode node) {
      * left operand is a user-defined type T with that operator method;
      * `a[i]` calls T::index. The tree-sitter-rust grammar models these as
      * binary_expression / index_expression rather than call_expression, so
-     * lang_specs.c's call-type whitelist never sees them — we recover the
+     * lang_specs.rs's call-type whitelist never sees them — we recover the
      * call edge here. Sound-only via rust_emit_operator_call (no edge unless
      * the operand type actually defines the method). */
     if (strcmp(kind, "binary_expression") == 0) {

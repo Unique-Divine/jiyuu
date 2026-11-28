@@ -2751,7 +2751,7 @@ static void parse_spec_imports(CBMExtractCtx *ctx) {
 // No grammar symbols are referenced here — the embedded TSLanguage is
 // resolved through cbm_ts_language(spec->embedded_language), the same hook
 // that the main parser uses.  Adding another host language is a one-line
-// declaration in lang_specs.c.
+// declaration in lang_specs.rs.
 
 typedef struct {
     TSNode script;

@@ -41,6 +41,9 @@ typedef struct {
     const CBMEmbeddedLangSpec *embedded_imports;
 } CBMLangSpec;
 
+// lang_specs.rs holds the tables and defines cbm_conditional_block_types,
+// cbm_lang_spec and cbm_ts_language; its structs must match the two above.
+
 // Returns a NULL-terminated list of callee-name suffixes that indicate a
 // string-dispatch call for a given language (e.g. ".classMethodValue" for
 // Python/IRIS), or NULL if the language has no such dispatch pattern.
