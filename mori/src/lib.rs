@@ -34,6 +34,9 @@ mod definition_props;
 #[path = "mcp/detect_changes/mod.rs"]
 mod detect_changes;
 #[cfg(feature = "native-engine-abi")]
+#[path = "pipeline/diagrams.rs"]
+mod diagrams;
+#[cfg(feature = "native-engine-abi")]
 #[path = "pipeline/doc_file_links.rs"]
 mod doc_file_links;
 #[cfg(feature = "native-engine-abi")]

@@ -740,13 +740,19 @@ static inline int cbm_pipeline_relpath_is_excluded(const char *rel_path, char *c
     return 0;
 }
 
-/* Diagrams (pass_diagrams.c). The DEFINES edge from a Diagram's or a
+/* Diagrams (pipeline/diagrams.rs). The DEFINES edge from a Diagram's or a
  * DiagramElement's container (the Section a diagram block sits in, the
  * Diagram of an element) to the definition's node; nothing for other
  * definitions. */
+void mori_pipeline_diagram_parent_edge(cbm_gbuf_t *gbuf, const char *label,
+                                       const char *parent_class, int64_t node_id);
+/* The DIAGRAM_ARROW edges of one file's diagrams. */
+void mori_pipeline_diagram_arrows(cbm_gbuf_t *gbuf, const CBMDiagramArrow *arrows, int count);
+
+/* The C reference of the two functions above (pass_diagrams.c), kept only
+ * for the Rust parity test in tests/test_diagrams.c. */
 void cbm_pipeline_diagram_parent_edge(cbm_pipeline_ctx_t *ctx, const CBMDefinition *def,
                                       int64_t node_id);
-/* The DIAGRAM_ARROW edges of one file's diagrams. */
 void cbm_pipeline_diagram_arrows(cbm_pipeline_ctx_t *ctx, const CBMFileResult *result);
 
 /* Get the current pipeline's package map (NULL if none). */
