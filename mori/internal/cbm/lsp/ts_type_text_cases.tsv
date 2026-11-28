@@ -1,0 +1,1122 @@
+""	"pkg.api"	-1	?	-1
+" "	"pkg.api"	-1	?	-1
+" \t\r\n"	"pkg.api"	-1	?	-1
+":"	"pkg.api"	-1	?	-1
+": "	"pkg.api"	-1	?	-1
+";"	"pkg.api"	-1	?	-1
+",;, "	"pkg.api"	-1	?	-1
+"\r\n: Client ; "	"pkg.api"	-1	named(706b672e6170692e436c69656e74)	-1
+"Client"	"pkg.api"	-1	named(706b672e6170692e436c69656e74)	-1
+"  Client,"	"pkg.api"	-1	named(706b672e6170692e436c69656e74)	-1
+":Client"	"pkg.api"	-1	named(706b672e6170692e436c69656e74)	-1
+"::Client"	"pkg.api"	-1	named(3a436c69656e74)	-1
+"exports.Client"	"pkg.api"	-1	named(6578706f7274732e436c69656e74)	-1
+"a.b.Client"	"pkg.api"	-1	named(612e622e436c69656e74)	-1
+"Document"	"pkg.api"	-1	named(446f63756d656e74)	-1
+"JSX"	"pkg.api"	-1	named(4a5358)	-1
+"Pick"	"pkg.api"	-1	named(706b672e6170692e5069636b)	-1
+"Promise"	"pkg.api"	-1	named(50726f6d697365)	-1
+"lower"	"pkg.api"	-1	named(6c6f776572)	-1
+"_Under"	"pkg.api"	-1	named(5f556e646572)	-1
+"Child\xff"	"pkg.api"	-1	named(706b672e6170692e4368696c64ff)	-1
+"\xc3\x89cole"	"pkg.api"	-1	named(c389636f6c65)	-1
+"string"	"pkg.api"	-1	builtin(737472696e67)	-1
+"number"	"pkg.api"	-1	builtin(6e756d626572)	-1
+"boolean"	"pkg.api"	-1	builtin(626f6f6c65616e)	-1
+"bigint"	"pkg.api"	-1	builtin(626967696e74)	-1
+"any"	"pkg.api"	-1	builtin(616e79)	-1
+"unknown"	"pkg.api"	-1	builtin(756e6b6e6f776e)	-1
+"void"	"pkg.api"	-1	builtin(766f6964)	-1
+"never"	"pkg.api"	-1	builtin(6e65766572)	-1
+"null"	"pkg.api"	-1	builtin(6e756c6c)	-1
+"undefined"	"pkg.api"	-1	builtin(756e646566696e6564)	-1
+"object"	"pkg.api"	-1	builtin(6f626a656374)	-1
+"symbol"	"pkg.api"	-1	builtin(73796d626f6c)	-1
+"String"	"pkg.api"	-1	named(537472696e67)	-1
+"strings"	"pkg.api"	-1	named(737472696e6773)	-1
+"this"	"pkg.api"	-1	this	-1
+"this;"	"pkg.api"	-1	this	-1
+"  this  "	"pkg.api"	-1	this	-1
+"This"	"pkg.api"	-1	named(706b672e6170692e54686973)	-1
+"{ child: Client }"	"pkg.api"	-1	?	-1
+"{"	"pkg.api"	-1	?	-1
+"}"	"pkg.api"	-1	named(7d)	-1
+"("	"pkg.api"	-1	?	-1
+")"	"pkg.api"	-1	named(29)	-1
+"(a"	"pkg.api"	-1	?	-1
+"(Client)"	"pkg.api"	-1	?	-1
+"(a) b"	"pkg.api"	-1	?	-1
+"()"	"pkg.api"	-1	?	-1
+"() =>"	"pkg.api"	-1	fn()->?	-1
+"() => "	"pkg.api"	-1	fn()->?	-1
+"()=>void"	"pkg.api"	-1	fn()->builtin(766f6964)	-1
+"() => void"	"pkg.api"	-1	fn()->builtin(766f6964)	-1
+"() =>void;"	"pkg.api"	-1	fn()->builtin(766f6964)	-1
+"(a: A) => R"	"pkg.api"	-1	fn(param(61)=named(706b672e6170692e41))->named(706b672e6170692e52)	-1
+"(a: A, b?: B) => R"	"pkg.api"	-1	fn(param(61)=named(706b672e6170692e41),param(62)=named(706b672e6170692e42))->named(706b672e6170692e52)	-1
+"(handler?: Promise<Session>, number, , flag\t?: boolean) => Result[];"	"pkg.api"	-1	fn(param(68616e646c6572)=template(50726f6d697365)<named(706b672e6170692e53657373696f6e)>,param(5f31)=builtin(6e756d626572),param(5f32)=?,param(666c616709)=builtin(626f6f6c65616e))->template(4172726179)<named(706b672e6170692e526573756c74)>	-1
+"(cb: (x: number) => void, y: string) => void"	"pkg.api"	-1	fn()->builtin(766f6964)	-1
+"(cb: (x: number) => Foo) => Bar"	"pkg.api"	-1	fn()->named(706b672e6170692e426172)	-1
+"(m: Map<K, V>, t: [A, B]) => Promise<R>"	"pkg.api"	-1	fn(param(6d)=template(4d6170)<named(706b672e6170692e4b),named(706b672e6170692e56)>,param(74)=tuple(named(706b672e6170692e41),named(706b672e6170692e42)))->template(50726f6d697365)<named(706b672e6170692e52)>	-1
+"( a : A ) =>  R ;"	"pkg.api"	-1	fn(param(61)=named(706b672e6170692e41))->named(706b672e6170692e52)	-1
+"(: A) => R"	"pkg.api"	-1	fn(param()=named(706b672e6170692e41))->named(706b672e6170692e52)	-1
+"(a:) => R"	"pkg.api"	-1	fn(param(61)=?)->named(706b672e6170692e52)	-1
+"(...args: Arg[]) => Out"	"pkg.api"	-1	fn(param(2e2e2e61726773)=template(4172726179)<named(706b672e6170692e417267)>)->named(706b672e6170692e4f7574)	-1
+"(a: A) => (b: B) => C"	"pkg.api"	-1	fn(param(61)=named(706b672e6170692e41))->fn(param(62)=named(706b672e6170692e42))->named(706b672e6170692e43)	-1
+"((a: A) => B)"	"pkg.api"	-1	?	-1
+"(a: A) =>\tR"	"pkg.api"	-1	fn(param(61)=named(706b672e6170692e41))->named(706b672e6170692e52)	-1
+"(a: A)\t=> R"	"pkg.api"	-1	fn(param(61)=named(706b672e6170692e41))->named(706b672e6170692e52)	-1
+"(a: A)\n=> R"	"pkg.api"	-1	?	-1
+"(a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p, q, r) => Z"	"pkg.api"	-1	fn(param(5f30)=named(61),param(5f31)=named(62),param(5f32)=named(63),param(5f33)=named(64),param(5f34)=named(65),param(5f35)=named(66),param(5f36)=named(67),param(5f37)=named(68),param(5f38)=named(69),param(5f39)=named(6a),param(5f3130)=named(6b),param(5f3131)=named(6c),param(5f3132)=named(6d),param(5f3133)=named(6e),param(5f3134)=named(6f))->named(706b672e6170692e5a)	-1
+"(a,b) => (c) => d"	"pkg.api"	-1	fn(param(5f30)=named(61),param(5f31)=named(62))->fn(param(5f30)=named(63))->named(64)	-1
+"T extends U ? X : Y"	"pkg.api"	-1	conditional(named(706b672e6170692e54),named(706b672e6170692e55),named(706b672e6170692e58),named(706b672e6170692e59))	-1
+"T extends U ? X : Y;"	"pkg.api"	-1	conditional(named(706b672e6170692e54),named(706b672e6170692e55),named(706b672e6170692e58),named(706b672e6170692e59))	-1
+"T extends Box<infer R> ? keyof R : typeof value;"	"pkg.api"	-1	conditional(named(706b672e6170692e54),template(706b672e6170692e426f78)<infer(52)>,keyof(named(706b672e6170692e52)),typeof(76616c7565))	-1
+"T extends (infer U)[] ? U : never"	"pkg.api"	-1	conditional(named(706b672e6170692e54),?,named(706b672e6170692e55),builtin(6e65766572))	-1
+"T extends [infer H, ...infer Rest] ? H : never"	"pkg.api"	-1	conditional(named(706b672e6170692e54),tuple(infer(48),named(2e2e2e696e6665722052657374)),named(706b672e6170692e48),builtin(6e65766572))	-1
+"T extends U ? X"	"pkg.api"	-1	named(706b672e6170692e5420657874656e64732055203f2058)	-1
+"T extends U : X ? Y"	"pkg.api"	-1	named(706b672e6170692e5420657874656e64732055203a2058203f2059)	-1
+"T extends U ? X : Y extends Z ? A : B"	"pkg.api"	-1	conditional(named(706b672e6170692e54),named(706b672e6170692e55),named(706b672e6170692e58),conditional(named(706b672e6170692e59),named(706b672e6170692e5a),named(706b672e6170692e41),named(706b672e6170692e42)))	-1
+"Box<T extends U ? X : Y>"	"pkg.api"	-1	template(706b672e6170692e426f78)<conditional(named(706b672e6170692e54),named(706b672e6170692e55),named(706b672e6170692e58),named(706b672e6170692e59))>	-1
+" extends U ? X : Y"	"pkg.api"	-1	named(657874656e64732055203f2058203a2059)	-1
+"T  extends U ? X : Y"	"pkg.api"	-1	conditional(named(706b672e6170692e54),named(706b672e6170692e55),named(706b672e6170692e58),named(706b672e6170692e59))	-1
+"T extends U ?X : Y"	"pkg.api"	-1	named(706b672e6170692e5420657874656e64732055203f58203a2059)	-1
+"A | B extends C ? D : E"	"pkg.api"	-1	conditional(union(named(706b672e6170692e41),named(706b672e6170692e42)),named(706b672e6170692e43),named(706b672e6170692e44),named(706b672e6170692e45))	-1
+"(T extends U ? X : Y)"	"pkg.api"	-1	?	-1
+"infer R"	"pkg.api"	-1	infer(52)	-1
+"infer R;"	"pkg.api"	-1	infer(523b)	-1
+"infer  R extra"	"pkg.api"	-1	infer(52)	-1
+"infer \tR"	"pkg.api"	-1	infer(52)	-1
+"infer "	"pkg.api"	-1	named(696e666572)	-1
+"infer"	"pkg.api"	-1	named(696e666572)	-1
+"inferR"	"pkg.api"	-1	named(696e66657252)	-1
+"keyof Widget"	"pkg.api"	-1	keyof(named(706b672e6170692e576964676574))	-1
+"keyof  Widget ;"	"pkg.api"	-1	keyof(named(706b672e6170692e576964676574))	-1
+"keyof typeof obj"	"pkg.api"	-1	keyof(typeof(6f626a))	-1
+"keyof "	"pkg.api"	-1	named(6b65796f66)	-1
+"keyof"	"pkg.api"	-1	named(6b65796f66)	-1
+"typeof exported"	"pkg.api"	-1	typeof(6578706f72746564)	-1
+": typeof exported;  "	"pkg.api"	-1	typeof(6578706f727465643b2020)	-1
+"typeof \tvalue.inner"	"pkg.api"	-1	typeof(76616c75652e696e6e6572)	-1
+"typeof "	"pkg.api"	-1	named(747970656f66)	-1
+"typeof"	"pkg.api"	-1	named(747970656f66)	-1
+"typeofx"	"pkg.api"	-1	named(747970656f6678)	-1
+"[]"	"pkg.api"	-1	tuple(?)	-1
+"["	"pkg.api"	-1	named(5b)	-1
+"]"	"pkg.api"	-1	named(5d)	-1
+"[A]"	"pkg.api"	-1	tuple(named(706b672e6170692e41))	-1
+"[A, B]"	"pkg.api"	-1	tuple(named(706b672e6170692e41),named(706b672e6170692e42))	-1
+"[A, , B]"	"pkg.api"	-1	tuple(named(706b672e6170692e41),?,named(706b672e6170692e42))	-1
+"[A, B,]"	"pkg.api"	-1	tuple(named(706b672e6170692e41),named(706b672e6170692e42),?)	-1
+"[Map<K, V>, [C, D]]"	"pkg.api"	-1	tuple(template(4d6170)<named(706b672e6170692e4b),named(706b672e6170692e56)>,tuple(named(706b672e6170692e43),named(706b672e6170692e44)))	-1
+"[A, B] | C"	"pkg.api"	-1	union(tuple(named(706b672e6170692e41),named(706b672e6170692e42)),named(706b672e6170692e43))	-1
+"[A][]"	"pkg.api"	-1	tuple(named(706b672e6170692e415d5b))	-1
+"[T0,T1,T2,T3,T4,T5,T6,T7,T8,T9,T10,T11,T12,T13,T14,T15,T16,T17,T18,T19]"	"pkg.api"	-1	tuple(named(706b672e6170692e5430),named(706b672e6170692e5431),named(706b672e6170692e5432),named(706b672e6170692e5433),named(706b672e6170692e5434),named(706b672e6170692e5435),named(706b672e6170692e5436),named(706b672e6170692e5437),named(706b672e6170692e5438),named(706b672e6170692e5439),named(706b672e6170692e543130),named(706b672e6170692e543131),named(706b672e6170692e543132),named(706b672e6170692e543133),named(706b672e6170692e543134))	-1
+"A | B"	"pkg.api"	-1	union(named(706b672e6170692e41),named(706b672e6170692e42))	-1
+"A & B"	"pkg.api"	-1	intersection(named(706b672e6170692e41),named(706b672e6170692e42))	-1
+"A & B | C"	"pkg.api"	-1	union(named(706b672e6170692e41),named(706b672e6170692e42),named(706b672e6170692e43))	-1
+"A | B & C"	"pkg.api"	-1	union(named(706b672e6170692e41),named(706b672e6170692e42),named(706b672e6170692e43))	-1
+"A|B"	"pkg.api"	-1	named(706b672e6170692e417c42)	-1
+"A |B"	"pkg.api"	-1	union(named(706b672e6170692e41),named(706b672e6170692e42))	-1
+"A| B"	"pkg.api"	-1	named(706b672e6170692e417c2042)	-1
+"A\t| B"	"pkg.api"	-1	union(named(706b672e6170692e41),named(706b672e6170692e42))	-1
+"| A"	"pkg.api"	-1	named(7c2041)	-1
+" | A"	"pkg.api"	-1	named(7c2041)	-1
+"A | "	"pkg.api"	-1	union(named(706b672e6170692e41),?)	-1
+"A |"	"pkg.api"	-1	union(named(706b672e6170692e41),?)	-1
+"A | | B"	"pkg.api"	-1	union(named(706b672e6170692e41),?,named(706b672e6170692e42))	-1
+"Box<A | B> | C"	"pkg.api"	-1	union(template(706b672e6170692e426f78)<union(named(706b672e6170692e41),named(706b672e6170692e42))>,named(706b672e6170692e43))	-1
+"(A | B)"	"pkg.api"	-1	?	-1
+"A | B[]"	"pkg.api"	-1	union(named(706b672e6170692e41),template(4172726179)<named(706b672e6170692e42)>)	-1
+"string | null"	"pkg.api"	-1	union(builtin(737472696e67),builtin(6e756c6c))	-1
+"Promise<A> & Map<K, V>"	"pkg.api"	-1	intersection(template(50726f6d697365)<named(706b672e6170692e41)>,template(4d6170)<named(706b672e6170692e4b),named(706b672e6170692e56)>)	-1
+"T0 | T1 | T2 | T3 | T4 | T5 | T6 | T7 | T8 | T9 | T10 | T11 | T12 | T13 | T14 | T15 | T16"	"pkg.api"	-1	union(named(706b672e6170692e5430),named(706b672e6170692e5431),named(706b672e6170692e5432),named(706b672e6170692e5433),named(706b672e6170692e5434),named(706b672e6170692e5435),named(706b672e6170692e5436),named(706b672e6170692e5437),named(706b672e6170692e5438),named(706b672e6170692e5439),named(706b672e6170692e543130),named(706b672e6170692e543131),named(706b672e6170692e543132),named(706b672e6170692e543133),named(706b672e6170692e543134))	-1
+"T0 & T1 & T2 & T3 & T4 & T5 & T6 & T7 & T8 & T9 & T10 & T11 & T12 & T13 & T14 & T15"	"pkg.api"	-1	intersection(named(706b672e6170692e5430),named(706b672e6170692e5431),named(706b672e6170692e5432),named(706b672e6170692e5433),named(706b672e6170692e5434),named(706b672e6170692e5435),named(706b672e6170692e5436),named(706b672e6170692e5437),named(706b672e6170692e5438),named(706b672e6170692e5439),named(706b672e6170692e543130),named(706b672e6170692e543131),named(706b672e6170692e543132),named(706b672e6170692e543133),named(706b672e6170692e543134))	-1
+"T0 | T1 | T2 | T3 | T4 | T5 | T6 | T7 | T8 | T9 | T10 | T11 | T12 | T13 | T14"	"pkg.api"	-1	union(named(706b672e6170692e5430),named(706b672e6170692e5431),named(706b672e6170692e5432),named(706b672e6170692e5433),named(706b672e6170692e5434),named(706b672e6170692e5435),named(706b672e6170692e5436),named(706b672e6170692e5437),named(706b672e6170692e5438),named(706b672e6170692e5439),named(706b672e6170692e543130),named(706b672e6170692e543131),named(706b672e6170692e543132),named(706b672e6170692e543133),named(706b672e6170692e543134))	-1
+"T0 | T1 | T2 | T3 | T4 | T5 | T6 | T7 | T8 | T9 | T10 | T11 | T12 | T13 | T14 | T15"	"pkg.api"	-1	union(named(706b672e6170692e5430),named(706b672e6170692e5431),named(706b672e6170692e5432),named(706b672e6170692e5433),named(706b672e6170692e5434),named(706b672e6170692e5435),named(706b672e6170692e5436),named(706b672e6170692e5437),named(706b672e6170692e5438),named(706b672e6170692e5439),named(706b672e6170692e543130),named(706b672e6170692e543131),named(706b672e6170692e543132),named(706b672e6170692e543133),named(706b672e6170692e543134))	-1
+"T[]"	"pkg.api"	-1	template(4172726179)<named(706b672e6170692e54)>	-1
+"T[][]"	"pkg.api"	-1	template(4172726179)<template(4172726179)<named(706b672e6170692e54)>>	-1
+"string[]"	"pkg.api"	-1	template(4172726179)<builtin(737472696e67)>	-1
+"Provider<A, B>[]"	"pkg.api"	-1	template(4172726179)<template(706b672e6170692e50726f7669646572)<named(706b672e6170692e41),named(706b672e6170692e42)>>	-1
+"[]]"	"pkg.api"	-1	tuple()	-1
+"[][]"	"pkg.api"	-1	tuple(named(5d5b))	-1
+"Map<>"	"pkg.api"	-1	template(4d6170)<?>	-1
+"Map<K, V>"	"pkg.api"	-1	template(4d6170)<named(706b672e6170692e4b),named(706b672e6170692e56)>	-1
+"Foo<A, B<C>>"	"pkg.api"	-1	template(706b672e6170692e466f6f)<named(706b672e6170692e41),template(706b672e6170692e42)<named(706b672e6170692e43)>>	-1
+"Foo<A,B<C,D>,E>"	"pkg.api"	-1	template(706b672e6170692e466f6f)<named(706b672e6170692e41),template(706b672e6170692e42)<named(706b672e6170692e43),named(706b672e6170692e44)>,named(706b672e6170692e45)>	-1
+"Foo<(a: A) => B>"	"pkg.api"	-1	named(706b672e6170692e466f6f3c28613a204129203d3e20423e)	-1
+"Foo<[A, B]>"	"pkg.api"	-1	template(706b672e6170692e466f6f)<named(5b41),named(706b672e6170692e425d)>	-1
+"Foo< A , B >"	"pkg.api"	-1	template(706b672e6170692e466f6f)<named(706b672e6170692e41),named(706b672e6170692e42)>	-1
+"Foo<A>>"	"pkg.api"	-1	named(706b672e6170692e466f6f3c413e3e)	-1
+"Foo<<A>"	"pkg.api"	-1	template(706b672e6170692e466f6f3c)<named(706b672e6170692e41)>	-1
+"<T>"	"pkg.api"	-1	named(3c543e)	-1
+"<>"	"pkg.api"	-1	named(3c3e)	-1
+"x<T>"	"pkg.api"	-1	template(78)<named(706b672e6170692e54)>	-1
+"a.b.Foo<T>"	"pkg.api"	-1	template(612e622e466f6f)<named(706b672e6170692e54)>	-1
+"Partial<Widget>"	"pkg.api"	-1	template(5061727469616c)<named(706b672e6170692e576964676574)>	-1
+"Readonly<Widget>"	"pkg.api"	-1	template(526561646f6e6c79)<named(706b672e6170692e576964676574)>	-1
+"Array<Widget>"	"pkg.api"	-1	template(4172726179)<named(706b672e6170692e576964676574)>	-1
+"NodeList<T>"	"pkg.api"	-1	template(4e6f64654c697374)<named(706b672e6170692e54)>	-1
+"Math<T>"	"pkg.api"	-1	template(706b672e6170692e4d617468)<named(706b672e6170692e54)>	-1
+"Record<string, Widget>"	"pkg.api"	-1	template(5265636f7264)<builtin(737472696e67),named(706b672e6170692e576964676574)>	-1
+"Box<T0,T1,T2,T3,T4,T5,T6,T7,T8,T9,T10,T11,T12,T13,T14,T15,T16,T17>"	"pkg.api"	-1	template(706b672e6170692e426f78)<named(706b672e6170692e5430),named(706b672e6170692e5431),named(706b672e6170692e5432),named(706b672e6170692e5433),named(706b672e6170692e5434),named(706b672e6170692e5435),named(706b672e6170692e5436),named(706b672e6170692e5437),named(706b672e6170692e5438),named(706b672e6170692e5439),named(706b672e6170692e543130),named(706b672e6170692e543131),named(706b672e6170692e543132),named(706b672e6170692e543133),named(706b672e6170692e543134)>	-1
+"Box<,>"	"pkg.api"	-1	template(706b672e6170692e426f78)<?,?>	-1
+"Foo<A>.Bar"	"pkg.api"	-1	named(466f6f3c413e2e426172)	-1
+"Foo<A>[]"	"pkg.api"	-1	template(4172726179)<template(706b672e6170692e466f6f)<named(706b672e6170692e41)>>	-1
+"Foo[]<A>"	"pkg.api"	-1	template(706b672e6170692e466f6f5b5d)<named(706b672e6170692e41)>	-1
+"\"literal\""	"pkg.api"	-1	named(226c69746572616c22)	-1
+"42"	"pkg.api"	-1	named(3432)	-1
+"`tmpl${T}`"	"pkg.api"	-1	named(60746d706c247b547d60)	-1
+"A extends B"	"pkg.api"	-1	named(706b672e6170692e4120657874656e64732042)	-1
+"readonly Widget[]"	"pkg.api"	-1	template(4172726179)<named(726561646f6e6c7920576964676574)>	-1
+"new () => Widget"	"pkg.api"	-1	named(6e6577202829203d3e20576964676574)	-1
+"asserts x is Widget"	"pkg.api"	-1	named(61737365727473207820697320576964676574)	-1
+"x is Widget"	"pkg.api"	-1	named(7820697320576964676574)	-1
+"unique symbol"	"pkg.api"	-1	named(756e697175652073796d626f6c)	-1
+"Widget[\"key\"]"	"pkg.api"	-1	named(706b672e6170692e5769646765745b226b6579225d)	-1
+"{ [K in keyof T]: T[K] }"	"pkg.api"	-1	?	-1
+""	(null)	-1	?	-1
+" "	(null)	-1	?	-1
+" \t\r\n"	(null)	-1	?	-1
+":"	(null)	-1	?	-1
+": "	(null)	-1	?	-1
+";"	(null)	-1	?	-1
+",;, "	(null)	-1	?	-1
+"\r\n: Client ; "	(null)	-1	named(436c69656e74)	-1
+"Client"	(null)	-1	named(436c69656e74)	-1
+"  Client,"	(null)	-1	named(436c69656e74)	-1
+":Client"	(null)	-1	named(436c69656e74)	-1
+"::Client"	(null)	-1	named(3a436c69656e74)	-1
+"exports.Client"	(null)	-1	named(6578706f7274732e436c69656e74)	-1
+"a.b.Client"	(null)	-1	named(612e622e436c69656e74)	-1
+"Document"	(null)	-1	named(446f63756d656e74)	-1
+"JSX"	(null)	-1	named(4a5358)	-1
+"Pick"	(null)	-1	named(5069636b)	-1
+"Promise"	(null)	-1	named(50726f6d697365)	-1
+"lower"	(null)	-1	named(6c6f776572)	-1
+"_Under"	(null)	-1	named(5f556e646572)	-1
+"Child\xff"	(null)	-1	named(4368696c64ff)	-1
+"\xc3\x89cole"	(null)	-1	named(c389636f6c65)	-1
+"string"	(null)	-1	builtin(737472696e67)	-1
+"number"	(null)	-1	builtin(6e756d626572)	-1
+"boolean"	(null)	-1	builtin(626f6f6c65616e)	-1
+"bigint"	(null)	-1	builtin(626967696e74)	-1
+"any"	(null)	-1	builtin(616e79)	-1
+"unknown"	(null)	-1	builtin(756e6b6e6f776e)	-1
+"void"	(null)	-1	builtin(766f6964)	-1
+"never"	(null)	-1	builtin(6e65766572)	-1
+"null"	(null)	-1	builtin(6e756c6c)	-1
+"undefined"	(null)	-1	builtin(756e646566696e6564)	-1
+"object"	(null)	-1	builtin(6f626a656374)	-1
+"symbol"	(null)	-1	builtin(73796d626f6c)	-1
+"String"	(null)	-1	named(537472696e67)	-1
+"strings"	(null)	-1	named(737472696e6773)	-1
+"this"	(null)	-1	this	-1
+"this;"	(null)	-1	this	-1
+"  this  "	(null)	-1	this	-1
+"This"	(null)	-1	named(54686973)	-1
+"{ child: Client }"	(null)	-1	?	-1
+"{"	(null)	-1	?	-1
+"}"	(null)	-1	named(7d)	-1
+"("	(null)	-1	?	-1
+")"	(null)	-1	named(29)	-1
+"(a"	(null)	-1	?	-1
+"(Client)"	(null)	-1	?	-1
+"(a) b"	(null)	-1	?	-1
+"()"	(null)	-1	?	-1
+"() =>"	(null)	-1	fn()->?	-1
+"() => "	(null)	-1	fn()->?	-1
+"()=>void"	(null)	-1	fn()->builtin(766f6964)	-1
+"() => void"	(null)	-1	fn()->builtin(766f6964)	-1
+"() =>void;"	(null)	-1	fn()->builtin(766f6964)	-1
+"(a: A) => R"	(null)	-1	fn(param(61)=named(41))->named(52)	-1
+"(a: A, b?: B) => R"	(null)	-1	fn(param(61)=named(41),param(62)=named(42))->named(52)	-1
+"(handler?: Promise<Session>, number, , flag\t?: boolean) => Result[];"	(null)	-1	fn(param(68616e646c6572)=template(50726f6d697365)<named(53657373696f6e)>,param(5f31)=builtin(6e756d626572),param(5f32)=?,param(666c616709)=builtin(626f6f6c65616e))->template(4172726179)<named(526573756c74)>	-1
+"(cb: (x: number) => void, y: string) => void"	(null)	-1	fn()->builtin(766f6964)	-1
+"(cb: (x: number) => Foo) => Bar"	(null)	-1	fn()->named(426172)	-1
+"(m: Map<K, V>, t: [A, B]) => Promise<R>"	(null)	-1	fn(param(6d)=template(4d6170)<named(4b),named(56)>,param(74)=tuple(named(41),named(42)))->template(50726f6d697365)<named(52)>	-1
+"( a : A ) =>  R ;"	(null)	-1	fn(param(61)=named(41))->named(52)	-1
+"(: A) => R"	(null)	-1	fn(param()=named(41))->named(52)	-1
+"(a:) => R"	(null)	-1	fn(param(61)=?)->named(52)	-1
+"(...args: Arg[]) => Out"	(null)	-1	fn(param(2e2e2e61726773)=template(4172726179)<named(417267)>)->named(4f7574)	-1
+"(a: A) => (b: B) => C"	(null)	-1	fn(param(61)=named(41))->fn(param(62)=named(42))->named(43)	-1
+"((a: A) => B)"	(null)	-1	?	-1
+"(a: A) =>\tR"	(null)	-1	fn(param(61)=named(41))->named(52)	-1
+"(a: A)\t=> R"	(null)	-1	fn(param(61)=named(41))->named(52)	-1
+"(a: A)\n=> R"	(null)	-1	?	-1
+"(a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p, q, r) => Z"	(null)	-1	fn(param(5f30)=named(61),param(5f31)=named(62),param(5f32)=named(63),param(5f33)=named(64),param(5f34)=named(65),param(5f35)=named(66),param(5f36)=named(67),param(5f37)=named(68),param(5f38)=named(69),param(5f39)=named(6a),param(5f3130)=named(6b),param(5f3131)=named(6c),param(5f3132)=named(6d),param(5f3133)=named(6e),param(5f3134)=named(6f))->named(5a)	-1
+"(a,b) => (c) => d"	(null)	-1	fn(param(5f30)=named(61),param(5f31)=named(62))->fn(param(5f30)=named(63))->named(64)	-1
+"T extends U ? X : Y"	(null)	-1	conditional(named(54),named(55),named(58),named(59))	-1
+"T extends U ? X : Y;"	(null)	-1	conditional(named(54),named(55),named(58),named(59))	-1
+"T extends Box<infer R> ? keyof R : typeof value;"	(null)	-1	conditional(named(54),template(426f78)<infer(52)>,keyof(named(52)),typeof(76616c7565))	-1
+"T extends (infer U)[] ? U : never"	(null)	-1	conditional(named(54),?,named(55),builtin(6e65766572))	-1
+"T extends [infer H, ...infer Rest] ? H : never"	(null)	-1	conditional(named(54),tuple(infer(48),named(2e2e2e696e6665722052657374)),named(48),builtin(6e65766572))	-1
+"T extends U ? X"	(null)	-1	named(5420657874656e64732055203f2058)	-1
+"T extends U : X ? Y"	(null)	-1	named(5420657874656e64732055203a2058203f2059)	-1
+"T extends U ? X : Y extends Z ? A : B"	(null)	-1	conditional(named(54),named(55),named(58),conditional(named(59),named(5a),named(41),named(42)))	-1
+"Box<T extends U ? X : Y>"	(null)	-1	template(426f78)<conditional(named(54),named(55),named(58),named(59))>	-1
+" extends U ? X : Y"	(null)	-1	named(657874656e64732055203f2058203a2059)	-1
+"T  extends U ? X : Y"	(null)	-1	conditional(named(54),named(55),named(58),named(59))	-1
+"T extends U ?X : Y"	(null)	-1	named(5420657874656e64732055203f58203a2059)	-1
+"A | B extends C ? D : E"	(null)	-1	conditional(union(named(41),named(42)),named(43),named(44),named(45))	-1
+"(T extends U ? X : Y)"	(null)	-1	?	-1
+"infer R"	(null)	-1	infer(52)	-1
+"infer R;"	(null)	-1	infer(523b)	-1
+"infer  R extra"	(null)	-1	infer(52)	-1
+"infer \tR"	(null)	-1	infer(52)	-1
+"infer "	(null)	-1	named(696e666572)	-1
+"infer"	(null)	-1	named(696e666572)	-1
+"inferR"	(null)	-1	named(696e66657252)	-1
+"keyof Widget"	(null)	-1	keyof(named(576964676574))	-1
+"keyof  Widget ;"	(null)	-1	keyof(named(576964676574))	-1
+"keyof typeof obj"	(null)	-1	keyof(typeof(6f626a))	-1
+"keyof "	(null)	-1	named(6b65796f66)	-1
+"keyof"	(null)	-1	named(6b65796f66)	-1
+"typeof exported"	(null)	-1	typeof(6578706f72746564)	-1
+": typeof exported;  "	(null)	-1	typeof(6578706f727465643b2020)	-1
+"typeof \tvalue.inner"	(null)	-1	typeof(76616c75652e696e6e6572)	-1
+"typeof "	(null)	-1	named(747970656f66)	-1
+"typeof"	(null)	-1	named(747970656f66)	-1
+"typeofx"	(null)	-1	named(747970656f6678)	-1
+"[]"	(null)	-1	tuple(?)	-1
+"["	(null)	-1	named(5b)	-1
+"]"	(null)	-1	named(5d)	-1
+"[A]"	(null)	-1	tuple(named(41))	-1
+"[A, B]"	(null)	-1	tuple(named(41),named(42))	-1
+"[A, , B]"	(null)	-1	tuple(named(41),?,named(42))	-1
+"[A, B,]"	(null)	-1	tuple(named(41),named(42),?)	-1
+"[Map<K, V>, [C, D]]"	(null)	-1	tuple(template(4d6170)<named(4b),named(56)>,tuple(named(43),named(44)))	-1
+"[A, B] | C"	(null)	-1	union(tuple(named(41),named(42)),named(43))	-1
+"[A][]"	(null)	-1	tuple(named(415d5b))	-1
+"[T0,T1,T2,T3,T4,T5,T6,T7,T8,T9,T10,T11,T12,T13,T14,T15,T16,T17,T18,T19]"	(null)	-1	tuple(named(5430),named(5431),named(5432),named(5433),named(5434),named(5435),named(5436),named(5437),named(5438),named(5439),named(543130),named(543131),named(543132),named(543133),named(543134))	-1
+"A | B"	(null)	-1	union(named(41),named(42))	-1
+"A & B"	(null)	-1	intersection(named(41),named(42))	-1
+"A & B | C"	(null)	-1	union(named(41),named(42),named(43))	-1
+"A | B & C"	(null)	-1	union(named(41),named(42),named(43))	-1
+"A|B"	(null)	-1	named(417c42)	-1
+"A |B"	(null)	-1	union(named(41),named(42))	-1
+"A| B"	(null)	-1	named(417c2042)	-1
+"A\t| B"	(null)	-1	union(named(41),named(42))	-1
+"| A"	(null)	-1	named(7c2041)	-1
+" | A"	(null)	-1	named(7c2041)	-1
+"A | "	(null)	-1	union(named(41),?)	-1
+"A |"	(null)	-1	union(named(41),?)	-1
+"A | | B"	(null)	-1	union(named(41),?,named(42))	-1
+"Box<A | B> | C"	(null)	-1	union(template(426f78)<union(named(41),named(42))>,named(43))	-1
+"(A | B)"	(null)	-1	?	-1
+"A | B[]"	(null)	-1	union(named(41),template(4172726179)<named(42)>)	-1
+"string | null"	(null)	-1	union(builtin(737472696e67),builtin(6e756c6c))	-1
+"Promise<A> & Map<K, V>"	(null)	-1	intersection(template(50726f6d697365)<named(41)>,template(4d6170)<named(4b),named(56)>)	-1
+"T0 | T1 | T2 | T3 | T4 | T5 | T6 | T7 | T8 | T9 | T10 | T11 | T12 | T13 | T14 | T15 | T16"	(null)	-1	union(named(5430),named(5431),named(5432),named(5433),named(5434),named(5435),named(5436),named(5437),named(5438),named(5439),named(543130),named(543131),named(543132),named(543133),named(543134))	-1
+"T0 & T1 & T2 & T3 & T4 & T5 & T6 & T7 & T8 & T9 & T10 & T11 & T12 & T13 & T14 & T15"	(null)	-1	intersection(named(5430),named(5431),named(5432),named(5433),named(5434),named(5435),named(5436),named(5437),named(5438),named(5439),named(543130),named(543131),named(543132),named(543133),named(543134))	-1
+"T0 | T1 | T2 | T3 | T4 | T5 | T6 | T7 | T8 | T9 | T10 | T11 | T12 | T13 | T14"	(null)	-1	union(named(5430),named(5431),named(5432),named(5433),named(5434),named(5435),named(5436),named(5437),named(5438),named(5439),named(543130),named(543131),named(543132),named(543133),named(543134))	-1
+"T0 | T1 | T2 | T3 | T4 | T5 | T6 | T7 | T8 | T9 | T10 | T11 | T12 | T13 | T14 | T15"	(null)	-1	union(named(5430),named(5431),named(5432),named(5433),named(5434),named(5435),named(5436),named(5437),named(5438),named(5439),named(543130),named(543131),named(543132),named(543133),named(543134))	-1
+"T[]"	(null)	-1	template(4172726179)<named(54)>	-1
+"T[][]"	(null)	-1	template(4172726179)<template(4172726179)<named(54)>>	-1
+"string[]"	(null)	-1	template(4172726179)<builtin(737472696e67)>	-1
+"Provider<A, B>[]"	(null)	-1	template(4172726179)<template(50726f7669646572)<named(41),named(42)>>	-1
+"[]]"	(null)	-1	tuple()	-1
+"[][]"	(null)	-1	tuple(named(5d5b))	-1
+"Map<>"	(null)	-1	template(4d6170)<?>	-1
+"Map<K, V>"	(null)	-1	template(4d6170)<named(4b),named(56)>	-1
+"Foo<A, B<C>>"	(null)	-1	template(466f6f)<named(41),template(42)<named(43)>>	-1
+"Foo<A,B<C,D>,E>"	(null)	-1	template(466f6f)<named(41),template(42)<named(43),named(44)>,named(45)>	-1
+"Foo<(a: A) => B>"	(null)	-1	named(466f6f3c28613a204129203d3e20423e)	-1
+"Foo<[A, B]>"	(null)	-1	template(466f6f)<named(5b41),named(425d)>	-1
+"Foo< A , B >"	(null)	-1	template(466f6f)<named(41),named(42)>	-1
+"Foo<A>>"	(null)	-1	named(466f6f3c413e3e)	-1
+"Foo<<A>"	(null)	-1	template(466f6f3c)<named(41)>	-1
+"<T>"	(null)	-1	named(3c543e)	-1
+"<>"	(null)	-1	named(3c3e)	-1
+"x<T>"	(null)	-1	template(78)<named(54)>	-1
+"a.b.Foo<T>"	(null)	-1	template(612e622e466f6f)<named(54)>	-1
+"Partial<Widget>"	(null)	-1	template(5061727469616c)<named(576964676574)>	-1
+"Readonly<Widget>"	(null)	-1	template(526561646f6e6c79)<named(576964676574)>	-1
+"Array<Widget>"	(null)	-1	template(4172726179)<named(576964676574)>	-1
+"NodeList<T>"	(null)	-1	template(4e6f64654c697374)<named(54)>	-1
+"Math<T>"	(null)	-1	template(4d617468)<named(54)>	-1
+"Record<string, Widget>"	(null)	-1	template(5265636f7264)<builtin(737472696e67),named(576964676574)>	-1
+"Box<T0,T1,T2,T3,T4,T5,T6,T7,T8,T9,T10,T11,T12,T13,T14,T15,T16,T17>"	(null)	-1	template(426f78)<named(5430),named(5431),named(5432),named(5433),named(5434),named(5435),named(5436),named(5437),named(5438),named(5439),named(543130),named(543131),named(543132),named(543133),named(543134)>	-1
+"Box<,>"	(null)	-1	template(426f78)<?,?>	-1
+"Foo<A>.Bar"	(null)	-1	named(466f6f3c413e2e426172)	-1
+"Foo<A>[]"	(null)	-1	template(4172726179)<template(466f6f)<named(41)>>	-1
+"Foo[]<A>"	(null)	-1	template(466f6f5b5d)<named(41)>	-1
+"\"literal\""	(null)	-1	named(226c69746572616c22)	-1
+"42"	(null)	-1	named(3432)	-1
+"`tmpl${T}`"	(null)	-1	named(60746d706c247b547d60)	-1
+"A extends B"	(null)	-1	named(4120657874656e64732042)	-1
+"readonly Widget[]"	(null)	-1	template(4172726179)<named(726561646f6e6c7920576964676574)>	-1
+"new () => Widget"	(null)	-1	named(6e6577202829203d3e20576964676574)	-1
+"asserts x is Widget"	(null)	-1	named(61737365727473207820697320576964676574)	-1
+"x is Widget"	(null)	-1	named(7820697320576964676574)	-1
+"unique symbol"	(null)	-1	named(756e697175652073796d626f6c)	-1
+"Widget[\"key\"]"	(null)	-1	named(5769646765745b226b6579225d)	-1
+"{ [K in keyof T]: T[K] }"	(null)	-1	?	-1
+""	""	-1	?	-1
+" "	""	-1	?	-1
+" \t\r\n"	""	-1	?	-1
+":"	""	-1	?	-1
+": "	""	-1	?	-1
+";"	""	-1	?	-1
+",;, "	""	-1	?	-1
+"\r\n: Client ; "	""	-1	named(2e436c69656e74)	-1
+"Client"	""	-1	named(2e436c69656e74)	-1
+"  Client,"	""	-1	named(2e436c69656e74)	-1
+":Client"	""	-1	named(2e436c69656e74)	-1
+"::Client"	""	-1	named(3a436c69656e74)	-1
+"exports.Client"	""	-1	named(6578706f7274732e436c69656e74)	-1
+"a.b.Client"	""	-1	named(612e622e436c69656e74)	-1
+"Document"	""	-1	named(446f63756d656e74)	-1
+"JSX"	""	-1	named(4a5358)	-1
+"Pick"	""	-1	named(2e5069636b)	-1
+"Promise"	""	-1	named(50726f6d697365)	-1
+"lower"	""	-1	named(6c6f776572)	-1
+"_Under"	""	-1	named(5f556e646572)	-1
+"Child\xff"	""	-1	named(2e4368696c64ff)	-1
+"\xc3\x89cole"	""	-1	named(c389636f6c65)	-1
+"string"	""	-1	builtin(737472696e67)	-1
+"number"	""	-1	builtin(6e756d626572)	-1
+"boolean"	""	-1	builtin(626f6f6c65616e)	-1
+"bigint"	""	-1	builtin(626967696e74)	-1
+"any"	""	-1	builtin(616e79)	-1
+"unknown"	""	-1	builtin(756e6b6e6f776e)	-1
+"void"	""	-1	builtin(766f6964)	-1
+"never"	""	-1	builtin(6e65766572)	-1
+"null"	""	-1	builtin(6e756c6c)	-1
+"undefined"	""	-1	builtin(756e646566696e6564)	-1
+"object"	""	-1	builtin(6f626a656374)	-1
+"symbol"	""	-1	builtin(73796d626f6c)	-1
+"String"	""	-1	named(537472696e67)	-1
+"strings"	""	-1	named(737472696e6773)	-1
+"this"	""	-1	this	-1
+"this;"	""	-1	this	-1
+"  this  "	""	-1	this	-1
+"This"	""	-1	named(2e54686973)	-1
+"{ child: Client }"	""	-1	?	-1
+"{"	""	-1	?	-1
+"}"	""	-1	named(7d)	-1
+"("	""	-1	?	-1
+")"	""	-1	named(29)	-1
+"(a"	""	-1	?	-1
+"(Client)"	""	-1	?	-1
+"(a) b"	""	-1	?	-1
+"()"	""	-1	?	-1
+"() =>"	""	-1	fn()->?	-1
+"() => "	""	-1	fn()->?	-1
+"()=>void"	""	-1	fn()->builtin(766f6964)	-1
+"() => void"	""	-1	fn()->builtin(766f6964)	-1
+"() =>void;"	""	-1	fn()->builtin(766f6964)	-1
+"(a: A) => R"	""	-1	fn(param(61)=named(2e41))->named(2e52)	-1
+"(a: A, b?: B) => R"	""	-1	fn(param(61)=named(2e41),param(62)=named(2e42))->named(2e52)	-1
+"(handler?: Promise<Session>, number, , flag\t?: boolean) => Result[];"	""	-1	fn(param(68616e646c6572)=template(50726f6d697365)<named(2e53657373696f6e)>,param(5f31)=builtin(6e756d626572),param(5f32)=?,param(666c616709)=builtin(626f6f6c65616e))->template(4172726179)<named(2e526573756c74)>	-1
+"(cb: (x: number) => void, y: string) => void"	""	-1	fn()->builtin(766f6964)	-1
+"(cb: (x: number) => Foo) => Bar"	""	-1	fn()->named(2e426172)	-1
+"(m: Map<K, V>, t: [A, B]) => Promise<R>"	""	-1	fn(param(6d)=template(4d6170)<named(2e4b),named(2e56)>,param(74)=tuple(named(2e41),named(2e42)))->template(50726f6d697365)<named(2e52)>	-1
+"( a : A ) =>  R ;"	""	-1	fn(param(61)=named(2e41))->named(2e52)	-1
+"(: A) => R"	""	-1	fn(param()=named(2e41))->named(2e52)	-1
+"(a:) => R"	""	-1	fn(param(61)=?)->named(2e52)	-1
+"(...args: Arg[]) => Out"	""	-1	fn(param(2e2e2e61726773)=template(4172726179)<named(2e417267)>)->named(2e4f7574)	-1
+"(a: A) => (b: B) => C"	""	-1	fn(param(61)=named(2e41))->fn(param(62)=named(2e42))->named(2e43)	-1
+"((a: A) => B)"	""	-1	?	-1
+"(a: A) =>\tR"	""	-1	fn(param(61)=named(2e41))->named(2e52)	-1
+"(a: A)\t=> R"	""	-1	fn(param(61)=named(2e41))->named(2e52)	-1
+"(a: A)\n=> R"	""	-1	?	-1
+"(a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p, q, r) => Z"	""	-1	fn(param(5f30)=named(61),param(5f31)=named(62),param(5f32)=named(63),param(5f33)=named(64),param(5f34)=named(65),param(5f35)=named(66),param(5f36)=named(67),param(5f37)=named(68),param(5f38)=named(69),param(5f39)=named(6a),param(5f3130)=named(6b),param(5f3131)=named(6c),param(5f3132)=named(6d),param(5f3133)=named(6e),param(5f3134)=named(6f))->named(2e5a)	-1
+"(a,b) => (c) => d"	""	-1	fn(param(5f30)=named(61),param(5f31)=named(62))->fn(param(5f30)=named(63))->named(64)	-1
+"T extends U ? X : Y"	""	-1	conditional(named(2e54),named(2e55),named(2e58),named(2e59))	-1
+"T extends U ? X : Y;"	""	-1	conditional(named(2e54),named(2e55),named(2e58),named(2e59))	-1
+"T extends Box<infer R> ? keyof R : typeof value;"	""	-1	conditional(named(2e54),template(2e426f78)<infer(52)>,keyof(named(2e52)),typeof(76616c7565))	-1
+"T extends (infer U)[] ? U : never"	""	-1	conditional(named(2e54),?,named(2e55),builtin(6e65766572))	-1
+"T extends [infer H, ...infer Rest] ? H : never"	""	-1	conditional(named(2e54),tuple(infer(48),named(2e2e2e696e6665722052657374)),named(2e48),builtin(6e65766572))	-1
+"T extends U ? X"	""	-1	named(2e5420657874656e64732055203f2058)	-1
+"T extends U : X ? Y"	""	-1	named(2e5420657874656e64732055203a2058203f2059)	-1
+"T extends U ? X : Y extends Z ? A : B"	""	-1	conditional(named(2e54),named(2e55),named(2e58),conditional(named(2e59),named(2e5a),named(2e41),named(2e42)))	-1
+"Box<T extends U ? X : Y>"	""	-1	template(2e426f78)<conditional(named(2e54),named(2e55),named(2e58),named(2e59))>	-1
+" extends U ? X : Y"	""	-1	named(657874656e64732055203f2058203a2059)	-1
+"T  extends U ? X : Y"	""	-1	conditional(named(2e54),named(2e55),named(2e58),named(2e59))	-1
+"T extends U ?X : Y"	""	-1	named(2e5420657874656e64732055203f58203a2059)	-1
+"A | B extends C ? D : E"	""	-1	conditional(union(named(2e41),named(2e42)),named(2e43),named(2e44),named(2e45))	-1
+"(T extends U ? X : Y)"	""	-1	?	-1
+"infer R"	""	-1	infer(52)	-1
+"infer R;"	""	-1	infer(523b)	-1
+"infer  R extra"	""	-1	infer(52)	-1
+"infer \tR"	""	-1	infer(52)	-1
+"infer "	""	-1	named(696e666572)	-1
+"infer"	""	-1	named(696e666572)	-1
+"inferR"	""	-1	named(696e66657252)	-1
+"keyof Widget"	""	-1	keyof(named(2e576964676574))	-1
+"keyof  Widget ;"	""	-1	keyof(named(2e576964676574))	-1
+"keyof typeof obj"	""	-1	keyof(typeof(6f626a))	-1
+"keyof "	""	-1	named(6b65796f66)	-1
+"keyof"	""	-1	named(6b65796f66)	-1
+"typeof exported"	""	-1	typeof(6578706f72746564)	-1
+": typeof exported;  "	""	-1	typeof(6578706f727465643b2020)	-1
+"typeof \tvalue.inner"	""	-1	typeof(76616c75652e696e6e6572)	-1
+"typeof "	""	-1	named(747970656f66)	-1
+"typeof"	""	-1	named(747970656f66)	-1
+"typeofx"	""	-1	named(747970656f6678)	-1
+"[]"	""	-1	tuple(?)	-1
+"["	""	-1	named(5b)	-1
+"]"	""	-1	named(5d)	-1
+"[A]"	""	-1	tuple(named(2e41))	-1
+"[A, B]"	""	-1	tuple(named(2e41),named(2e42))	-1
+"[A, , B]"	""	-1	tuple(named(2e41),?,named(2e42))	-1
+"[A, B,]"	""	-1	tuple(named(2e41),named(2e42),?)	-1
+"[Map<K, V>, [C, D]]"	""	-1	tuple(template(4d6170)<named(2e4b),named(2e56)>,tuple(named(2e43),named(2e44)))	-1
+"[A, B] | C"	""	-1	union(tuple(named(2e41),named(2e42)),named(2e43))	-1
+"[A][]"	""	-1	tuple(named(2e415d5b))	-1
+"[T0,T1,T2,T3,T4,T5,T6,T7,T8,T9,T10,T11,T12,T13,T14,T15,T16,T17,T18,T19]"	""	-1	tuple(named(2e5430),named(2e5431),named(2e5432),named(2e5433),named(2e5434),named(2e5435),named(2e5436),named(2e5437),named(2e5438),named(2e5439),named(2e543130),named(2e543131),named(2e543132),named(2e543133),named(2e543134))	-1
+"A | B"	""	-1	union(named(2e41),named(2e42))	-1
+"A & B"	""	-1	intersection(named(2e41),named(2e42))	-1
+"A & B | C"	""	-1	union(named(2e41),named(2e42),named(2e43))	-1
+"A | B & C"	""	-1	union(named(2e41),named(2e42),named(2e43))	-1
+"A|B"	""	-1	named(2e417c42)	-1
+"A |B"	""	-1	union(named(2e41),named(2e42))	-1
+"A| B"	""	-1	named(2e417c2042)	-1
+"A\t| B"	""	-1	union(named(2e41),named(2e42))	-1
+"| A"	""	-1	named(7c2041)	-1
+" | A"	""	-1	named(7c2041)	-1
+"A | "	""	-1	union(named(2e41),?)	-1
+"A |"	""	-1	union(named(2e41),?)	-1
+"A | | B"	""	-1	union(named(2e41),?,named(2e42))	-1
+"Box<A | B> | C"	""	-1	union(template(2e426f78)<union(named(2e41),named(2e42))>,named(2e43))	-1
+"(A | B)"	""	-1	?	-1
+"A | B[]"	""	-1	union(named(2e41),template(4172726179)<named(2e42)>)	-1
+"string | null"	""	-1	union(builtin(737472696e67),builtin(6e756c6c))	-1
+"Promise<A> & Map<K, V>"	""	-1	intersection(template(50726f6d697365)<named(2e41)>,template(4d6170)<named(2e4b),named(2e56)>)	-1
+"T0 | T1 | T2 | T3 | T4 | T5 | T6 | T7 | T8 | T9 | T10 | T11 | T12 | T13 | T14 | T15 | T16"	""	-1	union(named(2e5430),named(2e5431),named(2e5432),named(2e5433),named(2e5434),named(2e5435),named(2e5436),named(2e5437),named(2e5438),named(2e5439),named(2e543130),named(2e543131),named(2e543132),named(2e543133),named(2e543134))	-1
+"T0 & T1 & T2 & T3 & T4 & T5 & T6 & T7 & T8 & T9 & T10 & T11 & T12 & T13 & T14 & T15"	""	-1	intersection(named(2e5430),named(2e5431),named(2e5432),named(2e5433),named(2e5434),named(2e5435),named(2e5436),named(2e5437),named(2e5438),named(2e5439),named(2e543130),named(2e543131),named(2e543132),named(2e543133),named(2e543134))	-1
+"T0 | T1 | T2 | T3 | T4 | T5 | T6 | T7 | T8 | T9 | T10 | T11 | T12 | T13 | T14"	""	-1	union(named(2e5430),named(2e5431),named(2e5432),named(2e5433),named(2e5434),named(2e5435),named(2e5436),named(2e5437),named(2e5438),named(2e5439),named(2e543130),named(2e543131),named(2e543132),named(2e543133),named(2e543134))	-1
+"T0 | T1 | T2 | T3 | T4 | T5 | T6 | T7 | T8 | T9 | T10 | T11 | T12 | T13 | T14 | T15"	""	-1	union(named(2e5430),named(2e5431),named(2e5432),named(2e5433),named(2e5434),named(2e5435),named(2e5436),named(2e5437),named(2e5438),named(2e5439),named(2e543130),named(2e543131),named(2e543132),named(2e543133),named(2e543134))	-1
+"T[]"	""	-1	template(4172726179)<named(2e54)>	-1
+"T[][]"	""	-1	template(4172726179)<template(4172726179)<named(2e54)>>	-1
+"string[]"	""	-1	template(4172726179)<builtin(737472696e67)>	-1
+"Provider<A, B>[]"	""	-1	template(4172726179)<template(2e50726f7669646572)<named(2e41),named(2e42)>>	-1
+"[]]"	""	-1	tuple()	-1
+"[][]"	""	-1	tuple(named(5d5b))	-1
+"Map<>"	""	-1	template(4d6170)<?>	-1
+"Map<K, V>"	""	-1	template(4d6170)<named(2e4b),named(2e56)>	-1
+"Foo<A, B<C>>"	""	-1	template(2e466f6f)<named(2e41),template(2e42)<named(2e43)>>	-1
+"Foo<A,B<C,D>,E>"	""	-1	template(2e466f6f)<named(2e41),template(2e42)<named(2e43),named(2e44)>,named(2e45)>	-1
+"Foo<(a: A) => B>"	""	-1	named(2e466f6f3c28613a204129203d3e20423e)	-1
+"Foo<[A, B]>"	""	-1	template(2e466f6f)<named(5b41),named(2e425d)>	-1
+"Foo< A , B >"	""	-1	template(2e466f6f)<named(2e41),named(2e42)>	-1
+"Foo<A>>"	""	-1	named(2e466f6f3c413e3e)	-1
+"Foo<<A>"	""	-1	template(2e466f6f3c)<named(2e41)>	-1
+"<T>"	""	-1	named(3c543e)	-1
+"<>"	""	-1	named(3c3e)	-1
+"x<T>"	""	-1	template(78)<named(2e54)>	-1
+"a.b.Foo<T>"	""	-1	template(612e622e466f6f)<named(2e54)>	-1
+"Partial<Widget>"	""	-1	template(5061727469616c)<named(2e576964676574)>	-1
+"Readonly<Widget>"	""	-1	template(526561646f6e6c79)<named(2e576964676574)>	-1
+"Array<Widget>"	""	-1	template(4172726179)<named(2e576964676574)>	-1
+"NodeList<T>"	""	-1	template(4e6f64654c697374)<named(2e54)>	-1
+"Math<T>"	""	-1	template(2e4d617468)<named(2e54)>	-1
+"Record<string, Widget>"	""	-1	template(5265636f7264)<builtin(737472696e67),named(2e576964676574)>	-1
+"Box<T0,T1,T2,T3,T4,T5,T6,T7,T8,T9,T10,T11,T12,T13,T14,T15,T16,T17>"	""	-1	template(2e426f78)<named(2e5430),named(2e5431),named(2e5432),named(2e5433),named(2e5434),named(2e5435),named(2e5436),named(2e5437),named(2e5438),named(2e5439),named(2e543130),named(2e543131),named(2e543132),named(2e543133),named(2e543134)>	-1
+"Box<,>"	""	-1	template(2e426f78)<?,?>	-1
+"Foo<A>.Bar"	""	-1	named(466f6f3c413e2e426172)	-1
+"Foo<A>[]"	""	-1	template(4172726179)<template(2e466f6f)<named(2e41)>>	-1
+"Foo[]<A>"	""	-1	template(2e466f6f5b5d)<named(2e41)>	-1
+"\"literal\""	""	-1	named(226c69746572616c22)	-1
+"42"	""	-1	named(3432)	-1
+"`tmpl${T}`"	""	-1	named(60746d706c247b547d60)	-1
+"A extends B"	""	-1	named(2e4120657874656e64732042)	-1
+"readonly Widget[]"	""	-1	template(4172726179)<named(726561646f6e6c7920576964676574)>	-1
+"new () => Widget"	""	-1	named(6e6577202829203d3e20576964676574)	-1
+"asserts x is Widget"	""	-1	named(61737365727473207820697320576964676574)	-1
+"x is Widget"	""	-1	named(7820697320576964676574)	-1
+"unique symbol"	""	-1	named(756e697175652073796d626f6c)	-1
+"Widget[\"key\"]"	""	-1	named(2e5769646765745b226b6579225d)	-1
+"{ [K in keyof T]: T[K] }"	""	-1	?	-1
+""	"a.b.c"	-1	?	-1
+" "	"a.b.c"	-1	?	-1
+" \t\r\n"	"a.b.c"	-1	?	-1
+":"	"a.b.c"	-1	?	-1
+": "	"a.b.c"	-1	?	-1
+";"	"a.b.c"	-1	?	-1
+",;, "	"a.b.c"	-1	?	-1
+"\r\n: Client ; "	"a.b.c"	-1	named(612e622e632e436c69656e74)	-1
+"Client"	"a.b.c"	-1	named(612e622e632e436c69656e74)	-1
+"  Client,"	"a.b.c"	-1	named(612e622e632e436c69656e74)	-1
+":Client"	"a.b.c"	-1	named(612e622e632e436c69656e74)	-1
+"::Client"	"a.b.c"	-1	named(3a436c69656e74)	-1
+"exports.Client"	"a.b.c"	-1	named(6578706f7274732e436c69656e74)	-1
+"a.b.Client"	"a.b.c"	-1	named(612e622e436c69656e74)	-1
+"Document"	"a.b.c"	-1	named(446f63756d656e74)	-1
+"JSX"	"a.b.c"	-1	named(4a5358)	-1
+"Pick"	"a.b.c"	-1	named(612e622e632e5069636b)	-1
+"Promise"	"a.b.c"	-1	named(50726f6d697365)	-1
+"lower"	"a.b.c"	-1	named(6c6f776572)	-1
+"_Under"	"a.b.c"	-1	named(5f556e646572)	-1
+"Child\xff"	"a.b.c"	-1	named(612e622e632e4368696c64ff)	-1
+"\xc3\x89cole"	"a.b.c"	-1	named(c389636f6c65)	-1
+"string"	"a.b.c"	-1	builtin(737472696e67)	-1
+"number"	"a.b.c"	-1	builtin(6e756d626572)	-1
+"boolean"	"a.b.c"	-1	builtin(626f6f6c65616e)	-1
+"bigint"	"a.b.c"	-1	builtin(626967696e74)	-1
+"any"	"a.b.c"	-1	builtin(616e79)	-1
+"unknown"	"a.b.c"	-1	builtin(756e6b6e6f776e)	-1
+"void"	"a.b.c"	-1	builtin(766f6964)	-1
+"never"	"a.b.c"	-1	builtin(6e65766572)	-1
+"null"	"a.b.c"	-1	builtin(6e756c6c)	-1
+"undefined"	"a.b.c"	-1	builtin(756e646566696e6564)	-1
+"object"	"a.b.c"	-1	builtin(6f626a656374)	-1
+"symbol"	"a.b.c"	-1	builtin(73796d626f6c)	-1
+"String"	"a.b.c"	-1	named(537472696e67)	-1
+"strings"	"a.b.c"	-1	named(737472696e6773)	-1
+"this"	"a.b.c"	-1	this	-1
+"this;"	"a.b.c"	-1	this	-1
+"  this  "	"a.b.c"	-1	this	-1
+"This"	"a.b.c"	-1	named(612e622e632e54686973)	-1
+"{ child: Client }"	"a.b.c"	-1	?	-1
+"{"	"a.b.c"	-1	?	-1
+"}"	"a.b.c"	-1	named(7d)	-1
+"("	"a.b.c"	-1	?	-1
+")"	"a.b.c"	-1	named(29)	-1
+"(a"	"a.b.c"	-1	?	-1
+"(Client)"	"a.b.c"	-1	?	-1
+"(a) b"	"a.b.c"	-1	?	-1
+"()"	"a.b.c"	-1	?	-1
+"() =>"	"a.b.c"	-1	fn()->?	-1
+"() => "	"a.b.c"	-1	fn()->?	-1
+"()=>void"	"a.b.c"	-1	fn()->builtin(766f6964)	-1
+"() => void"	"a.b.c"	-1	fn()->builtin(766f6964)	-1
+"() =>void;"	"a.b.c"	-1	fn()->builtin(766f6964)	-1
+"(a: A) => R"	"a.b.c"	-1	fn(param(61)=named(612e622e632e41))->named(612e622e632e52)	-1
+"(a: A, b?: B) => R"	"a.b.c"	-1	fn(param(61)=named(612e622e632e41),param(62)=named(612e622e632e42))->named(612e622e632e52)	-1
+"(handler?: Promise<Session>, number, , flag\t?: boolean) => Result[];"	"a.b.c"	-1	fn(param(68616e646c6572)=template(50726f6d697365)<named(612e622e632e53657373696f6e)>,param(5f31)=builtin(6e756d626572),param(5f32)=?,param(666c616709)=builtin(626f6f6c65616e))->template(4172726179)<named(612e622e632e526573756c74)>	-1
+"(cb: (x: number) => void, y: string) => void"	"a.b.c"	-1	fn()->builtin(766f6964)	-1
+"(cb: (x: number) => Foo) => Bar"	"a.b.c"	-1	fn()->named(612e622e632e426172)	-1
+"(m: Map<K, V>, t: [A, B]) => Promise<R>"	"a.b.c"	-1	fn(param(6d)=template(4d6170)<named(612e622e632e4b),named(612e622e632e56)>,param(74)=tuple(named(612e622e632e41),named(612e622e632e42)))->template(50726f6d697365)<named(612e622e632e52)>	-1
+"( a : A ) =>  R ;"	"a.b.c"	-1	fn(param(61)=named(612e622e632e41))->named(612e622e632e52)	-1
+"(: A) => R"	"a.b.c"	-1	fn(param()=named(612e622e632e41))->named(612e622e632e52)	-1
+"(a:) => R"	"a.b.c"	-1	fn(param(61)=?)->named(612e622e632e52)	-1
+"(...args: Arg[]) => Out"	"a.b.c"	-1	fn(param(2e2e2e61726773)=template(4172726179)<named(612e622e632e417267)>)->named(612e622e632e4f7574)	-1
+"(a: A) => (b: B) => C"	"a.b.c"	-1	fn(param(61)=named(612e622e632e41))->fn(param(62)=named(612e622e632e42))->named(612e622e632e43)	-1
+"((a: A) => B)"	"a.b.c"	-1	?	-1
+"(a: A) =>\tR"	"a.b.c"	-1	fn(param(61)=named(612e622e632e41))->named(612e622e632e52)	-1
+"(a: A)\t=> R"	"a.b.c"	-1	fn(param(61)=named(612e622e632e41))->named(612e622e632e52)	-1
+"(a: A)\n=> R"	"a.b.c"	-1	?	-1
+"(a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p, q, r) => Z"	"a.b.c"	-1	fn(param(5f30)=named(61),param(5f31)=named(62),param(5f32)=named(63),param(5f33)=named(64),param(5f34)=named(65),param(5f35)=named(66),param(5f36)=named(67),param(5f37)=named(68),param(5f38)=named(69),param(5f39)=named(6a),param(5f3130)=named(6b),param(5f3131)=named(6c),param(5f3132)=named(6d),param(5f3133)=named(6e),param(5f3134)=named(6f))->named(612e622e632e5a)	-1
+"(a,b) => (c) => d"	"a.b.c"	-1	fn(param(5f30)=named(61),param(5f31)=named(62))->fn(param(5f30)=named(63))->named(64)	-1
+"T extends U ? X : Y"	"a.b.c"	-1	conditional(named(612e622e632e54),named(612e622e632e55),named(612e622e632e58),named(612e622e632e59))	-1
+"T extends U ? X : Y;"	"a.b.c"	-1	conditional(named(612e622e632e54),named(612e622e632e55),named(612e622e632e58),named(612e622e632e59))	-1
+"T extends Box<infer R> ? keyof R : typeof value;"	"a.b.c"	-1	conditional(named(612e622e632e54),template(612e622e632e426f78)<infer(52)>,keyof(named(612e622e632e52)),typeof(76616c7565))	-1
+"T extends (infer U)[] ? U : never"	"a.b.c"	-1	conditional(named(612e622e632e54),?,named(612e622e632e55),builtin(6e65766572))	-1
+"T extends [infer H, ...infer Rest] ? H : never"	"a.b.c"	-1	conditional(named(612e622e632e54),tuple(infer(48),named(2e2e2e696e6665722052657374)),named(612e622e632e48),builtin(6e65766572))	-1
+"T extends U ? X"	"a.b.c"	-1	named(612e622e632e5420657874656e64732055203f2058)	-1
+"T extends U : X ? Y"	"a.b.c"	-1	named(612e622e632e5420657874656e64732055203a2058203f2059)	-1
+"T extends U ? X : Y extends Z ? A : B"	"a.b.c"	-1	conditional(named(612e622e632e54),named(612e622e632e55),named(612e622e632e58),conditional(named(612e622e632e59),named(612e622e632e5a),named(612e622e632e41),named(612e622e632e42)))	-1
+"Box<T extends U ? X : Y>"	"a.b.c"	-1	template(612e622e632e426f78)<conditional(named(612e622e632e54),named(612e622e632e55),named(612e622e632e58),named(612e622e632e59))>	-1
+" extends U ? X : Y"	"a.b.c"	-1	named(657874656e64732055203f2058203a2059)	-1
+"T  extends U ? X : Y"	"a.b.c"	-1	conditional(named(612e622e632e54),named(612e622e632e55),named(612e622e632e58),named(612e622e632e59))	-1
+"T extends U ?X : Y"	"a.b.c"	-1	named(612e622e632e5420657874656e64732055203f58203a2059)	-1
+"A | B extends C ? D : E"	"a.b.c"	-1	conditional(union(named(612e622e632e41),named(612e622e632e42)),named(612e622e632e43),named(612e622e632e44),named(612e622e632e45))	-1
+"(T extends U ? X : Y)"	"a.b.c"	-1	?	-1
+"infer R"	"a.b.c"	-1	infer(52)	-1
+"infer R;"	"a.b.c"	-1	infer(523b)	-1
+"infer  R extra"	"a.b.c"	-1	infer(52)	-1
+"infer \tR"	"a.b.c"	-1	infer(52)	-1
+"infer "	"a.b.c"	-1	named(696e666572)	-1
+"infer"	"a.b.c"	-1	named(696e666572)	-1
+"inferR"	"a.b.c"	-1	named(696e66657252)	-1
+"keyof Widget"	"a.b.c"	-1	keyof(named(612e622e632e576964676574))	-1
+"keyof  Widget ;"	"a.b.c"	-1	keyof(named(612e622e632e576964676574))	-1
+"keyof typeof obj"	"a.b.c"	-1	keyof(typeof(6f626a))	-1
+"keyof "	"a.b.c"	-1	named(6b65796f66)	-1
+"keyof"	"a.b.c"	-1	named(6b65796f66)	-1
+"typeof exported"	"a.b.c"	-1	typeof(6578706f72746564)	-1
+": typeof exported;  "	"a.b.c"	-1	typeof(6578706f727465643b2020)	-1
+"typeof \tvalue.inner"	"a.b.c"	-1	typeof(76616c75652e696e6e6572)	-1
+"typeof "	"a.b.c"	-1	named(747970656f66)	-1
+"typeof"	"a.b.c"	-1	named(747970656f66)	-1
+"typeofx"	"a.b.c"	-1	named(747970656f6678)	-1
+"[]"	"a.b.c"	-1	tuple(?)	-1
+"["	"a.b.c"	-1	named(5b)	-1
+"]"	"a.b.c"	-1	named(5d)	-1
+"[A]"	"a.b.c"	-1	tuple(named(612e622e632e41))	-1
+"[A, B]"	"a.b.c"	-1	tuple(named(612e622e632e41),named(612e622e632e42))	-1
+"[A, , B]"	"a.b.c"	-1	tuple(named(612e622e632e41),?,named(612e622e632e42))	-1
+"[A, B,]"	"a.b.c"	-1	tuple(named(612e622e632e41),named(612e622e632e42),?)	-1
+"[Map<K, V>, [C, D]]"	"a.b.c"	-1	tuple(template(4d6170)<named(612e622e632e4b),named(612e622e632e56)>,tuple(named(612e622e632e43),named(612e622e632e44)))	-1
+"[A, B] | C"	"a.b.c"	-1	union(tuple(named(612e622e632e41),named(612e622e632e42)),named(612e622e632e43))	-1
+"[A][]"	"a.b.c"	-1	tuple(named(612e622e632e415d5b))	-1
+"[T0,T1,T2,T3,T4,T5,T6,T7,T8,T9,T10,T11,T12,T13,T14,T15,T16,T17,T18,T19]"	"a.b.c"	-1	tuple(named(612e622e632e5430),named(612e622e632e5431),named(612e622e632e5432),named(612e622e632e5433),named(612e622e632e5434),named(612e622e632e5435),named(612e622e632e5436),named(612e622e632e5437),named(612e622e632e5438),named(612e622e632e5439),named(612e622e632e543130),named(612e622e632e543131),named(612e622e632e543132),named(612e622e632e543133),named(612e622e632e543134))	-1
+"A | B"	"a.b.c"	-1	union(named(612e622e632e41),named(612e622e632e42))	-1
+"A & B"	"a.b.c"	-1	intersection(named(612e622e632e41),named(612e622e632e42))	-1
+"A & B | C"	"a.b.c"	-1	union(named(612e622e632e41),named(612e622e632e42),named(612e622e632e43))	-1
+"A | B & C"	"a.b.c"	-1	union(named(612e622e632e41),named(612e622e632e42),named(612e622e632e43))	-1
+"A|B"	"a.b.c"	-1	named(612e622e632e417c42)	-1
+"A |B"	"a.b.c"	-1	union(named(612e622e632e41),named(612e622e632e42))	-1
+"A| B"	"a.b.c"	-1	named(612e622e632e417c2042)	-1
+"A\t| B"	"a.b.c"	-1	union(named(612e622e632e41),named(612e622e632e42))	-1
+"| A"	"a.b.c"	-1	named(7c2041)	-1
+" | A"	"a.b.c"	-1	named(7c2041)	-1
+"A | "	"a.b.c"	-1	union(named(612e622e632e41),?)	-1
+"A |"	"a.b.c"	-1	union(named(612e622e632e41),?)	-1
+"A | | B"	"a.b.c"	-1	union(named(612e622e632e41),?,named(612e622e632e42))	-1
+"Box<A | B> | C"	"a.b.c"	-1	union(template(612e622e632e426f78)<union(named(612e622e632e41),named(612e622e632e42))>,named(612e622e632e43))	-1
+"(A | B)"	"a.b.c"	-1	?	-1
+"A | B[]"	"a.b.c"	-1	union(named(612e622e632e41),template(4172726179)<named(612e622e632e42)>)	-1
+"string | null"	"a.b.c"	-1	union(builtin(737472696e67),builtin(6e756c6c))	-1
+"Promise<A> & Map<K, V>"	"a.b.c"	-1	intersection(template(50726f6d697365)<named(612e622e632e41)>,template(4d6170)<named(612e622e632e4b),named(612e622e632e56)>)	-1
+"T0 | T1 | T2 | T3 | T4 | T5 | T6 | T7 | T8 | T9 | T10 | T11 | T12 | T13 | T14 | T15 | T16"	"a.b.c"	-1	union(named(612e622e632e5430),named(612e622e632e5431),named(612e622e632e5432),named(612e622e632e5433),named(612e622e632e5434),named(612e622e632e5435),named(612e622e632e5436),named(612e622e632e5437),named(612e622e632e5438),named(612e622e632e5439),named(612e622e632e543130),named(612e622e632e543131),named(612e622e632e543132),named(612e622e632e543133),named(612e622e632e543134))	-1
+"T0 & T1 & T2 & T3 & T4 & T5 & T6 & T7 & T8 & T9 & T10 & T11 & T12 & T13 & T14 & T15"	"a.b.c"	-1	intersection(named(612e622e632e5430),named(612e622e632e5431),named(612e622e632e5432),named(612e622e632e5433),named(612e622e632e5434),named(612e622e632e5435),named(612e622e632e5436),named(612e622e632e5437),named(612e622e632e5438),named(612e622e632e5439),named(612e622e632e543130),named(612e622e632e543131),named(612e622e632e543132),named(612e622e632e543133),named(612e622e632e543134))	-1
+"T0 | T1 | T2 | T3 | T4 | T5 | T6 | T7 | T8 | T9 | T10 | T11 | T12 | T13 | T14"	"a.b.c"	-1	union(named(612e622e632e5430),named(612e622e632e5431),named(612e622e632e5432),named(612e622e632e5433),named(612e622e632e5434),named(612e622e632e5435),named(612e622e632e5436),named(612e622e632e5437),named(612e622e632e5438),named(612e622e632e5439),named(612e622e632e543130),named(612e622e632e543131),named(612e622e632e543132),named(612e622e632e543133),named(612e622e632e543134))	-1
+"T0 | T1 | T2 | T3 | T4 | T5 | T6 | T7 | T8 | T9 | T10 | T11 | T12 | T13 | T14 | T15"	"a.b.c"	-1	union(named(612e622e632e5430),named(612e622e632e5431),named(612e622e632e5432),named(612e622e632e5433),named(612e622e632e5434),named(612e622e632e5435),named(612e622e632e5436),named(612e622e632e5437),named(612e622e632e5438),named(612e622e632e5439),named(612e622e632e543130),named(612e622e632e543131),named(612e622e632e543132),named(612e622e632e543133),named(612e622e632e543134))	-1
+"T[]"	"a.b.c"	-1	template(4172726179)<named(612e622e632e54)>	-1
+"T[][]"	"a.b.c"	-1	template(4172726179)<template(4172726179)<named(612e622e632e54)>>	-1
+"string[]"	"a.b.c"	-1	template(4172726179)<builtin(737472696e67)>	-1
+"Provider<A, B>[]"	"a.b.c"	-1	template(4172726179)<template(612e622e632e50726f7669646572)<named(612e622e632e41),named(612e622e632e42)>>	-1
+"[]]"	"a.b.c"	-1	tuple()	-1
+"[][]"	"a.b.c"	-1	tuple(named(5d5b))	-1
+"Map<>"	"a.b.c"	-1	template(4d6170)<?>	-1
+"Map<K, V>"	"a.b.c"	-1	template(4d6170)<named(612e622e632e4b),named(612e622e632e56)>	-1
+"Foo<A, B<C>>"	"a.b.c"	-1	template(612e622e632e466f6f)<named(612e622e632e41),template(612e622e632e42)<named(612e622e632e43)>>	-1
+"Foo<A,B<C,D>,E>"	"a.b.c"	-1	template(612e622e632e466f6f)<named(612e622e632e41),template(612e622e632e42)<named(612e622e632e43),named(612e622e632e44)>,named(612e622e632e45)>	-1
+"Foo<(a: A) => B>"	"a.b.c"	-1	named(612e622e632e466f6f3c28613a204129203d3e20423e)	-1
+"Foo<[A, B]>"	"a.b.c"	-1	template(612e622e632e466f6f)<named(5b41),named(612e622e632e425d)>	-1
+"Foo< A , B >"	"a.b.c"	-1	template(612e622e632e466f6f)<named(612e622e632e41),named(612e622e632e42)>	-1
+"Foo<A>>"	"a.b.c"	-1	named(612e622e632e466f6f3c413e3e)	-1
+"Foo<<A>"	"a.b.c"	-1	template(612e622e632e466f6f3c)<named(612e622e632e41)>	-1
+"<T>"	"a.b.c"	-1	named(3c543e)	-1
+"<>"	"a.b.c"	-1	named(3c3e)	-1
+"x<T>"	"a.b.c"	-1	template(78)<named(612e622e632e54)>	-1
+"a.b.Foo<T>"	"a.b.c"	-1	template(612e622e466f6f)<named(612e622e632e54)>	-1
+"Partial<Widget>"	"a.b.c"	-1	template(5061727469616c)<named(612e622e632e576964676574)>	-1
+"Readonly<Widget>"	"a.b.c"	-1	template(526561646f6e6c79)<named(612e622e632e576964676574)>	-1
+"Array<Widget>"	"a.b.c"	-1	template(4172726179)<named(612e622e632e576964676574)>	-1
+"NodeList<T>"	"a.b.c"	-1	template(4e6f64654c697374)<named(612e622e632e54)>	-1
+"Math<T>"	"a.b.c"	-1	template(612e622e632e4d617468)<named(612e622e632e54)>	-1
+"Record<string, Widget>"	"a.b.c"	-1	template(5265636f7264)<builtin(737472696e67),named(612e622e632e576964676574)>	-1
+"Box<T0,T1,T2,T3,T4,T5,T6,T7,T8,T9,T10,T11,T12,T13,T14,T15,T16,T17>"	"a.b.c"	-1	template(612e622e632e426f78)<named(612e622e632e5430),named(612e622e632e5431),named(612e622e632e5432),named(612e622e632e5433),named(612e622e632e5434),named(612e622e632e5435),named(612e622e632e5436),named(612e622e632e5437),named(612e622e632e5438),named(612e622e632e5439),named(612e622e632e543130),named(612e622e632e543131),named(612e622e632e543132),named(612e622e632e543133),named(612e622e632e543134)>	-1
+"Box<,>"	"a.b.c"	-1	template(612e622e632e426f78)<?,?>	-1
+"Foo<A>.Bar"	"a.b.c"	-1	named(466f6f3c413e2e426172)	-1
+"Foo<A>[]"	"a.b.c"	-1	template(4172726179)<template(612e622e632e466f6f)<named(612e622e632e41)>>	-1
+"Foo[]<A>"	"a.b.c"	-1	template(612e622e632e466f6f5b5d)<named(612e622e632e41)>	-1
+"\"literal\""	"a.b.c"	-1	named(226c69746572616c22)	-1
+"42"	"a.b.c"	-1	named(3432)	-1
+"`tmpl${T}`"	"a.b.c"	-1	named(60746d706c247b547d60)	-1
+"A extends B"	"a.b.c"	-1	named(612e622e632e4120657874656e64732042)	-1
+"readonly Widget[]"	"a.b.c"	-1	template(4172726179)<named(726561646f6e6c7920576964676574)>	-1
+"new () => Widget"	"a.b.c"	-1	named(6e6577202829203d3e20576964676574)	-1
+"asserts x is Widget"	"a.b.c"	-1	named(61737365727473207820697320576964676574)	-1
+"x is Widget"	"a.b.c"	-1	named(7820697320576964676574)	-1
+"unique symbol"	"a.b.c"	-1	named(756e697175652073796d626f6c)	-1
+"Widget[\"key\"]"	"a.b.c"	-1	named(612e622e632e5769646765745b226b6579225d)	-1
+"{ [K in keyof T]: T[K] }"	"a.b.c"	-1	?	-1
+"A | B"	"pkg.api"	-1	union(named(706b672e6170692e41),named(706b672e6170692e42))	-1
+"A | B"	"pkg.api"	0	?	-1
+"A | B"	"pkg.api"	1	union(?,named(706b672e6170692e42))	-1
+"A | B"	"pkg.api"	2	union(named(706b672e6170692e41),?)	-1
+"A | B"	"pkg.api"	3	union(named(706b672e6170692e41),named(706b672e6170692e42))	0
+"A | B"	"pkg.api"	4	union(named(706b672e6170692e41),named(706b672e6170692e42))	1
+"A | B"	"pkg.api"	5	union(named(706b672e6170692e41),named(706b672e6170692e42))	2
+"A | B"	"pkg.api"	6	union(named(706b672e6170692e41),named(706b672e6170692e42))	3
+"A | B"	"pkg.api"	7	union(named(706b672e6170692e41),named(706b672e6170692e42))	4
+"A | B"	"pkg.api"	8	union(named(706b672e6170692e41),named(706b672e6170692e42))	5
+"A | B"	"pkg.api"	9	union(named(706b672e6170692e41),named(706b672e6170692e42))	6
+"A | B"	"pkg.api"	10	union(named(706b672e6170692e41),named(706b672e6170692e42))	7
+"A | B"	"pkg.api"	11	union(named(706b672e6170692e41),named(706b672e6170692e42))	8
+"A | B"	"pkg.api"	12	union(named(706b672e6170692e41),named(706b672e6170692e42))	9
+"A | B"	"pkg.api"	13	union(named(706b672e6170692e41),named(706b672e6170692e42))	10
+"A | B"	"pkg.api"	14	union(named(706b672e6170692e41),named(706b672e6170692e42))	11
+"A | B"	"pkg.api"	15	union(named(706b672e6170692e41),named(706b672e6170692e42))	12
+"A | B"	"pkg.api"	16	union(named(706b672e6170692e41),named(706b672e6170692e42))	13
+"A | B"	"pkg.api"	17	union(named(706b672e6170692e41),named(706b672e6170692e42))	14
+"A | B"	"pkg.api"	18	union(named(706b672e6170692e41),named(706b672e6170692e42))	15
+"A | B"	"pkg.api"	19	union(named(706b672e6170692e41),named(706b672e6170692e42))	16
+"A | B"	"pkg.api"	20	union(named(706b672e6170692e41),named(706b672e6170692e42))	17
+"A | B"	"pkg.api"	21	union(named(706b672e6170692e41),named(706b672e6170692e42))	18
+"A | B"	"pkg.api"	22	union(named(706b672e6170692e41),named(706b672e6170692e42))	19
+"A | B"	"pkg.api"	23	union(named(706b672e6170692e41),named(706b672e6170692e42))	20
+"A | B"	"pkg.api"	24	union(named(706b672e6170692e41),named(706b672e6170692e42))	21
+"A | B"	"pkg.api"	25	union(named(706b672e6170692e41),named(706b672e6170692e42))	22
+"A | B"	"pkg.api"	26	union(named(706b672e6170692e41),named(706b672e6170692e42))	23
+"A | B"	"pkg.api"	27	union(named(706b672e6170692e41),named(706b672e6170692e42))	24
+"A | B"	"pkg.api"	28	union(named(706b672e6170692e41),named(706b672e6170692e42))	25
+"A | B"	"pkg.api"	29	union(named(706b672e6170692e41),named(706b672e6170692e42))	26
+"A | B"	"pkg.api"	30	union(named(706b672e6170692e41),named(706b672e6170692e42))	27
+"A | B"	"pkg.api"	31	union(named(706b672e6170692e41),named(706b672e6170692e42))	28
+"A | B"	"pkg.api"	32	union(named(706b672e6170692e41),named(706b672e6170692e42))	29
+"A | B"	"pkg.api"	33	union(named(706b672e6170692e41),named(706b672e6170692e42))	30
+"A | B"	"pkg.api"	34	union(named(706b672e6170692e41),named(706b672e6170692e42))	31
+"A | B"	"pkg.api"	35	union(named(706b672e6170692e41),named(706b672e6170692e42))	32
+"A | B"	"pkg.api"	36	union(named(706b672e6170692e41),named(706b672e6170692e42))	33
+"A | B"	"pkg.api"	37	union(named(706b672e6170692e41),named(706b672e6170692e42))	34
+"A | B"	"pkg.api"	38	union(named(706b672e6170692e41),named(706b672e6170692e42))	35
+"A | B"	"pkg.api"	39	union(named(706b672e6170692e41),named(706b672e6170692e42))	36
+"A | B"	"pkg.api"	40	union(named(706b672e6170692e41),named(706b672e6170692e42))	37
+"Client"	"pkg.api"	-1	named(706b672e6170692e436c69656e74)	-1
+"Client"	"pkg.api"	0	?	-1
+"Client"	"pkg.api"	1	named(706b672e6170692e436c69656e74)	0
+"Client"	"pkg.api"	2	named(706b672e6170692e436c69656e74)	1
+"Client"	"pkg.api"	3	named(706b672e6170692e436c69656e74)	2
+"Client"	"pkg.api"	4	named(706b672e6170692e436c69656e74)	3
+"Client"	"pkg.api"	5	named(706b672e6170692e436c69656e74)	4
+"Client"	"pkg.api"	6	named(706b672e6170692e436c69656e74)	5
+"Client"	"pkg.api"	7	named(706b672e6170692e436c69656e74)	6
+"Client"	"pkg.api"	8	named(706b672e6170692e436c69656e74)	7
+"Client"	"pkg.api"	9	named(706b672e6170692e436c69656e74)	8
+"Client"	"pkg.api"	10	named(706b672e6170692e436c69656e74)	9
+"Client"	"pkg.api"	11	named(706b672e6170692e436c69656e74)	10
+"Client"	"pkg.api"	12	named(706b672e6170692e436c69656e74)	11
+"Client"	"pkg.api"	13	named(706b672e6170692e436c69656e74)	12
+"Client"	"pkg.api"	14	named(706b672e6170692e436c69656e74)	13
+"Client"	"pkg.api"	15	named(706b672e6170692e436c69656e74)	14
+"Client"	"pkg.api"	16	named(706b672e6170692e436c69656e74)	15
+"Client"	"pkg.api"	17	named(706b672e6170692e436c69656e74)	16
+"Client"	"pkg.api"	18	named(706b672e6170692e436c69656e74)	17
+"Client"	"pkg.api"	19	named(706b672e6170692e436c69656e74)	18
+"Client"	"pkg.api"	20	named(706b672e6170692e436c69656e74)	19
+"Client"	"pkg.api"	21	named(706b672e6170692e436c69656e74)	20
+"Client"	"pkg.api"	22	named(706b672e6170692e436c69656e74)	21
+"Client"	"pkg.api"	23	named(706b672e6170692e436c69656e74)	22
+"Client"	"pkg.api"	24	named(706b672e6170692e436c69656e74)	23
+"Client"	"pkg.api"	25	named(706b672e6170692e436c69656e74)	24
+"Client"	"pkg.api"	26	named(706b672e6170692e436c69656e74)	25
+"Client"	"pkg.api"	27	named(706b672e6170692e436c69656e74)	26
+"Client"	"pkg.api"	28	named(706b672e6170692e436c69656e74)	27
+"Client"	"pkg.api"	29	named(706b672e6170692e436c69656e74)	28
+"Client"	"pkg.api"	30	named(706b672e6170692e436c69656e74)	29
+"Client"	"pkg.api"	31	named(706b672e6170692e436c69656e74)	30
+"Client"	"pkg.api"	32	named(706b672e6170692e436c69656e74)	31
+"Client"	"pkg.api"	33	named(706b672e6170692e436c69656e74)	32
+"Client"	"pkg.api"	34	named(706b672e6170692e436c69656e74)	33
+"Client"	"pkg.api"	35	named(706b672e6170692e436c69656e74)	34
+"Client"	"pkg.api"	36	named(706b672e6170692e436c69656e74)	35
+"Client"	"pkg.api"	37	named(706b672e6170692e436c69656e74)	36
+"Client"	"pkg.api"	38	named(706b672e6170692e436c69656e74)	37
+"Client"	"pkg.api"	39	named(706b672e6170692e436c69656e74)	38
+"Client"	"pkg.api"	40	named(706b672e6170692e436c69656e74)	39
+"(handler?: Promise<Session>, number, , flag\t?: boolean) => Result[];"	"pkg.api"	-1	fn(param(68616e646c6572)=template(50726f6d697365)<named(706b672e6170692e53657373696f6e)>,param(5f31)=builtin(6e756d626572),param(5f32)=?,param(666c616709)=builtin(626f6f6c65616e))->template(4172726179)<named(706b672e6170692e526573756c74)>	-1
+"(handler?: Promise<Session>, number, , flag\t?: boolean) => Result[];"	"pkg.api"	0	?	-5
+"(handler?: Promise<Session>, number, , flag\t?: boolean) => Result[];"	"pkg.api"	1	?	-4
+"(handler?: Promise<Session>, number, , flag\t?: boolean) => Result[];"	"pkg.api"	2	?	-3
+"(handler?: Promise<Session>, number, , flag\t?: boolean) => Result[];"	"pkg.api"	3	?	-2
+"(handler?: Promise<Session>, number, , flag\t?: boolean) => Result[];"	"pkg.api"	4	?	-1
+"(handler?: Promise<Session>, number, , flag\t?: boolean) => Result[];"	"pkg.api"	5	fn(param(68616e646c6572)=template(50726f6d697365)<named(706b672e6170692e53657373696f6e)>,param(5f31)=builtin(6e756d626572),param(5f32)=?,param(666c616709)=builtin(626f6f6c65616e))->?	-1
+"(handler?: Promise<Session>, number, , flag\t?: boolean) => Result[];"	"pkg.api"	6	fn(param(68616e646c6572)=template(50726f6d697365)<named(706b672e6170692e53657373696f6e)>,param(5f31)=builtin(6e756d626572),param(5f32)=?,param(666c616709)=builtin(626f6f6c65616e))->template(4172726179)<?>	-1
+"(handler?: Promise<Session>, number, , flag\t?: boolean) => Result[];"	"pkg.api"	7	fn(param(68616e646c6572)=?,param(5f31)=builtin(6e756d626572),param(5f32)=?,param(666c616709)=builtin(626f6f6c65616e))->template(4172726179)<named(706b672e6170692e526573756c74)>	-2
+"(handler?: Promise<Session>, number, , flag\t?: boolean) => Result[];"	"pkg.api"	8	fn(param(68616e646c6572)=?,param(5f31)=builtin(6e756d626572),param(5f32)=?,param(666c616709)=builtin(626f6f6c65616e))->template(4172726179)<named(706b672e6170692e526573756c74)>	-1
+"(handler?: Promise<Session>, number, , flag\t?: boolean) => Result[];"	"pkg.api"	9	fn(param(68616e646c6572)=template(50726f6d697365)<?>,param(5f31)=builtin(6e756d626572),param(5f32)=?,param(666c616709)=builtin(626f6f6c65616e))->template(4172726179)<named(706b672e6170692e526573756c74)>	-1
+"(handler?: Promise<Session>, number, , flag\t?: boolean) => Result[];"	"pkg.api"	10	fn(param(68616e646c6572)=template(50726f6d697365)<named(706b672e6170692e53657373696f6e)>,param(5f31)=?,param(5f32)=?,param(666c616709)=builtin(626f6f6c65616e))->template(4172726179)<named(706b672e6170692e526573756c74)>	-1
+"(handler?: Promise<Session>, number, , flag\t?: boolean) => Result[];"	"pkg.api"	11	fn(param(68616e646c6572)=template(50726f6d697365)<named(706b672e6170692e53657373696f6e)>,param(5f31)=builtin(6e756d626572),param(5f32)=?,param(666c616709)=?)->template(4172726179)<named(706b672e6170692e526573756c74)>	-1
+"(handler?: Promise<Session>, number, , flag\t?: boolean) => Result[];"	"pkg.api"	12	fn(param(68616e646c6572)=template(50726f6d697365)<named(706b672e6170692e53657373696f6e)>,param(5f31)=builtin(6e756d626572),param(5f32)=?,param(666c616709)=builtin(626f6f6c65616e))->template(4172726179)<named(706b672e6170692e526573756c74)>	0
+"(handler?: Promise<Session>, number, , flag\t?: boolean) => Result[];"	"pkg.api"	13	fn(param(68616e646c6572)=template(50726f6d697365)<named(706b672e6170692e53657373696f6e)>,param(5f31)=builtin(6e756d626572),param(5f32)=?,param(666c616709)=builtin(626f6f6c65616e))->template(4172726179)<named(706b672e6170692e526573756c74)>	1
+"(handler?: Promise<Session>, number, , flag\t?: boolean) => Result[];"	"pkg.api"	14	fn(param(68616e646c6572)=template(50726f6d697365)<named(706b672e6170692e53657373696f6e)>,param(5f31)=builtin(6e756d626572),param(5f32)=?,param(666c616709)=builtin(626f6f6c65616e))->template(4172726179)<named(706b672e6170692e526573756c74)>	2
+"(handler?: Promise<Session>, number, , flag\t?: boolean) => Result[];"	"pkg.api"	15	fn(param(68616e646c6572)=template(50726f6d697365)<named(706b672e6170692e53657373696f6e)>,param(5f31)=builtin(6e756d626572),param(5f32)=?,param(666c616709)=builtin(626f6f6c65616e))->template(4172726179)<named(706b672e6170692e526573756c74)>	3
+"(handler?: Promise<Session>, number, , flag\t?: boolean) => Result[];"	"pkg.api"	16	fn(param(68616e646c6572)=template(50726f6d697365)<named(706b672e6170692e53657373696f6e)>,param(5f31)=builtin(6e756d626572),param(5f32)=?,param(666c616709)=builtin(626f6f6c65616e))->template(4172726179)<named(706b672e6170692e526573756c74)>	4
+"(handler?: Promise<Session>, number, , flag\t?: boolean) => Result[];"	"pkg.api"	17	fn(param(68616e646c6572)=template(50726f6d697365)<named(706b672e6170692e53657373696f6e)>,param(5f31)=builtin(6e756d626572),param(5f32)=?,param(666c616709)=builtin(626f6f6c65616e))->template(4172726179)<named(706b672e6170692e526573756c74)>	5
+"(handler?: Promise<Session>, number, , flag\t?: boolean) => Result[];"	"pkg.api"	18	fn(param(68616e646c6572)=template(50726f6d697365)<named(706b672e6170692e53657373696f6e)>,param(5f31)=builtin(6e756d626572),param(5f32)=?,param(666c616709)=builtin(626f6f6c65616e))->template(4172726179)<named(706b672e6170692e526573756c74)>	6
+"(handler?: Promise<Session>, number, , flag\t?: boolean) => Result[];"	"pkg.api"	19	fn(param(68616e646c6572)=template(50726f6d697365)<named(706b672e6170692e53657373696f6e)>,param(5f31)=builtin(6e756d626572),param(5f32)=?,param(666c616709)=builtin(626f6f6c65616e))->template(4172726179)<named(706b672e6170692e526573756c74)>	7
+"(handler?: Promise<Session>, number, , flag\t?: boolean) => Result[];"	"pkg.api"	20	fn(param(68616e646c6572)=template(50726f6d697365)<named(706b672e6170692e53657373696f6e)>,param(5f31)=builtin(6e756d626572),param(5f32)=?,param(666c616709)=builtin(626f6f6c65616e))->template(4172726179)<named(706b672e6170692e526573756c74)>	8
+"(handler?: Promise<Session>, number, , flag\t?: boolean) => Result[];"	"pkg.api"	21	fn(param(68616e646c6572)=template(50726f6d697365)<named(706b672e6170692e53657373696f6e)>,param(5f31)=builtin(6e756d626572),param(5f32)=?,param(666c616709)=builtin(626f6f6c65616e))->template(4172726179)<named(706b672e6170692e526573756c74)>	9
+"(handler?: Promise<Session>, number, , flag\t?: boolean) => Result[];"	"pkg.api"	22	fn(param(68616e646c6572)=template(50726f6d697365)<named(706b672e6170692e53657373696f6e)>,param(5f31)=builtin(6e756d626572),param(5f32)=?,param(666c616709)=builtin(626f6f6c65616e))->template(4172726179)<named(706b672e6170692e526573756c74)>	10
+"(handler?: Promise<Session>, number, , flag\t?: boolean) => Result[];"	"pkg.api"	23	fn(param(68616e646c6572)=template(50726f6d697365)<named(706b672e6170692e53657373696f6e)>,param(5f31)=builtin(6e756d626572),param(5f32)=?,param(666c616709)=builtin(626f6f6c65616e))->template(4172726179)<named(706b672e6170692e526573756c74)>	11
+"(handler?: Promise<Session>, number, , flag\t?: boolean) => Result[];"	"pkg.api"	24	fn(param(68616e646c6572)=template(50726f6d697365)<named(706b672e6170692e53657373696f6e)>,param(5f31)=builtin(6e756d626572),param(5f32)=?,param(666c616709)=builtin(626f6f6c65616e))->template(4172726179)<named(706b672e6170692e526573756c74)>	12
+"(handler?: Promise<Session>, number, , flag\t?: boolean) => Result[];"	"pkg.api"	25	fn(param(68616e646c6572)=template(50726f6d697365)<named(706b672e6170692e53657373696f6e)>,param(5f31)=builtin(6e756d626572),param(5f32)=?,param(666c616709)=builtin(626f6f6c65616e))->template(4172726179)<named(706b672e6170692e526573756c74)>	13
+"(handler?: Promise<Session>, number, , flag\t?: boolean) => Result[];"	"pkg.api"	26	fn(param(68616e646c6572)=template(50726f6d697365)<named(706b672e6170692e53657373696f6e)>,param(5f31)=builtin(6e756d626572),param(5f32)=?,param(666c616709)=builtin(626f6f6c65616e))->template(4172726179)<named(706b672e6170692e526573756c74)>	14
+"(handler?: Promise<Session>, number, , flag\t?: boolean) => Result[];"	"pkg.api"	27	fn(param(68616e646c6572)=template(50726f6d697365)<named(706b672e6170692e53657373696f6e)>,param(5f31)=builtin(6e756d626572),param(5f32)=?,param(666c616709)=builtin(626f6f6c65616e))->template(4172726179)<named(706b672e6170692e526573756c74)>	15
+"(handler?: Promise<Session>, number, , flag\t?: boolean) => Result[];"	"pkg.api"	28	fn(param(68616e646c6572)=template(50726f6d697365)<named(706b672e6170692e53657373696f6e)>,param(5f31)=builtin(6e756d626572),param(5f32)=?,param(666c616709)=builtin(626f6f6c65616e))->template(4172726179)<named(706b672e6170692e526573756c74)>	16
+"(handler?: Promise<Session>, number, , flag\t?: boolean) => Result[];"	"pkg.api"	29	fn(param(68616e646c6572)=template(50726f6d697365)<named(706b672e6170692e53657373696f6e)>,param(5f31)=builtin(6e756d626572),param(5f32)=?,param(666c616709)=builtin(626f6f6c65616e))->template(4172726179)<named(706b672e6170692e526573756c74)>	17
+"(handler?: Promise<Session>, number, , flag\t?: boolean) => Result[];"	"pkg.api"	30	fn(param(68616e646c6572)=template(50726f6d697365)<named(706b672e6170692e53657373696f6e)>,param(5f31)=builtin(6e756d626572),param(5f32)=?,param(666c616709)=builtin(626f6f6c65616e))->template(4172726179)<named(706b672e6170692e526573756c74)>	18
+"(handler?: Promise<Session>, number, , flag\t?: boolean) => Result[];"	"pkg.api"	31	fn(param(68616e646c6572)=template(50726f6d697365)<named(706b672e6170692e53657373696f6e)>,param(5f31)=builtin(6e756d626572),param(5f32)=?,param(666c616709)=builtin(626f6f6c65616e))->template(4172726179)<named(706b672e6170692e526573756c74)>	19
+"(handler?: Promise<Session>, number, , flag\t?: boolean) => Result[];"	"pkg.api"	32	fn(param(68616e646c6572)=template(50726f6d697365)<named(706b672e6170692e53657373696f6e)>,param(5f31)=builtin(6e756d626572),param(5f32)=?,param(666c616709)=builtin(626f6f6c65616e))->template(4172726179)<named(706b672e6170692e526573756c74)>	20
+"(handler?: Promise<Session>, number, , flag\t?: boolean) => Result[];"	"pkg.api"	33	fn(param(68616e646c6572)=template(50726f6d697365)<named(706b672e6170692e53657373696f6e)>,param(5f31)=builtin(6e756d626572),param(5f32)=?,param(666c616709)=builtin(626f6f6c65616e))->template(4172726179)<named(706b672e6170692e526573756c74)>	21
+"(handler?: Promise<Session>, number, , flag\t?: boolean) => Result[];"	"pkg.api"	34	fn(param(68616e646c6572)=template(50726f6d697365)<named(706b672e6170692e53657373696f6e)>,param(5f31)=builtin(6e756d626572),param(5f32)=?,param(666c616709)=builtin(626f6f6c65616e))->template(4172726179)<named(706b672e6170692e526573756c74)>	22
+"(handler?: Promise<Session>, number, , flag\t?: boolean) => Result[];"	"pkg.api"	35	fn(param(68616e646c6572)=template(50726f6d697365)<named(706b672e6170692e53657373696f6e)>,param(5f31)=builtin(6e756d626572),param(5f32)=?,param(666c616709)=builtin(626f6f6c65616e))->template(4172726179)<named(706b672e6170692e526573756c74)>	23
+"(handler?: Promise<Session>, number, , flag\t?: boolean) => Result[];"	"pkg.api"	36	fn(param(68616e646c6572)=template(50726f6d697365)<named(706b672e6170692e53657373696f6e)>,param(5f31)=builtin(6e756d626572),param(5f32)=?,param(666c616709)=builtin(626f6f6c65616e))->template(4172726179)<named(706b672e6170692e526573756c74)>	24
+"(handler?: Promise<Session>, number, , flag\t?: boolean) => Result[];"	"pkg.api"	37	fn(param(68616e646c6572)=template(50726f6d697365)<named(706b672e6170692e53657373696f6e)>,param(5f31)=builtin(6e756d626572),param(5f32)=?,param(666c616709)=builtin(626f6f6c65616e))->template(4172726179)<named(706b672e6170692e526573756c74)>	25
+"(handler?: Promise<Session>, number, , flag\t?: boolean) => Result[];"	"pkg.api"	38	fn(param(68616e646c6572)=template(50726f6d697365)<named(706b672e6170692e53657373696f6e)>,param(5f31)=builtin(6e756d626572),param(5f32)=?,param(666c616709)=builtin(626f6f6c65616e))->template(4172726179)<named(706b672e6170692e526573756c74)>	26
+"(handler?: Promise<Session>, number, , flag\t?: boolean) => Result[];"	"pkg.api"	39	fn(param(68616e646c6572)=template(50726f6d697365)<named(706b672e6170692e53657373696f6e)>,param(5f31)=builtin(6e756d626572),param(5f32)=?,param(666c616709)=builtin(626f6f6c65616e))->template(4172726179)<named(706b672e6170692e526573756c74)>	27
+"(handler?: Promise<Session>, number, , flag\t?: boolean) => Result[];"	"pkg.api"	40	fn(param(68616e646c6572)=template(50726f6d697365)<named(706b672e6170692e53657373696f6e)>,param(5f31)=builtin(6e756d626572),param(5f32)=?,param(666c616709)=builtin(626f6f6c65616e))->template(4172726179)<named(706b672e6170692e526573756c74)>	28
+"T extends Box<infer R> ? keyof R : typeof value;"	"pkg.api"	-1	conditional(named(706b672e6170692e54),template(706b672e6170692e426f78)<infer(52)>,keyof(named(706b672e6170692e52)),typeof(76616c7565))	-1
+"T extends Box<infer R> ? keyof R : typeof value;"	"pkg.api"	0	?	-3
+"T extends Box<infer R> ? keyof R : typeof value;"	"pkg.api"	1	?	-2
+"T extends Box<infer R> ? keyof R : typeof value;"	"pkg.api"	2	?	-1
+"T extends Box<infer R> ? keyof R : typeof value;"	"pkg.api"	3	conditional(?,template(706b672e6170692e426f78)<infer(52)>,keyof(named(706b672e6170692e52)),typeof(76616c7565))	-1
+"T extends Box<infer R> ? keyof R : typeof value;"	"pkg.api"	4	conditional(named(706b672e6170692e54),?,keyof(named(706b672e6170692e52)),typeof(76616c7565))	-1
+"T extends Box<infer R> ? keyof R : typeof value;"	"pkg.api"	5	conditional(named(706b672e6170692e54),template(706b672e6170692e426f78)<?>,keyof(named(706b672e6170692e52)),typeof(76616c7565))	-1
+"T extends Box<infer R> ? keyof R : typeof value;"	"pkg.api"	6	conditional(named(706b672e6170692e54),template(706b672e6170692e426f78)<infer(52)>,?,typeof(76616c7565))	-1
+"T extends Box<infer R> ? keyof R : typeof value;"	"pkg.api"	7	conditional(named(706b672e6170692e54),template(706b672e6170692e426f78)<infer(52)>,keyof(?),typeof(76616c7565))	-1
+"T extends Box<infer R> ? keyof R : typeof value;"	"pkg.api"	8	conditional(named(706b672e6170692e54),template(706b672e6170692e426f78)<infer(52)>,keyof(named(706b672e6170692e52)),?)	-1
+"T extends Box<infer R> ? keyof R : typeof value;"	"pkg.api"	9	conditional(named(706b672e6170692e54),template(706b672e6170692e426f78)<infer(52)>,keyof(named(706b672e6170692e52)),typeof(76616c7565))	0
+"T extends Box<infer R> ? keyof R : typeof value;"	"pkg.api"	10	conditional(named(706b672e6170692e54),template(706b672e6170692e426f78)<infer(52)>,keyof(named(706b672e6170692e52)),typeof(76616c7565))	1
+"T extends Box<infer R> ? keyof R : typeof value;"	"pkg.api"	11	conditional(named(706b672e6170692e54),template(706b672e6170692e426f78)<infer(52)>,keyof(named(706b672e6170692e52)),typeof(76616c7565))	2
+"T extends Box<infer R> ? keyof R : typeof value;"	"pkg.api"	12	conditional(named(706b672e6170692e54),template(706b672e6170692e426f78)<infer(52)>,keyof(named(706b672e6170692e52)),typeof(76616c7565))	3
+"T extends Box<infer R> ? keyof R : typeof value;"	"pkg.api"	13	conditional(named(706b672e6170692e54),template(706b672e6170692e426f78)<infer(52)>,keyof(named(706b672e6170692e52)),typeof(76616c7565))	4
+"T extends Box<infer R> ? keyof R : typeof value;"	"pkg.api"	14	conditional(named(706b672e6170692e54),template(706b672e6170692e426f78)<infer(52)>,keyof(named(706b672e6170692e52)),typeof(76616c7565))	5
+"T extends Box<infer R> ? keyof R : typeof value;"	"pkg.api"	15	conditional(named(706b672e6170692e54),template(706b672e6170692e426f78)<infer(52)>,keyof(named(706b672e6170692e52)),typeof(76616c7565))	6
+"T extends Box<infer R> ? keyof R : typeof value;"	"pkg.api"	16	conditional(named(706b672e6170692e54),template(706b672e6170692e426f78)<infer(52)>,keyof(named(706b672e6170692e52)),typeof(76616c7565))	7
+"T extends Box<infer R> ? keyof R : typeof value;"	"pkg.api"	17	conditional(named(706b672e6170692e54),template(706b672e6170692e426f78)<infer(52)>,keyof(named(706b672e6170692e52)),typeof(76616c7565))	8
+"T extends Box<infer R> ? keyof R : typeof value;"	"pkg.api"	18	conditional(named(706b672e6170692e54),template(706b672e6170692e426f78)<infer(52)>,keyof(named(706b672e6170692e52)),typeof(76616c7565))	9
+"T extends Box<infer R> ? keyof R : typeof value;"	"pkg.api"	19	conditional(named(706b672e6170692e54),template(706b672e6170692e426f78)<infer(52)>,keyof(named(706b672e6170692e52)),typeof(76616c7565))	10
+"T extends Box<infer R> ? keyof R : typeof value;"	"pkg.api"	20	conditional(named(706b672e6170692e54),template(706b672e6170692e426f78)<infer(52)>,keyof(named(706b672e6170692e52)),typeof(76616c7565))	11
+"T extends Box<infer R> ? keyof R : typeof value;"	"pkg.api"	21	conditional(named(706b672e6170692e54),template(706b672e6170692e426f78)<infer(52)>,keyof(named(706b672e6170692e52)),typeof(76616c7565))	12
+"T extends Box<infer R> ? keyof R : typeof value;"	"pkg.api"	22	conditional(named(706b672e6170692e54),template(706b672e6170692e426f78)<infer(52)>,keyof(named(706b672e6170692e52)),typeof(76616c7565))	13
+"T extends Box<infer R> ? keyof R : typeof value;"	"pkg.api"	23	conditional(named(706b672e6170692e54),template(706b672e6170692e426f78)<infer(52)>,keyof(named(706b672e6170692e52)),typeof(76616c7565))	14
+"T extends Box<infer R> ? keyof R : typeof value;"	"pkg.api"	24	conditional(named(706b672e6170692e54),template(706b672e6170692e426f78)<infer(52)>,keyof(named(706b672e6170692e52)),typeof(76616c7565))	15
+"T extends Box<infer R> ? keyof R : typeof value;"	"pkg.api"	25	conditional(named(706b672e6170692e54),template(706b672e6170692e426f78)<infer(52)>,keyof(named(706b672e6170692e52)),typeof(76616c7565))	16
+"T extends Box<infer R> ? keyof R : typeof value;"	"pkg.api"	26	conditional(named(706b672e6170692e54),template(706b672e6170692e426f78)<infer(52)>,keyof(named(706b672e6170692e52)),typeof(76616c7565))	17
+"T extends Box<infer R> ? keyof R : typeof value;"	"pkg.api"	27	conditional(named(706b672e6170692e54),template(706b672e6170692e426f78)<infer(52)>,keyof(named(706b672e6170692e52)),typeof(76616c7565))	18
+"T extends Box<infer R> ? keyof R : typeof value;"	"pkg.api"	28	conditional(named(706b672e6170692e54),template(706b672e6170692e426f78)<infer(52)>,keyof(named(706b672e6170692e52)),typeof(76616c7565))	19
+"T extends Box<infer R> ? keyof R : typeof value;"	"pkg.api"	29	conditional(named(706b672e6170692e54),template(706b672e6170692e426f78)<infer(52)>,keyof(named(706b672e6170692e52)),typeof(76616c7565))	20
+"T extends Box<infer R> ? keyof R : typeof value;"	"pkg.api"	30	conditional(named(706b672e6170692e54),template(706b672e6170692e426f78)<infer(52)>,keyof(named(706b672e6170692e52)),typeof(76616c7565))	21
+"T extends Box<infer R> ? keyof R : typeof value;"	"pkg.api"	31	conditional(named(706b672e6170692e54),template(706b672e6170692e426f78)<infer(52)>,keyof(named(706b672e6170692e52)),typeof(76616c7565))	22
+"T extends Box<infer R> ? keyof R : typeof value;"	"pkg.api"	32	conditional(named(706b672e6170692e54),template(706b672e6170692e426f78)<infer(52)>,keyof(named(706b672e6170692e52)),typeof(76616c7565))	23
+"T extends Box<infer R> ? keyof R : typeof value;"	"pkg.api"	33	conditional(named(706b672e6170692e54),template(706b672e6170692e426f78)<infer(52)>,keyof(named(706b672e6170692e52)),typeof(76616c7565))	24
+"T extends Box<infer R> ? keyof R : typeof value;"	"pkg.api"	34	conditional(named(706b672e6170692e54),template(706b672e6170692e426f78)<infer(52)>,keyof(named(706b672e6170692e52)),typeof(76616c7565))	25
+"T extends Box<infer R> ? keyof R : typeof value;"	"pkg.api"	35	conditional(named(706b672e6170692e54),template(706b672e6170692e426f78)<infer(52)>,keyof(named(706b672e6170692e52)),typeof(76616c7565))	26
+"T extends Box<infer R> ? keyof R : typeof value;"	"pkg.api"	36	conditional(named(706b672e6170692e54),template(706b672e6170692e426f78)<infer(52)>,keyof(named(706b672e6170692e52)),typeof(76616c7565))	27
+"T extends Box<infer R> ? keyof R : typeof value;"	"pkg.api"	37	conditional(named(706b672e6170692e54),template(706b672e6170692e426f78)<infer(52)>,keyof(named(706b672e6170692e52)),typeof(76616c7565))	28
+"T extends Box<infer R> ? keyof R : typeof value;"	"pkg.api"	38	conditional(named(706b672e6170692e54),template(706b672e6170692e426f78)<infer(52)>,keyof(named(706b672e6170692e52)),typeof(76616c7565))	29
+"T extends Box<infer R> ? keyof R : typeof value;"	"pkg.api"	39	conditional(named(706b672e6170692e54),template(706b672e6170692e426f78)<infer(52)>,keyof(named(706b672e6170692e52)),typeof(76616c7565))	30
+"T extends Box<infer R> ? keyof R : typeof value;"	"pkg.api"	40	conditional(named(706b672e6170692e54),template(706b672e6170692e426f78)<infer(52)>,keyof(named(706b672e6170692e52)),typeof(76616c7565))	31
+"[Map<K, V>, [C, D]] | Foo<A, B<C>>[]"	"pkg.api"	-1	tuple(template(4d6170)<named(706b672e6170692e4b),named(706b672e6170692e56)>,named(5b432c20445d5d207c20466f6f3c41),named(706b672e6170692e423c433e3e5b))	-1
+"[Map<K, V>, [C, D]] | Foo<A, B<C>>[]"	"pkg.api"	0	?	-3
+"[Map<K, V>, [C, D]] | Foo<A, B<C>>[]"	"pkg.api"	1	?	-2
+"[Map<K, V>, [C, D]] | Foo<A, B<C>>[]"	"pkg.api"	2	?	-1
+"[Map<K, V>, [C, D]] | Foo<A, B<C>>[]"	"pkg.api"	3	tuple(?,named(5b432c20445d5d207c20466f6f3c41),named(706b672e6170692e423c433e3e5b))	-1
+"[Map<K, V>, [C, D]] | Foo<A, B<C>>[]"	"pkg.api"	4	tuple(template(4d6170)<?,named(706b672e6170692e56)>,named(5b432c20445d5d207c20466f6f3c41),named(706b672e6170692e423c433e3e5b))	-1
+"[Map<K, V>, [C, D]] | Foo<A, B<C>>[]"	"pkg.api"	5	tuple(template(4d6170)<named(706b672e6170692e4b),?>,named(5b432c20445d5d207c20466f6f3c41),named(706b672e6170692e423c433e3e5b))	-1
+"[Map<K, V>, [C, D]] | Foo<A, B<C>>[]"	"pkg.api"	6	tuple(template(4d6170)<named(706b672e6170692e4b),named(706b672e6170692e56)>,?,named(706b672e6170692e423c433e3e5b))	-1
+"[Map<K, V>, [C, D]] | Foo<A, B<C>>[]"	"pkg.api"	7	tuple(template(4d6170)<named(706b672e6170692e4b),named(706b672e6170692e56)>,named(5b432c20445d5d207c20466f6f3c41),?)	-1
+"[Map<K, V>, [C, D]] | Foo<A, B<C>>[]"	"pkg.api"	8	tuple(template(4d6170)<named(706b672e6170692e4b),named(706b672e6170692e56)>,named(5b432c20445d5d207c20466f6f3c41),named(706b672e6170692e423c433e3e5b))	0
+"[Map<K, V>, [C, D]] | Foo<A, B<C>>[]"	"pkg.api"	9	tuple(template(4d6170)<named(706b672e6170692e4b),named(706b672e6170692e56)>,named(5b432c20445d5d207c20466f6f3c41),named(706b672e6170692e423c433e3e5b))	1
+"[Map<K, V>, [C, D]] | Foo<A, B<C>>[]"	"pkg.api"	10	tuple(template(4d6170)<named(706b672e6170692e4b),named(706b672e6170692e56)>,named(5b432c20445d5d207c20466f6f3c41),named(706b672e6170692e423c433e3e5b))	2
+"[Map<K, V>, [C, D]] | Foo<A, B<C>>[]"	"pkg.api"	11	tuple(template(4d6170)<named(706b672e6170692e4b),named(706b672e6170692e56)>,named(5b432c20445d5d207c20466f6f3c41),named(706b672e6170692e423c433e3e5b))	3
+"[Map<K, V>, [C, D]] | Foo<A, B<C>>[]"	"pkg.api"	12	tuple(template(4d6170)<named(706b672e6170692e4b),named(706b672e6170692e56)>,named(5b432c20445d5d207c20466f6f3c41),named(706b672e6170692e423c433e3e5b))	4
+"[Map<K, V>, [C, D]] | Foo<A, B<C>>[]"	"pkg.api"	13	tuple(template(4d6170)<named(706b672e6170692e4b),named(706b672e6170692e56)>,named(5b432c20445d5d207c20466f6f3c41),named(706b672e6170692e423c433e3e5b))	5
+"[Map<K, V>, [C, D]] | Foo<A, B<C>>[]"	"pkg.api"	14	tuple(template(4d6170)<named(706b672e6170692e4b),named(706b672e6170692e56)>,named(5b432c20445d5d207c20466f6f3c41),named(706b672e6170692e423c433e3e5b))	6
+"[Map<K, V>, [C, D]] | Foo<A, B<C>>[]"	"pkg.api"	15	tuple(template(4d6170)<named(706b672e6170692e4b),named(706b672e6170692e56)>,named(5b432c20445d5d207c20466f6f3c41),named(706b672e6170692e423c433e3e5b))	7
+"[Map<K, V>, [C, D]] | Foo<A, B<C>>[]"	"pkg.api"	16	tuple(template(4d6170)<named(706b672e6170692e4b),named(706b672e6170692e56)>,named(5b432c20445d5d207c20466f6f3c41),named(706b672e6170692e423c433e3e5b))	8
+"[Map<K, V>, [C, D]] | Foo<A, B<C>>[]"	"pkg.api"	17	tuple(template(4d6170)<named(706b672e6170692e4b),named(706b672e6170692e56)>,named(5b432c20445d5d207c20466f6f3c41),named(706b672e6170692e423c433e3e5b))	9
+"[Map<K, V>, [C, D]] | Foo<A, B<C>>[]"	"pkg.api"	18	tuple(template(4d6170)<named(706b672e6170692e4b),named(706b672e6170692e56)>,named(5b432c20445d5d207c20466f6f3c41),named(706b672e6170692e423c433e3e5b))	10
+"[Map<K, V>, [C, D]] | Foo<A, B<C>>[]"	"pkg.api"	19	tuple(template(4d6170)<named(706b672e6170692e4b),named(706b672e6170692e56)>,named(5b432c20445d5d207c20466f6f3c41),named(706b672e6170692e423c433e3e5b))	11
+"[Map<K, V>, [C, D]] | Foo<A, B<C>>[]"	"pkg.api"	20	tuple(template(4d6170)<named(706b672e6170692e4b),named(706b672e6170692e56)>,named(5b432c20445d5d207c20466f6f3c41),named(706b672e6170692e423c433e3e5b))	12
+"[Map<K, V>, [C, D]] | Foo<A, B<C>>[]"	"pkg.api"	21	tuple(template(4d6170)<named(706b672e6170692e4b),named(706b672e6170692e56)>,named(5b432c20445d5d207c20466f6f3c41),named(706b672e6170692e423c433e3e5b))	13
+"[Map<K, V>, [C, D]] | Foo<A, B<C>>[]"	"pkg.api"	22	tuple(template(4d6170)<named(706b672e6170692e4b),named(706b672e6170692e56)>,named(5b432c20445d5d207c20466f6f3c41),named(706b672e6170692e423c433e3e5b))	14
+"[Map<K, V>, [C, D]] | Foo<A, B<C>>[]"	"pkg.api"	23	tuple(template(4d6170)<named(706b672e6170692e4b),named(706b672e6170692e56)>,named(5b432c20445d5d207c20466f6f3c41),named(706b672e6170692e423c433e3e5b))	15
+"[Map<K, V>, [C, D]] | Foo<A, B<C>>[]"	"pkg.api"	24	tuple(template(4d6170)<named(706b672e6170692e4b),named(706b672e6170692e56)>,named(5b432c20445d5d207c20466f6f3c41),named(706b672e6170692e423c433e3e5b))	16
+"[Map<K, V>, [C, D]] | Foo<A, B<C>>[]"	"pkg.api"	25	tuple(template(4d6170)<named(706b672e6170692e4b),named(706b672e6170692e56)>,named(5b432c20445d5d207c20466f6f3c41),named(706b672e6170692e423c433e3e5b))	17
+"[Map<K, V>, [C, D]] | Foo<A, B<C>>[]"	"pkg.api"	26	tuple(template(4d6170)<named(706b672e6170692e4b),named(706b672e6170692e56)>,named(5b432c20445d5d207c20466f6f3c41),named(706b672e6170692e423c433e3e5b))	18
+"[Map<K, V>, [C, D]] | Foo<A, B<C>>[]"	"pkg.api"	27	tuple(template(4d6170)<named(706b672e6170692e4b),named(706b672e6170692e56)>,named(5b432c20445d5d207c20466f6f3c41),named(706b672e6170692e423c433e3e5b))	19
+"[Map<K, V>, [C, D]] | Foo<A, B<C>>[]"	"pkg.api"	28	tuple(template(4d6170)<named(706b672e6170692e4b),named(706b672e6170692e56)>,named(5b432c20445d5d207c20466f6f3c41),named(706b672e6170692e423c433e3e5b))	20
+"[Map<K, V>, [C, D]] | Foo<A, B<C>>[]"	"pkg.api"	29	tuple(template(4d6170)<named(706b672e6170692e4b),named(706b672e6170692e56)>,named(5b432c20445d5d207c20466f6f3c41),named(706b672e6170692e423c433e3e5b))	21
+"[Map<K, V>, [C, D]] | Foo<A, B<C>>[]"	"pkg.api"	30	tuple(template(4d6170)<named(706b672e6170692e4b),named(706b672e6170692e56)>,named(5b432c20445d5d207c20466f6f3c41),named(706b672e6170692e423c433e3e5b))	22
+"[Map<K, V>, [C, D]] | Foo<A, B<C>>[]"	"pkg.api"	31	tuple(template(4d6170)<named(706b672e6170692e4b),named(706b672e6170692e56)>,named(5b432c20445d5d207c20466f6f3c41),named(706b672e6170692e423c433e3e5b))	23
+"[Map<K, V>, [C, D]] | Foo<A, B<C>>[]"	"pkg.api"	32	tuple(template(4d6170)<named(706b672e6170692e4b),named(706b672e6170692e56)>,named(5b432c20445d5d207c20466f6f3c41),named(706b672e6170692e423c433e3e5b))	24
+"[Map<K, V>, [C, D]] | Foo<A, B<C>>[]"	"pkg.api"	33	tuple(template(4d6170)<named(706b672e6170692e4b),named(706b672e6170692e56)>,named(5b432c20445d5d207c20466f6f3c41),named(706b672e6170692e423c433e3e5b))	25
+"[Map<K, V>, [C, D]] | Foo<A, B<C>>[]"	"pkg.api"	34	tuple(template(4d6170)<named(706b672e6170692e4b),named(706b672e6170692e56)>,named(5b432c20445d5d207c20466f6f3c41),named(706b672e6170692e423c433e3e5b))	26
+"[Map<K, V>, [C, D]] | Foo<A, B<C>>[]"	"pkg.api"	35	tuple(template(4d6170)<named(706b672e6170692e4b),named(706b672e6170692e56)>,named(5b432c20445d5d207c20466f6f3c41),named(706b672e6170692e423c433e3e5b))	27
+"[Map<K, V>, [C, D]] | Foo<A, B<C>>[]"	"pkg.api"	36	tuple(template(4d6170)<named(706b672e6170692e4b),named(706b672e6170692e56)>,named(5b432c20445d5d207c20466f6f3c41),named(706b672e6170692e423c433e3e5b))	28
+"[Map<K, V>, [C, D]] | Foo<A, B<C>>[]"	"pkg.api"	37	tuple(template(4d6170)<named(706b672e6170692e4b),named(706b672e6170692e56)>,named(5b432c20445d5d207c20466f6f3c41),named(706b672e6170692e423c433e3e5b))	29
+"[Map<K, V>, [C, D]] | Foo<A, B<C>>[]"	"pkg.api"	38	tuple(template(4d6170)<named(706b672e6170692e4b),named(706b672e6170692e56)>,named(5b432c20445d5d207c20466f6f3c41),named(706b672e6170692e423c433e3e5b))	30
+"[Map<K, V>, [C, D]] | Foo<A, B<C>>[]"	"pkg.api"	39	tuple(template(4d6170)<named(706b672e6170692e4b),named(706b672e6170692e56)>,named(5b432c20445d5d207c20466f6f3c41),named(706b672e6170692e423c433e3e5b))	31
+"[Map<K, V>, [C, D]] | Foo<A, B<C>>[]"	"pkg.api"	40	tuple(template(4d6170)<named(706b672e6170692e4b),named(706b672e6170692e56)>,named(5b432c20445d5d207c20466f6f3c41),named(706b672e6170692e423c433e3e5b))	32
+"T0 | T1 | T2 | T3 | T4 | T5 | T6 | T7 | T8 | T9 | T10 | T11 | T12 | T13 | T14 | T15 | T16"	"pkg.api"	-1	union(named(706b672e6170692e5430),named(706b672e6170692e5431),named(706b672e6170692e5432),named(706b672e6170692e5433),named(706b672e6170692e5434),named(706b672e6170692e5435),named(706b672e6170692e5436),named(706b672e6170692e5437),named(706b672e6170692e5438),named(706b672e6170692e5439),named(706b672e6170692e543130),named(706b672e6170692e543131),named(706b672e6170692e543132),named(706b672e6170692e543133),named(706b672e6170692e543134))	-1
+"T0 | T1 | T2 | T3 | T4 | T5 | T6 | T7 | T8 | T9 | T10 | T11 | T12 | T13 | T14 | T15 | T16"	"pkg.api"	0	?	-6
+"T0 | T1 | T2 | T3 | T4 | T5 | T6 | T7 | T8 | T9 | T10 | T11 | T12 | T13 | T14 | T15 | T16"	"pkg.api"	1	?	-5
+"T0 | T1 | T2 | T3 | T4 | T5 | T6 | T7 | T8 | T9 | T10 | T11 | T12 | T13 | T14 | T15 | T16"	"pkg.api"	2	?	-4
+"T0 | T1 | T2 | T3 | T4 | T5 | T6 | T7 | T8 | T9 | T10 | T11 | T12 | T13 | T14 | T15 | T16"	"pkg.api"	3	?	-3
+"T0 | T1 | T2 | T3 | T4 | T5 | T6 | T7 | T8 | T9 | T10 | T11 | T12 | T13 | T14 | T15 | T16"	"pkg.api"	4	?	-2
+"T0 | T1 | T2 | T3 | T4 | T5 | T6 | T7 | T8 | T9 | T10 | T11 | T12 | T13 | T14 | T15 | T16"	"pkg.api"	5	?	-1
+"T0 | T1 | T2 | T3 | T4 | T5 | T6 | T7 | T8 | T9 | T10 | T11 | T12 | T13 | T14 | T15 | T16"	"pkg.api"	6	union(?,named(706b672e6170692e5431),named(706b672e6170692e5432),named(706b672e6170692e5433),named(706b672e6170692e5434),named(706b672e6170692e5435),named(706b672e6170692e5436),named(706b672e6170692e5437),named(706b672e6170692e5438),named(706b672e6170692e5439),named(706b672e6170692e543130),named(706b672e6170692e543131),named(706b672e6170692e543132),named(706b672e6170692e543133),named(706b672e6170692e543134))	-1
+"T0 | T1 | T2 | T3 | T4 | T5 | T6 | T7 | T8 | T9 | T10 | T11 | T12 | T13 | T14 | T15 | T16"	"pkg.api"	7	union(named(706b672e6170692e5430),?,named(706b672e6170692e5432),named(706b672e6170692e5433),named(706b672e6170692e5434),named(706b672e6170692e5435),named(706b672e6170692e5436),named(706b672e6170692e5437),named(706b672e6170692e5438),named(706b672e6170692e5439),named(706b672e6170692e543130),named(706b672e6170692e543131),named(706b672e6170692e543132),named(706b672e6170692e543133),named(706b672e6170692e543134))	-1
+"T0 | T1 | T2 | T3 | T4 | T5 | T6 | T7 | T8 | T9 | T10 | T11 | T12 | T13 | T14 | T15 | T16"	"pkg.api"	8	union(named(706b672e6170692e5430),named(706b672e6170692e5431),?,named(706b672e6170692e5433),named(706b672e6170692e5434),named(706b672e6170692e5435),named(706b672e6170692e5436),named(706b672e6170692e5437),named(706b672e6170692e5438),named(706b672e6170692e5439),named(706b672e6170692e543130),named(706b672e6170692e543131),named(706b672e6170692e543132),named(706b672e6170692e543133),named(706b672e6170692e543134))	-1
+"T0 | T1 | T2 | T3 | T4 | T5 | T6 | T7 | T8 | T9 | T10 | T11 | T12 | T13 | T14 | T15 | T16"	"pkg.api"	9	union(named(706b672e6170692e5430),named(706b672e6170692e5431),named(706b672e6170692e5432),?,named(706b672e6170692e5434),named(706b672e6170692e5435),named(706b672e6170692e5436),named(706b672e6170692e5437),named(706b672e6170692e5438),named(706b672e6170692e5439),named(706b672e6170692e543130),named(706b672e6170692e543131),named(706b672e6170692e543132),named(706b672e6170692e543133),named(706b672e6170692e543134))	-1
+"T0 | T1 | T2 | T3 | T4 | T5 | T6 | T7 | T8 | T9 | T10 | T11 | T12 | T13 | T14 | T15 | T16"	"pkg.api"	10	union(named(706b672e6170692e5430),named(706b672e6170692e5431),named(706b672e6170692e5432),named(706b672e6170692e5433),?,named(706b672e6170692e5435),named(706b672e6170692e5436),named(706b672e6170692e5437),named(706b672e6170692e5438),named(706b672e6170692e5439),named(706b672e6170692e543130),named(706b672e6170692e543131),named(706b672e6170692e543132),named(706b672e6170692e543133),named(706b672e6170692e543134))	-1
+"T0 | T1 | T2 | T3 | T4 | T5 | T6 | T7 | T8 | T9 | T10 | T11 | T12 | T13 | T14 | T15 | T16"	"pkg.api"	11	union(named(706b672e6170692e5430),named(706b672e6170692e5431),named(706b672e6170692e5432),named(706b672e6170692e5433),named(706b672e6170692e5434),?,named(706b672e6170692e5436),named(706b672e6170692e5437),named(706b672e6170692e5438),named(706b672e6170692e5439),named(706b672e6170692e543130),named(706b672e6170692e543131),named(706b672e6170692e543132),named(706b672e6170692e543133),named(706b672e6170692e543134))	-1
+"T0 | T1 | T2 | T3 | T4 | T5 | T6 | T7 | T8 | T9 | T10 | T11 | T12 | T13 | T14 | T15 | T16"	"pkg.api"	12	union(named(706b672e6170692e5430),named(706b672e6170692e5431),named(706b672e6170692e5432),named(706b672e6170692e5433),named(706b672e6170692e5434),named(706b672e6170692e5435),?,named(706b672e6170692e5437),named(706b672e6170692e5438),named(706b672e6170692e5439),named(706b672e6170692e543130),named(706b672e6170692e543131),named(706b672e6170692e543132),named(706b672e6170692e543133),named(706b672e6170692e543134))	-1
+"T0 | T1 | T2 | T3 | T4 | T5 | T6 | T7 | T8 | T9 | T10 | T11 | T12 | T13 | T14 | T15 | T16"	"pkg.api"	13	union(named(706b672e6170692e5430),named(706b672e6170692e5431),named(706b672e6170692e5432),named(706b672e6170692e5433),named(706b672e6170692e5434),named(706b672e6170692e5435),named(706b672e6170692e5436),?,named(706b672e6170692e5438),named(706b672e6170692e5439),named(706b672e6170692e543130),named(706b672e6170692e543131),named(706b672e6170692e543132),named(706b672e6170692e543133),named(706b672e6170692e543134))	-1
+"T0 | T1 | T2 | T3 | T4 | T5 | T6 | T7 | T8 | T9 | T10 | T11 | T12 | T13 | T14 | T15 | T16"	"pkg.api"	14	union(named(706b672e6170692e5430),named(706b672e6170692e5431),named(706b672e6170692e5432),named(706b672e6170692e5433),named(706b672e6170692e5434),named(706b672e6170692e5435),named(706b672e6170692e5436),named(706b672e6170692e5437),?,named(706b672e6170692e5439),named(706b672e6170692e543130),named(706b672e6170692e543131),named(706b672e6170692e543132),named(706b672e6170692e543133),named(706b672e6170692e543134))	-1
+"T0 | T1 | T2 | T3 | T4 | T5 | T6 | T7 | T8 | T9 | T10 | T11 | T12 | T13 | T14 | T15 | T16"	"pkg.api"	15	union(named(706b672e6170692e5430),named(706b672e6170692e5431),named(706b672e6170692e5432),named(706b672e6170692e5433),named(706b672e6170692e5434),named(706b672e6170692e5435),named(706b672e6170692e5436),named(706b672e6170692e5437),named(706b672e6170692e5438),?,named(706b672e6170692e543130),named(706b672e6170692e543131),named(706b672e6170692e543132),named(706b672e6170692e543133),named(706b672e6170692e543134))	-1
+"T0 | T1 | T2 | T3 | T4 | T5 | T6 | T7 | T8 | T9 | T10 | T11 | T12 | T13 | T14 | T15 | T16"	"pkg.api"	16	union(named(706b672e6170692e5430),named(706b672e6170692e5431),named(706b672e6170692e5432),named(706b672e6170692e5433),named(706b672e6170692e5434),named(706b672e6170692e5435),named(706b672e6170692e5436),named(706b672e6170692e5437),named(706b672e6170692e5438),named(706b672e6170692e5439),?,named(706b672e6170692e543131),named(706b672e6170692e543132),named(706b672e6170692e543133),named(706b672e6170692e543134))	-1
+"T0 | T1 | T2 | T3 | T4 | T5 | T6 | T7 | T8 | T9 | T10 | T11 | T12 | T13 | T14 | T15 | T16"	"pkg.api"	17	union(named(706b672e6170692e5430),named(706b672e6170692e5431),named(706b672e6170692e5432),named(706b672e6170692e5433),named(706b672e6170692e5434),named(706b672e6170692e5435),named(706b672e6170692e5436),named(706b672e6170692e5437),named(706b672e6170692e5438),named(706b672e6170692e5439),named(706b672e6170692e543130),?,named(706b672e6170692e543132),named(706b672e6170692e543133),named(706b672e6170692e543134))	-1
+"T0 | T1 | T2 | T3 | T4 | T5 | T6 | T7 | T8 | T9 | T10 | T11 | T12 | T13 | T14 | T15 | T16"	"pkg.api"	18	union(named(706b672e6170692e5430),named(706b672e6170692e5431),named(706b672e6170692e5432),named(706b672e6170692e5433),named(706b672e6170692e5434),named(706b672e6170692e5435),named(706b672e6170692e5436),named(706b672e6170692e5437),named(706b672e6170692e5438),named(706b672e6170692e5439),named(706b672e6170692e543130),named(706b672e6170692e543131),?,named(706b672e6170692e543133),named(706b672e6170692e543134))	-1
+"T0 | T1 | T2 | T3 | T4 | T5 | T6 | T7 | T8 | T9 | T10 | T11 | T12 | T13 | T14 | T15 | T16"	"pkg.api"	19	union(named(706b672e6170692e5430),named(706b672e6170692e5431),named(706b672e6170692e5432),named(706b672e6170692e5433),named(706b672e6170692e5434),named(706b672e6170692e5435),named(706b672e6170692e5436),named(706b672e6170692e5437),named(706b672e6170692e5438),named(706b672e6170692e5439),named(706b672e6170692e543130),named(706b672e6170692e543131),named(706b672e6170692e543132),?,named(706b672e6170692e543134))	-1
+"T0 | T1 | T2 | T3 | T4 | T5 | T6 | T7 | T8 | T9 | T10 | T11 | T12 | T13 | T14 | T15 | T16"	"pkg.api"	20	union(named(706b672e6170692e5430),named(706b672e6170692e5431),named(706b672e6170692e5432),named(706b672e6170692e5433),named(706b672e6170692e5434),named(706b672e6170692e5435),named(706b672e6170692e5436),named(706b672e6170692e5437),named(706b672e6170692e5438),named(706b672e6170692e5439),named(706b672e6170692e543130),named(706b672e6170692e543131),named(706b672e6170692e543132),named(706b672e6170692e543133),?)	-1
+"T0 | T1 | T2 | T3 | T4 | T5 | T6 | T7 | T8 | T9 | T10 | T11 | T12 | T13 | T14 | T15 | T16"	"pkg.api"	21	union(named(706b672e6170692e5430),named(706b672e6170692e5431),named(706b672e6170692e5432),named(706b672e6170692e5433),named(706b672e6170692e5434),named(706b672e6170692e5435),named(706b672e6170692e5436),named(706b672e6170692e5437),named(706b672e6170692e5438),named(706b672e6170692e5439),named(706b672e6170692e543130),named(706b672e6170692e543131),named(706b672e6170692e543132),named(706b672e6170692e543133),named(706b672e6170692e543134))	0
+"T0 | T1 | T2 | T3 | T4 | T5 | T6 | T7 | T8 | T9 | T10 | T11 | T12 | T13 | T14 | T15 | T16"	"pkg.api"	22	union(named(706b672e6170692e5430),named(706b672e6170692e5431),named(706b672e6170692e5432),named(706b672e6170692e5433),named(706b672e6170692e5434),named(706b672e6170692e5435),named(706b672e6170692e5436),named(706b672e6170692e5437),named(706b672e6170692e5438),named(706b672e6170692e5439),named(706b672e6170692e543130),named(706b672e6170692e543131),named(706b672e6170692e543132),named(706b672e6170692e543133),named(706b672e6170692e543134))	1
+"T0 | T1 | T2 | T3 | T4 | T5 | T6 | T7 | T8 | T9 | T10 | T11 | T12 | T13 | T14 | T15 | T16"	"pkg.api"	23	union(named(706b672e6170692e5430),named(706b672e6170692e5431),named(706b672e6170692e5432),named(706b672e6170692e5433),named(706b672e6170692e5434),named(706b672e6170692e5435),named(706b672e6170692e5436),named(706b672e6170692e5437),named(706b672e6170692e5438),named(706b672e6170692e5439),named(706b672e6170692e543130),named(706b672e6170692e543131),named(706b672e6170692e543132),named(706b672e6170692e543133),named(706b672e6170692e543134))	2
+"T0 | T1 | T2 | T3 | T4 | T5 | T6 | T7 | T8 | T9 | T10 | T11 | T12 | T13 | T14 | T15 | T16"	"pkg.api"	24	union(named(706b672e6170692e5430),named(706b672e6170692e5431),named(706b672e6170692e5432),named(706b672e6170692e5433),named(706b672e6170692e5434),named(706b672e6170692e5435),named(706b672e6170692e5436),named(706b672e6170692e5437),named(706b672e6170692e5438),named(706b672e6170692e5439),named(706b672e6170692e543130),named(706b672e6170692e543131),named(706b672e6170692e543132),named(706b672e6170692e543133),named(706b672e6170692e543134))	3
+"T0 | T1 | T2 | T3 | T4 | T5 | T6 | T7 | T8 | T9 | T10 | T11 | T12 | T13 | T14 | T15 | T16"	"pkg.api"	25	union(named(706b672e6170692e5430),named(706b672e6170692e5431),named(706b672e6170692e5432),named(706b672e6170692e5433),named(706b672e6170692e5434),named(706b672e6170692e5435),named(706b672e6170692e5436),named(706b672e6170692e5437),named(706b672e6170692e5438),named(706b672e6170692e5439),named(706b672e6170692e543130),named(706b672e6170692e543131),named(706b672e6170692e543132),named(706b672e6170692e543133),named(706b672e6170692e543134))	4
+"T0 | T1 | T2 | T3 | T4 | T5 | T6 | T7 | T8 | T9 | T10 | T11 | T12 | T13 | T14 | T15 | T16"	"pkg.api"	26	union(named(706b672e6170692e5430),named(706b672e6170692e5431),named(706b672e6170692e5432),named(706b672e6170692e5433),named(706b672e6170692e5434),named(706b672e6170692e5435),named(706b672e6170692e5436),named(706b672e6170692e5437),named(706b672e6170692e5438),named(706b672e6170692e5439),named(706b672e6170692e543130),named(706b672e6170692e543131),named(706b672e6170692e543132),named(706b672e6170692e543133),named(706b672e6170692e543134))	5
+"T0 | T1 | T2 | T3 | T4 | T5 | T6 | T7 | T8 | T9 | T10 | T11 | T12 | T13 | T14 | T15 | T16"	"pkg.api"	27	union(named(706b672e6170692e5430),named(706b672e6170692e5431),named(706b672e6170692e5432),named(706b672e6170692e5433),named(706b672e6170692e5434),named(706b672e6170692e5435),named(706b672e6170692e5436),named(706b672e6170692e5437),named(706b672e6170692e5438),named(706b672e6170692e5439),named(706b672e6170692e543130),named(706b672e6170692e543131),named(706b672e6170692e543132),named(706b672e6170692e543133),named(706b672e6170692e543134))	6
+"T0 | T1 | T2 | T3 | T4 | T5 | T6 | T7 | T8 | T9 | T10 | T11 | T12 | T13 | T14 | T15 | T16"	"pkg.api"	28	union(named(706b672e6170692e5430),named(706b672e6170692e5431),named(706b672e6170692e5432),named(706b672e6170692e5433),named(706b672e6170692e5434),named(706b672e6170692e5435),named(706b672e6170692e5436),named(706b672e6170692e5437),named(706b672e6170692e5438),named(706b672e6170692e5439),named(706b672e6170692e543130),named(706b672e6170692e543131),named(706b672e6170692e543132),named(706b672e6170692e543133),named(706b672e6170692e543134))	7
+"T0 | T1 | T2 | T3 | T4 | T5 | T6 | T7 | T8 | T9 | T10 | T11 | T12 | T13 | T14 | T15 | T16"	"pkg.api"	29	union(named(706b672e6170692e5430),named(706b672e6170692e5431),named(706b672e6170692e5432),named(706b672e6170692e5433),named(706b672e6170692e5434),named(706b672e6170692e5435),named(706b672e6170692e5436),named(706b672e6170692e5437),named(706b672e6170692e5438),named(706b672e6170692e5439),named(706b672e6170692e543130),named(706b672e6170692e543131),named(706b672e6170692e543132),named(706b672e6170692e543133),named(706b672e6170692e543134))	8
+"T0 | T1 | T2 | T3 | T4 | T5 | T6 | T7 | T8 | T9 | T10 | T11 | T12 | T13 | T14 | T15 | T16"	"pkg.api"	30	union(named(706b672e6170692e5430),named(706b672e6170692e5431),named(706b672e6170692e5432),named(706b672e6170692e5433),named(706b672e6170692e5434),named(706b672e6170692e5435),named(706b672e6170692e5436),named(706b672e6170692e5437),named(706b672e6170692e5438),named(706b672e6170692e5439),named(706b672e6170692e543130),named(706b672e6170692e543131),named(706b672e6170692e543132),named(706b672e6170692e543133),named(706b672e6170692e543134))	9
+"T0 | T1 | T2 | T3 | T4 | T5 | T6 | T7 | T8 | T9 | T10 | T11 | T12 | T13 | T14 | T15 | T16"	"pkg.api"	31	union(named(706b672e6170692e5430),named(706b672e6170692e5431),named(706b672e6170692e5432),named(706b672e6170692e5433),named(706b672e6170692e5434),named(706b672e6170692e5435),named(706b672e6170692e5436),named(706b672e6170692e5437),named(706b672e6170692e5438),named(706b672e6170692e5439),named(706b672e6170692e543130),named(706b672e6170692e543131),named(706b672e6170692e543132),named(706b672e6170692e543133),named(706b672e6170692e543134))	10
+"T0 | T1 | T2 | T3 | T4 | T5 | T6 | T7 | T8 | T9 | T10 | T11 | T12 | T13 | T14 | T15 | T16"	"pkg.api"	32	union(named(706b672e6170692e5430),named(706b672e6170692e5431),named(706b672e6170692e5432),named(706b672e6170692e5433),named(706b672e6170692e5434),named(706b672e6170692e5435),named(706b672e6170692e5436),named(706b672e6170692e5437),named(706b672e6170692e5438),named(706b672e6170692e5439),named(706b672e6170692e543130),named(706b672e6170692e543131),named(706b672e6170692e543132),named(706b672e6170692e543133),named(706b672e6170692e543134))	11
+"T0 | T1 | T2 | T3 | T4 | T5 | T6 | T7 | T8 | T9 | T10 | T11 | T12 | T13 | T14 | T15 | T16"	"pkg.api"	33	union(named(706b672e6170692e5430),named(706b672e6170692e5431),named(706b672e6170692e5432),named(706b672e6170692e5433),named(706b672e6170692e5434),named(706b672e6170692e5435),named(706b672e6170692e5436),named(706b672e6170692e5437),named(706b672e6170692e5438),named(706b672e6170692e5439),named(706b672e6170692e543130),named(706b672e6170692e543131),named(706b672e6170692e543132),named(706b672e6170692e543133),named(706b672e6170692e543134))	12
+"T0 | T1 | T2 | T3 | T4 | T5 | T6 | T7 | T8 | T9 | T10 | T11 | T12 | T13 | T14 | T15 | T16"	"pkg.api"	34	union(named(706b672e6170692e5430),named(706b672e6170692e5431),named(706b672e6170692e5432),named(706b672e6170692e5433),named(706b672e6170692e5434),named(706b672e6170692e5435),named(706b672e6170692e5436),named(706b672e6170692e5437),named(706b672e6170692e5438),named(706b672e6170692e5439),named(706b672e6170692e543130),named(706b672e6170692e543131),named(706b672e6170692e543132),named(706b672e6170692e543133),named(706b672e6170692e543134))	13
+"T0 | T1 | T2 | T3 | T4 | T5 | T6 | T7 | T8 | T9 | T10 | T11 | T12 | T13 | T14 | T15 | T16"	"pkg.api"	35	union(named(706b672e6170692e5430),named(706b672e6170692e5431),named(706b672e6170692e5432),named(706b672e6170692e5433),named(706b672e6170692e5434),named(706b672e6170692e5435),named(706b672e6170692e5436),named(706b672e6170692e5437),named(706b672e6170692e5438),named(706b672e6170692e5439),named(706b672e6170692e543130),named(706b672e6170692e543131),named(706b672e6170692e543132),named(706b672e6170692e543133),named(706b672e6170692e543134))	14
+"T0 | T1 | T2 | T3 | T4 | T5 | T6 | T7 | T8 | T9 | T10 | T11 | T12 | T13 | T14 | T15 | T16"	"pkg.api"	36	union(named(706b672e6170692e5430),named(706b672e6170692e5431),named(706b672e6170692e5432),named(706b672e6170692e5433),named(706b672e6170692e5434),named(706b672e6170692e5435),named(706b672e6170692e5436),named(706b672e6170692e5437),named(706b672e6170692e5438),named(706b672e6170692e5439),named(706b672e6170692e543130),named(706b672e6170692e543131),named(706b672e6170692e543132),named(706b672e6170692e543133),named(706b672e6170692e543134))	15
+"T0 | T1 | T2 | T3 | T4 | T5 | T6 | T7 | T8 | T9 | T10 | T11 | T12 | T13 | T14 | T15 | T16"	"pkg.api"	37	union(named(706b672e6170692e5430),named(706b672e6170692e5431),named(706b672e6170692e5432),named(706b672e6170692e5433),named(706b672e6170692e5434),named(706b672e6170692e5435),named(706b672e6170692e5436),named(706b672e6170692e5437),named(706b672e6170692e5438),named(706b672e6170692e5439),named(706b672e6170692e543130),named(706b672e6170692e543131),named(706b672e6170692e543132),named(706b672e6170692e543133),named(706b672e6170692e543134))	16
+"T0 | T1 | T2 | T3 | T4 | T5 | T6 | T7 | T8 | T9 | T10 | T11 | T12 | T13 | T14 | T15 | T16"	"pkg.api"	38	union(named(706b672e6170692e5430),named(706b672e6170692e5431),named(706b672e6170692e5432),named(706b672e6170692e5433),named(706b672e6170692e5434),named(706b672e6170692e5435),named(706b672e6170692e5436),named(706b672e6170692e5437),named(706b672e6170692e5438),named(706b672e6170692e5439),named(706b672e6170692e543130),named(706b672e6170692e543131),named(706b672e6170692e543132),named(706b672e6170692e543133),named(706b672e6170692e543134))	17
+"T0 | T1 | T2 | T3 | T4 | T5 | T6 | T7 | T8 | T9 | T10 | T11 | T12 | T13 | T14 | T15 | T16"	"pkg.api"	39	union(named(706b672e6170692e5430),named(706b672e6170692e5431),named(706b672e6170692e5432),named(706b672e6170692e5433),named(706b672e6170692e5434),named(706b672e6170692e5435),named(706b672e6170692e5436),named(706b672e6170692e5437),named(706b672e6170692e5438),named(706b672e6170692e5439),named(706b672e6170692e543130),named(706b672e6170692e543131),named(706b672e6170692e543132),named(706b672e6170692e543133),named(706b672e6170692e543134))	18
+"T0 | T1 | T2 | T3 | T4 | T5 | T6 | T7 | T8 | T9 | T10 | T11 | T12 | T13 | T14 | T15 | T16"	"pkg.api"	40	union(named(706b672e6170692e5430),named(706b672e6170692e5431),named(706b672e6170692e5432),named(706b672e6170692e5433),named(706b672e6170692e5434),named(706b672e6170692e5435),named(706b672e6170692e5436),named(706b672e6170692e5437),named(706b672e6170692e5438),named(706b672e6170692e5439),named(706b672e6170692e543130),named(706b672e6170692e543131),named(706b672e6170692e543132),named(706b672e6170692e543133),named(706b672e6170692e543134))	19
+"a_very_long_identifier_name_that_spans_more_than_sixteen_bytes_twice<A, B>"	"pkg.api"	-1	template(615f766572795f6c6f6e675f6964656e7469666965725f6e616d655f746861745f7370616e735f6d6f72655f7468616e5f7369787465656e5f62797465735f7477696365)<named(706b672e6170692e41),named(706b672e6170692e42)>	-1
+"a_very_long_identifier_name_that_spans_more_than_sixteen_bytes_twice<A, B>"	"pkg.api"	0	?	-5
+"a_very_long_identifier_name_that_spans_more_than_sixteen_bytes_twice<A, B>"	"pkg.api"	1	?	-4
+"a_very_long_identifier_name_that_spans_more_than_sixteen_bytes_twice<A, B>"	"pkg.api"	2	?	-3
+"a_very_long_identifier_name_that_spans_more_than_sixteen_bytes_twice<A, B>"	"pkg.api"	3	?	-2
+"a_very_long_identifier_name_that_spans_more_than_sixteen_bytes_twice<A, B>"	"pkg.api"	4	?	-1
+"a_very_long_identifier_name_that_spans_more_than_sixteen_bytes_twice<A, B>"	"pkg.api"	5	template(615f766572795f6c6f6e675f6964656e7469666965725f6e616d655f746861745f7370616e735f6d6f72655f7468616e5f7369787465656e5f62797465735f7477696365)<?,named(706b672e6170692e42)>	-1
+"a_very_long_identifier_name_that_spans_more_than_sixteen_bytes_twice<A, B>"	"pkg.api"	6	template(615f766572795f6c6f6e675f6964656e7469666965725f6e616d655f746861745f7370616e735f6d6f72655f7468616e5f7369787465656e5f62797465735f7477696365)<named(706b672e6170692e41),?>	-1
+"a_very_long_identifier_name_that_spans_more_than_sixteen_bytes_twice<A, B>"	"pkg.api"	7	template(615f766572795f6c6f6e675f6964656e7469666965725f6e616d655f746861745f7370616e735f6d6f72655f7468616e5f7369787465656e5f62797465735f7477696365)<named(706b672e6170692e41),named(706b672e6170692e42)>	0
+"a_very_long_identifier_name_that_spans_more_than_sixteen_bytes_twice<A, B>"	"pkg.api"	8	template(615f766572795f6c6f6e675f6964656e7469666965725f6e616d655f746861745f7370616e735f6d6f72655f7468616e5f7369787465656e5f62797465735f7477696365)<named(706b672e6170692e41),named(706b672e6170692e42)>	1
+"a_very_long_identifier_name_that_spans_more_than_sixteen_bytes_twice<A, B>"	"pkg.api"	9	template(615f766572795f6c6f6e675f6964656e7469666965725f6e616d655f746861745f7370616e735f6d6f72655f7468616e5f7369787465656e5f62797465735f7477696365)<named(706b672e6170692e41),named(706b672e6170692e42)>	2
+"a_very_long_identifier_name_that_spans_more_than_sixteen_bytes_twice<A, B>"	"pkg.api"	10	template(615f766572795f6c6f6e675f6964656e7469666965725f6e616d655f746861745f7370616e735f6d6f72655f7468616e5f7369787465656e5f62797465735f7477696365)<named(706b672e6170692e41),named(706b672e6170692e42)>	3
+"a_very_long_identifier_name_that_spans_more_than_sixteen_bytes_twice<A, B>"	"pkg.api"	11	template(615f766572795f6c6f6e675f6964656e7469666965725f6e616d655f746861745f7370616e735f6d6f72655f7468616e5f7369787465656e5f62797465735f7477696365)<named(706b672e6170692e41),named(706b672e6170692e42)>	4
+"a_very_long_identifier_name_that_spans_more_than_sixteen_bytes_twice<A, B>"	"pkg.api"	12	template(615f766572795f6c6f6e675f6964656e7469666965725f6e616d655f746861745f7370616e735f6d6f72655f7468616e5f7369787465656e5f62797465735f7477696365)<named(706b672e6170692e41),named(706b672e6170692e42)>	5
+"a_very_long_identifier_name_that_spans_more_than_sixteen_bytes_twice<A, B>"	"pkg.api"	13	template(615f766572795f6c6f6e675f6964656e7469666965725f6e616d655f746861745f7370616e735f6d6f72655f7468616e5f7369787465656e5f62797465735f7477696365)<named(706b672e6170692e41),named(706b672e6170692e42)>	6
+"a_very_long_identifier_name_that_spans_more_than_sixteen_bytes_twice<A, B>"	"pkg.api"	14	template(615f766572795f6c6f6e675f6964656e7469666965725f6e616d655f746861745f7370616e735f6d6f72655f7468616e5f7369787465656e5f62797465735f7477696365)<named(706b672e6170692e41),named(706b672e6170692e42)>	7
+"a_very_long_identifier_name_that_spans_more_than_sixteen_bytes_twice<A, B>"	"pkg.api"	15	template(615f766572795f6c6f6e675f6964656e7469666965725f6e616d655f746861745f7370616e735f6d6f72655f7468616e5f7369787465656e5f62797465735f7477696365)<named(706b672e6170692e41),named(706b672e6170692e42)>	8
+"a_very_long_identifier_name_that_spans_more_than_sixteen_bytes_twice<A, B>"	"pkg.api"	16	template(615f766572795f6c6f6e675f6964656e7469666965725f6e616d655f746861745f7370616e735f6d6f72655f7468616e5f7369787465656e5f62797465735f7477696365)<named(706b672e6170692e41),named(706b672e6170692e42)>	9
+"a_very_long_identifier_name_that_spans_more_than_sixteen_bytes_twice<A, B>"	"pkg.api"	17	template(615f766572795f6c6f6e675f6964656e7469666965725f6e616d655f746861745f7370616e735f6d6f72655f7468616e5f7369787465656e5f62797465735f7477696365)<named(706b672e6170692e41),named(706b672e6170692e42)>	10
+"a_very_long_identifier_name_that_spans_more_than_sixteen_bytes_twice<A, B>"	"pkg.api"	18	template(615f766572795f6c6f6e675f6964656e7469666965725f6e616d655f746861745f7370616e735f6d6f72655f7468616e5f7369787465656e5f62797465735f7477696365)<named(706b672e6170692e41),named(706b672e6170692e42)>	11
+"a_very_long_identifier_name_that_spans_more_than_sixteen_bytes_twice<A, B>"	"pkg.api"	19	template(615f766572795f6c6f6e675f6964656e7469666965725f6e616d655f746861745f7370616e735f6d6f72655f7468616e5f7369787465656e5f62797465735f7477696365)<named(706b672e6170692e41),named(706b672e6170692e42)>	12
+"a_very_long_identifier_name_that_spans_more_than_sixteen_bytes_twice<A, B>"	"pkg.api"	20	template(615f766572795f6c6f6e675f6964656e7469666965725f6e616d655f746861745f7370616e735f6d6f72655f7468616e5f7369787465656e5f62797465735f7477696365)<named(706b672e6170692e41),named(706b672e6170692e42)>	13
+"a_very_long_identifier_name_that_spans_more_than_sixteen_bytes_twice<A, B>"	"pkg.api"	21	template(615f766572795f6c6f6e675f6964656e7469666965725f6e616d655f746861745f7370616e735f6d6f72655f7468616e5f7369787465656e5f62797465735f7477696365)<named(706b672e6170692e41),named(706b672e6170692e42)>	14
+"a_very_long_identifier_name_that_spans_more_than_sixteen_bytes_twice<A, B>"	"pkg.api"	22	template(615f766572795f6c6f6e675f6964656e7469666965725f6e616d655f746861745f7370616e735f6d6f72655f7468616e5f7369787465656e5f62797465735f7477696365)<named(706b672e6170692e41),named(706b672e6170692e42)>	15
+"a_very_long_identifier_name_that_spans_more_than_sixteen_bytes_twice<A, B>"	"pkg.api"	23	template(615f766572795f6c6f6e675f6964656e7469666965725f6e616d655f746861745f7370616e735f6d6f72655f7468616e5f7369787465656e5f62797465735f7477696365)<named(706b672e6170692e41),named(706b672e6170692e42)>	16
+"a_very_long_identifier_name_that_spans_more_than_sixteen_bytes_twice<A, B>"	"pkg.api"	24	template(615f766572795f6c6f6e675f6964656e7469666965725f6e616d655f746861745f7370616e735f6d6f72655f7468616e5f7369787465656e5f62797465735f7477696365)<named(706b672e6170692e41),named(706b672e6170692e42)>	17
+"a_very_long_identifier_name_that_spans_more_than_sixteen_bytes_twice<A, B>"	"pkg.api"	25	template(615f766572795f6c6f6e675f6964656e7469666965725f6e616d655f746861745f7370616e735f6d6f72655f7468616e5f7369787465656e5f62797465735f7477696365)<named(706b672e6170692e41),named(706b672e6170692e42)>	18
+"a_very_long_identifier_name_that_spans_more_than_sixteen_bytes_twice<A, B>"	"pkg.api"	26	template(615f766572795f6c6f6e675f6964656e7469666965725f6e616d655f746861745f7370616e735f6d6f72655f7468616e5f7369787465656e5f62797465735f7477696365)<named(706b672e6170692e41),named(706b672e6170692e42)>	19
+"a_very_long_identifier_name_that_spans_more_than_sixteen_bytes_twice<A, B>"	"pkg.api"	27	template(615f766572795f6c6f6e675f6964656e7469666965725f6e616d655f746861745f7370616e735f6d6f72655f7468616e5f7369787465656e5f62797465735f7477696365)<named(706b672e6170692e41),named(706b672e6170692e42)>	20
+"a_very_long_identifier_name_that_spans_more_than_sixteen_bytes_twice<A, B>"	"pkg.api"	28	template(615f766572795f6c6f6e675f6964656e7469666965725f6e616d655f746861745f7370616e735f6d6f72655f7468616e5f7369787465656e5f62797465735f7477696365)<named(706b672e6170692e41),named(706b672e6170692e42)>	21
+"a_very_long_identifier_name_that_spans_more_than_sixteen_bytes_twice<A, B>"	"pkg.api"	29	template(615f766572795f6c6f6e675f6964656e7469666965725f6e616d655f746861745f7370616e735f6d6f72655f7468616e5f7369787465656e5f62797465735f7477696365)<named(706b672e6170692e41),named(706b672e6170692e42)>	22
+"a_very_long_identifier_name_that_spans_more_than_sixteen_bytes_twice<A, B>"	"pkg.api"	30	template(615f766572795f6c6f6e675f6964656e7469666965725f6e616d655f746861745f7370616e735f6d6f72655f7468616e5f7369787465656e5f62797465735f7477696365)<named(706b672e6170692e41),named(706b672e6170692e42)>	23
+"a_very_long_identifier_name_that_spans_more_than_sixteen_bytes_twice<A, B>"	"pkg.api"	31	template(615f766572795f6c6f6e675f6964656e7469666965725f6e616d655f746861745f7370616e735f6d6f72655f7468616e5f7369787465656e5f62797465735f7477696365)<named(706b672e6170692e41),named(706b672e6170692e42)>	24
+"a_very_long_identifier_name_that_spans_more_than_sixteen_bytes_twice<A, B>"	"pkg.api"	32	template(615f766572795f6c6f6e675f6964656e7469666965725f6e616d655f746861745f7370616e735f6d6f72655f7468616e5f7369787465656e5f62797465735f7477696365)<named(706b672e6170692e41),named(706b672e6170692e42)>	25
+"a_very_long_identifier_name_that_spans_more_than_sixteen_bytes_twice<A, B>"	"pkg.api"	33	template(615f766572795f6c6f6e675f6964656e7469666965725f6e616d655f746861745f7370616e735f6d6f72655f7468616e5f7369787465656e5f62797465735f7477696365)<named(706b672e6170692e41),named(706b672e6170692e42)>	26
+"a_very_long_identifier_name_that_spans_more_than_sixteen_bytes_twice<A, B>"	"pkg.api"	34	template(615f766572795f6c6f6e675f6964656e7469666965725f6e616d655f746861745f7370616e735f6d6f72655f7468616e5f7369787465656e5f62797465735f7477696365)<named(706b672e6170692e41),named(706b672e6170692e42)>	27
+"a_very_long_identifier_name_that_spans_more_than_sixteen_bytes_twice<A, B>"	"pkg.api"	35	template(615f766572795f6c6f6e675f6964656e7469666965725f6e616d655f746861745f7370616e735f6d6f72655f7468616e5f7369787465656e5f62797465735f7477696365)<named(706b672e6170692e41),named(706b672e6170692e42)>	28
+"a_very_long_identifier_name_that_spans_more_than_sixteen_bytes_twice<A, B>"	"pkg.api"	36	template(615f766572795f6c6f6e675f6964656e7469666965725f6e616d655f746861745f7370616e735f6d6f72655f7468616e5f7369787465656e5f62797465735f7477696365)<named(706b672e6170692e41),named(706b672e6170692e42)>	29
+"a_very_long_identifier_name_that_spans_more_than_sixteen_bytes_twice<A, B>"	"pkg.api"	37	template(615f766572795f6c6f6e675f6964656e7469666965725f6e616d655f746861745f7370616e735f6d6f72655f7468616e5f7369787465656e5f62797465735f7477696365)<named(706b672e6170692e41),named(706b672e6170692e42)>	30
+"a_very_long_identifier_name_that_spans_more_than_sixteen_bytes_twice<A, B>"	"pkg.api"	38	template(615f766572795f6c6f6e675f6964656e7469666965725f6e616d655f746861745f7370616e735f6d6f72655f7468616e5f7369787465656e5f62797465735f7477696365)<named(706b672e6170692e41),named(706b672e6170692e42)>	31
+"a_very_long_identifier_name_that_spans_more_than_sixteen_bytes_twice<A, B>"	"pkg.api"	39	template(615f766572795f6c6f6e675f6964656e7469666965725f6e616d655f746861745f7370616e735f6d6f72655f7468616e5f7369787465656e5f62797465735f7477696365)<named(706b672e6170692e41),named(706b672e6170692e42)>	32
+"a_very_long_identifier_name_that_spans_more_than_sixteen_bytes_twice<A, B>"	"pkg.api"	40	template(615f766572795f6c6f6e675f6964656e7469666965725f6e616d655f746861745f7370616e735f6d6f72655f7468616e5f7369787465656e5f62797465735f7477696365)<named(706b672e6170692e41),named(706b672e6170692e42)>	33
+""	"pkg.api"	-1	?	-1
+""	"pkg.api"	0	?	0
+""	"pkg.api"	1	?	1
+""	"pkg.api"	2	?	2
+""	"pkg.api"	3	?	3
+""	"pkg.api"	4	?	4
+""	"pkg.api"	5	?	5
+""	"pkg.api"	6	?	6
+""	"pkg.api"	7	?	7
+""	"pkg.api"	8	?	8
+""	"pkg.api"	9	?	9
+""	"pkg.api"	10	?	10
+""	"pkg.api"	11	?	11
+""	"pkg.api"	12	?	12
+""	"pkg.api"	13	?	13
+""	"pkg.api"	14	?	14
+""	"pkg.api"	15	?	15
+""	"pkg.api"	16	?	16
+""	"pkg.api"	17	?	17
+""	"pkg.api"	18	?	18
+""	"pkg.api"	19	?	19
+""	"pkg.api"	20	?	20
+""	"pkg.api"	21	?	21
+""	"pkg.api"	22	?	22
+""	"pkg.api"	23	?	23
+""	"pkg.api"	24	?	24
+""	"pkg.api"	25	?	25
+""	"pkg.api"	26	?	26
+""	"pkg.api"	27	?	27
+""	"pkg.api"	28	?	28
+""	"pkg.api"	29	?	29
+""	"pkg.api"	30	?	30
+""	"pkg.api"	31	?	31
+""	"pkg.api"	32	?	32
+""	"pkg.api"	33	?	33
+""	"pkg.api"	34	?	34
+""	"pkg.api"	35	?	35
+""	"pkg.api"	36	?	36
+""	"pkg.api"	37	?	37
+""	"pkg.api"	38	?	38
+""	"pkg.api"	39	?	39
+""	"pkg.api"	40	?	40
+"   "	"pkg.api"	-1	?	-1
+"   "	"pkg.api"	0	?	0
+"   "	"pkg.api"	1	?	1
+"   "	"pkg.api"	2	?	2
+"   "	"pkg.api"	3	?	3
+"   "	"pkg.api"	4	?	4
+"   "	"pkg.api"	5	?	5
+"   "	"pkg.api"	6	?	6
+"   "	"pkg.api"	7	?	7
+"   "	"pkg.api"	8	?	8
+"   "	"pkg.api"	9	?	9
+"   "	"pkg.api"	10	?	10
+"   "	"pkg.api"	11	?	11
+"   "	"pkg.api"	12	?	12
+"   "	"pkg.api"	13	?	13
+"   "	"pkg.api"	14	?	14
+"   "	"pkg.api"	15	?	15
+"   "	"pkg.api"	16	?	16
+"   "	"pkg.api"	17	?	17
+"   "	"pkg.api"	18	?	18
+"   "	"pkg.api"	19	?	19
+"   "	"pkg.api"	20	?	20
+"   "	"pkg.api"	21	?	21
+"   "	"pkg.api"	22	?	22
+"   "	"pkg.api"	23	?	23
+"   "	"pkg.api"	24	?	24
+"   "	"pkg.api"	25	?	25
+"   "	"pkg.api"	26	?	26
+"   "	"pkg.api"	27	?	27
+"   "	"pkg.api"	28	?	28
+"   "	"pkg.api"	29	?	29
+"   "	"pkg.api"	30	?	30
+"   "	"pkg.api"	31	?	31
+"   "	"pkg.api"	32	?	32
+"   "	"pkg.api"	33	?	33
+"   "	"pkg.api"	34	?	34
+"   "	"pkg.api"	35	?	35
+"   "	"pkg.api"	36	?	36
+"   "	"pkg.api"	37	?	37
+"   "	"pkg.api"	38	?	38
+"   "	"pkg.api"	39	?	39
+"   "	"pkg.api"	40	?	40
+"Box<Leaf>"	"pkg.api"	-1	template(706b672e6170692e426f78)<named(706b672e6170692e4c656166)>	-1
+"Box<Leaf>"	"pkg.api"	200	template(706b672e6170692e426f78)<named(706b672e6170692e4c656166)>	198
+"number[]"	(null)	-1	template(4172726179)<builtin(6e756d626572)>	-1
+"(a: X) => R0"	"pkg.api"	-1	fn(param(61)=named(706b672e6170692e58))->named(706b672e6170692e5230)	-1
+"Box<Box<Leaf>>"	"pkg.api"	-1	template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<named(706b672e6170692e4c656166)>>	-1
+"Box<Box<Leaf>>"	"pkg.api"	200	template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<named(706b672e6170692e4c656166)>>	197
+"number[][]"	(null)	-1	template(4172726179)<template(4172726179)<builtin(6e756d626572)>>	-1
+"(a: (a: X) => R0) => R1"	"pkg.api"	-1	fn()->named(706b672e6170692e5231)	-1
+"Box<Box<Box<Box<Leaf>>>>"	"pkg.api"	-1	template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<named(706b672e6170692e4c656166)>>>>	-1
+"Box<Box<Box<Box<Leaf>>>>"	"pkg.api"	200	template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<named(706b672e6170692e4c656166)>>>>	193
+"number[][][][]"	(null)	-1	template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<builtin(6e756d626572)>>>>	-1
+"(a: (a: (a: (a: X) => R0) => R1) => R2) => R3"	"pkg.api"	-1	fn()->named(706b672e6170692e5233)	-1
+"Box<Box<Box<Box<Box<Box<Box<Box<Leaf>>>>>>>>"	"pkg.api"	-1	template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<named(706b672e6170692e4c656166)>>>>>>>>	-1
+"Box<Box<Box<Box<Box<Box<Box<Box<Leaf>>>>>>>>"	"pkg.api"	200	template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<named(706b672e6170692e4c656166)>>>>>>>>	182
+"number[][][][][][][][]"	(null)	-1	template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<builtin(6e756d626572)>>>>>>>>	-1
+"(a: (a: (a: (a: (a: (a: (a: (a: X) => R0) => R1) => R2) => R3) => R4) => R5) => R6) => R7"	"pkg.api"	-1	fn()->named(706b672e6170692e5237)	-1
+"Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Leaf>>>>>>>>>>>>>>>>"	"pkg.api"	-1	template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<named(706b672e6170692e4c656166)>>>>>>>>>>>>>>>>	-1
+"Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Leaf>>>>>>>>>>>>>>>>"	"pkg.api"	200	template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<named(706b672e6170692e4c656166)>>>>>>>>>>>>>>>>	144
+"number[][][][][][][][][][][][][][][][]"	(null)	-1	template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<builtin(6e756d626572)>>>>>>>>>>>>>>>>	-1
+"(a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: X) => R0) => R1) => R2) => R3) => R4) => R5) => R6) => R7) => R8) => R9) => R10) => R11) => R12) => R13) => R14) => R15"	"pkg.api"	-1	fn()->named(706b672e6170692e523135)	-1
+"Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Leaf>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>"	"pkg.api"	-1	template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<named(706b672e6170692e4c656166)>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>	-1
+"Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Leaf>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>"	"pkg.api"	200	template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<named(706b672e6170692e4c656166)>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>	9
+"number[][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][]"	(null)	-1	template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<builtin(6e756d626572)>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>	-1
+"(a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: X) => R0) => R1) => R2) => R3) => R4) => R5) => R6) => R7) => R8) => R9) => R10) => R11) => R12) => R13) => R14) => R15) => R16) => R17) => R18) => R19) => R20) => R21) => R22) => R23) => R24) => R25) => R26) => R27) => R28) => R29) => R30) => R31"	"pkg.api"	-1	fn()->named(706b672e6170692e523331)	-1
+"Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Leaf>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>"	"pkg.api"	-1	template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<named(706b672e6170692e4c656166)>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>	-1
+"Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Leaf>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>"	"pkg.api"	200	template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<?>>>>>>>>>>	-12
+"number[][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][]"	(null)	-1	template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<builtin(6e756d626572)>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>	-1
+"(a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: X) => R0) => R1) => R2) => R3) => R4) => R5) => R6) => R7) => R8) => R9) => R10) => R11) => R12) => R13) => R14) => R15) => R16) => R17) => R18) => R19) => R20) => R21) => R22) => R23) => R24) => R25) => R26) => R27) => R28) => R29) => R30) => R31) => R32) => R33) => R34) => R35) => R36) => R37) => R38) => R39) => R40) => R41) => R42) => R43) => R44) => R45) => R46) => R47) => R48) => R49) => R50) => R51) => R52) => R53) => R54) => R55) => R56) => R57) => R58) => R59) => R60) => R61) => R62) => R63"	"pkg.api"	-1	fn()->named(706b672e6170692e523633)	-1
+"Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Leaf>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>"	"pkg.api"	-1	template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<named(706b672e6170692e4c656166)>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>	-1
+"Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Leaf>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>"	"pkg.api"	200	template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<?>>>>	-1
+"number[][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][]"	(null)	-1	template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<builtin(6e756d626572)>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>	-1
+"(a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: X) => R0) => R1) => R2) => R3) => R4) => R5) => R6) => R7) => R8) => R9) => R10) => R11) => R12) => R13) => R14) => R15) => R16) => R17) => R18) => R19) => R20) => R21) => R22) => R23) => R24) => R25) => R26) => R27) => R28) => R29) => R30) => R31) => R32) => R33) => R34) => R35) => R36) => R37) => R38) => R39) => R40) => R41) => R42) => R43) => R44) => R45) => R46) => R47) => R48) => R49) => R50) => R51) => R52) => R53) => R54) => R55) => R56) => R57) => R58) => R59) => R60) => R61) => R62) => R63) => R64) => R65) => R66) => R67) => R68) => R69) => R70) => R71) => R72) => R73) => R74) => R75) => R76) => R77) => R78) => R79) => R80) => R81) => R82) => R83) => R84) => R85) => R86) => R87) => R88) => R89) => R90) => R91) => R92) => R93) => R94) => R95) => R96) => R97) => R98) => R99) => R100) => R101) => R102) => R103) => R104) => R105) => R106) => R107) => R108) => R109) => R110) => R111) => R112) => R113) => R114) => R115) => R116) => R117) => R118) => R119) => R120) => R121) => R122) => R123) => R124) => R125) => R126) => R127"	"pkg.api"	-1	fn()->named(706b672e6170692e52313237)	-1
+"Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Leaf>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>"	"pkg.api"	-1	template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<named(706b672e6170692e4c656166)>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>	-1
+"Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Box<Leaf>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>"	"pkg.api"	200	template(706b672e6170692e426f78)<template(706b672e6170692e426f78)<?>>	-41
+"number[][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][]"	(null)	-1	template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<template(4172726179)<builtin(6e756d626572)>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>	-1
+"(a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: (a: X) => R0) => R1) => R2) => R3) => R4) => R5) => R6) => R7) => R8) => R9) => R10) => R11) => R12) => R13) => R14) => R15) => R16) => R17) => R18) => R19) => R20) => R21) => R22) => R23) => R24) => R25) => R26) => R27) => R28) => R29) => R30) => R31) => R32) => R33) => R34) => R35) => R36) => R37) => R38) => R39) => R40) => R41) => R42) => R43) => R44) => R45) => R46) => R47) => R48) => R49) => R50) => R51) => R52) => R53) => R54) => R55) => R56) => R57) => R58) => R59) => R60) => R61) => R62) => R63) => R64) => R65) => R66) => R67) => R68) => R69) => R70) => R71) => R72) => R73) => R74) => R75) => R76) => R77) => R78) => R79) => R80) => R81) => R82) => R83) => R84) => R85) => R86) => R87) => R88) => R89) => R90) => R91) => R92) => R93) => R94) => R95) => R96) => R97) => R98) => R99) => R100) => R101) => R102) => R103) => R104) => R105) => R106) => R107) => R108) => R109) => R110) => R111) => R112) => R113) => R114) => R115) => R116) => R117) => R118) => R119) => R120) => R121) => R122) => R123) => R124) => R125) => R126) => R127) => R128) => R129) => R130) => R131) => R132) => R133) => R134) => R135) => R136) => R137) => R138) => R139) => R140) => R141) => R142) => R143) => R144) => R145) => R146) => R147) => R148) => R149) => R150) => R151) => R152) => R153) => R154) => R155) => R156) => R157) => R158) => R159) => R160) => R161) => R162) => R163) => R164) => R165) => R166) => R167) => R168) => R169) => R170) => R171) => R172) => R173) => R174) => R175) => R176) => R177) => R178) => R179) => R180) => R181) => R182) => R183) => R184) => R185) => R186) => R187) => R188) => R189) => R190) => R191) => R192) => R193) => R194) => R195) => R196) => R197) => R198) => R199) => R200) => R201) => R202) => R203) => R204) => R205) => R206) => R207) => R208) => R209) => R210) => R211) => R212) => R213) => R214) => R215) => R216) => R217) => R218) => R219) => R220) => R221) => R222) => R223) => R224) => R225) => R226) => R227) => R228) => R229) => R230) => R231) => R232) => R233) => R234) => R235) => R236) => R237) => R238) => R239) => R240) => R241) => R242) => R243) => R244) => R245) => R246) => R247) => R248) => R249) => R250) => R251) => R252) => R253) => R254) => R255"	"pkg.api"	-1	fn()->named(706b672e6170692e52323535)	-1
