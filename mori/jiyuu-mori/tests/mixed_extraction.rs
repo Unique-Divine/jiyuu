@@ -105,14 +105,9 @@ impl Fixture {
                 .expect("create isolated runtime paths");
         }
         let mut command = self.command(side);
-        for (selector, _) in SELECTORS {
-            if side == "c"
-                || !matches!(
-                    *selector,
-                    "MORI_IMPL_RUST_IMPORTS" | "MORI_IMPL_TS_STATIC_IMPORTS"
-                )
-            {
-                command.env(selector, side);
+        if side == "c" {
+            for (selector, _) in SELECTORS {
+                command.env(selector, "c");
             }
         }
         let arguments =

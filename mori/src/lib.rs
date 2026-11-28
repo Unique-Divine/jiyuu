@@ -265,7 +265,10 @@ mod index_manifest;
 mod graphql_extract;
 
 #[cfg(feature = "c-backend")]
-pub use graphql_extract::register as mori_register_graphql_extractor;
+pub use graphql_extract::{
+    register as mori_register_graphql_extractor,
+    register_field as mori_register_graphql_field_extractor,
+};
 
 #[cfg(any(feature = "native-engine-abi", test))]
 #[path = "../internal/cbm/lsp/go_cross.rs"]

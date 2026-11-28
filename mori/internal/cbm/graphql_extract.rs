@@ -169,6 +169,15 @@ unsafe extern "C" fn mask_parse_input(source: *mut u8, len: usize) {
     mask_string_escapes(unsafe { std::slice::from_raw_parts_mut(source, len) });
 }
 
+/// Install the GraphQL field span extractor.
+///
+/// # Safety
+/// Call during process startup, before any extraction threads run.
+pub unsafe fn register_field() {
+    // SAFETY: Startup registration precedes all extractor workers.
+    unsafe { cbm_graphql_set_field_extractor(field_spans) };
+}
+
 /// Install the native callbacks used by GraphQL extraction.
 ///
 /// # Safety
@@ -178,7 +187,7 @@ unsafe extern "C" fn mask_parse_input(source: *mut u8, len: usize) {
 pub unsafe fn register() {
     // SAFETY: The executable registers the callbacks before extractor threads start.
     unsafe {
-        cbm_graphql_set_field_extractor(field_spans);
+        register_field();
         cbm_graphql_set_parse_masker(mask_parse_input);
         cbm_graphql_set_schema_extractor(schema_roots);
     }
