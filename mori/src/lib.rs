@@ -275,7 +275,7 @@ pub use staged_graph::native::register as mori_register_staged_graph_writer;
 #[path = "pipeline/index_manifest.rs"]
 mod index_manifest;
 
-#[cfg(feature = "c-backend")]
+#[cfg(feature = "native-engine-abi")]
 #[path = "../internal/cbm/graphql_extract.rs"]
 mod graphql_extract;
 

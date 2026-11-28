@@ -17,8 +17,8 @@ typedef struct {
     cbm_graphql_span_t type;
 } cbm_graphql_field_spans_t;
 
-/* A missing child has present=false. The callback borrows the native tree. */
-void cbm_graphql_set_field_extractor(cbm_graphql_field_spans_t (*extract)(TSNode));
+/* The Rust extractor borrows the native tree. A missing child has present=false. */
+cbm_graphql_field_spans_t mori_graphql_extract_field_spans(TSNode node);
 /* Mutates an arena-owned copy, leaving byte offsets and line ends unchanged. */
 void cbm_graphql_set_parse_masker(void (*mask)(char *, size_t));
 

@@ -1,9 +1,12 @@
 //! GraphQL SDL extraction using the parser and grammar already linked by Mori.
 
-use std::ffi::{CStr, c_void};
+use std::ffi::CStr;
+#[cfg(feature = "c-backend")]
+use std::ffi::c_void;
 
 use crate::native_tree::RawNode;
 
+#[cfg(feature = "c-backend")]
 type SchemaEmit = unsafe extern "C" fn(*mut c_void, bool, FieldSpans);
 
 #[repr(C)]
@@ -20,10 +23,8 @@ struct FieldSpans {
     field_type: Span,
 }
 
+#[cfg(feature = "c-backend")]
 unsafe extern "C" {
-    fn cbm_graphql_set_field_extractor(
-        extract: unsafe extern "C" fn(RawNode) -> FieldSpans,
-    );
     fn cbm_graphql_set_parse_masker(mask: unsafe extern "C" fn(*mut u8, usize));
     fn cbm_graphql_set_schema_extractor(
         extract: unsafe extern "C" fn(RawNode, SchemaEmit, *mut c_void),
@@ -47,7 +48,14 @@ unsafe fn child_span(node: RawNode, name: &CStr) -> Span {
     }
 }
 
-unsafe extern "C" fn field_spans(node: RawNode) -> FieldSpans {
+/// Read the name and type spans of a GraphQL field definition.
+///
+/// # Safety
+/// The node must borrow a live GraphQL field definition.
+#[unsafe(no_mangle)]
+unsafe extern "C" fn mori_graphql_extract_field_spans(
+    node: RawNode,
+) -> FieldSpans {
     // SAFETY: The C extractor lends a valid field node for this call.
     unsafe {
         FieldSpans {
@@ -57,6 +65,7 @@ unsafe extern "C" fn field_spans(node: RawNode) -> FieldSpans {
     }
 }
 
+#[cfg(feature = "c-backend")]
 unsafe fn schema_root_rows(
     node: RawNode,
     emit: SchemaEmit,
@@ -76,6 +85,7 @@ unsafe fn schema_root_rows(
     }
 }
 
+#[cfg(feature = "c-backend")]
 unsafe fn walk_schema(
     node: RawNode,
     depth: u8,
@@ -104,6 +114,7 @@ unsafe fn walk_schema(
     }
 }
 
+#[cfg(feature = "c-backend")]
 unsafe extern "C" fn schema_roots(
     node: RawNode,
     emit: SchemaEmit,
@@ -114,6 +125,7 @@ unsafe extern "C" fn schema_roots(
     unsafe { walk_schema(node, 4, emit, context) };
 }
 
+#[cfg(feature = "c-backend")]
 #[derive(Clone, Copy)]
 enum State {
     Code,
@@ -122,6 +134,7 @@ enum State {
     Block,
 }
 
+#[cfg(feature = "c-backend")]
 fn mask_string_escapes(source: &mut [u8]) {
     let mut state = State::Code;
     let mut index = 0;
@@ -164,27 +177,28 @@ fn mask_string_escapes(source: &mut [u8]) {
     }
 }
 
+#[cfg(feature = "c-backend")]
 unsafe extern "C" fn mask_parse_input(source: *mut u8, len: usize) {
     // SAFETY: C lends the writable arena copy of exactly len bytes.
     mask_string_escapes(unsafe { std::slice::from_raw_parts_mut(source, len) });
 }
 
-/// Install the native callbacks used by GraphQL extraction.
+/// Install the GraphQL input masker and operation-root extractor.
 ///
 /// # Safety
 ///
 /// Call during process startup, before other threads can extract files or
 /// install callbacks.
+#[cfg(feature = "c-backend")]
 pub unsafe fn register() {
     // SAFETY: The executable registers the callbacks before extractor threads start.
     unsafe {
-        cbm_graphql_set_field_extractor(field_spans);
         cbm_graphql_set_parse_masker(mask_parse_input);
         cbm_graphql_set_schema_extractor(schema_roots);
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "c-backend"))]
 mod tests {
     use super::mask_string_escapes;
 

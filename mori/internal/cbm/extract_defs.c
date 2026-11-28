@@ -11991,31 +11991,15 @@ static const char **graphql_field_props(CBMArena *a, TSNode field, const char *s
  * handled. GraphQL: field_definition (name)(type:named_type); Prisma:
  * column_declaration (identifier)(column_type); Smali: field_definition
  * (field_identifier)(field_type). */
-static cbm_graphql_field_spans_t (*graphql_extract_field_spans)(TSNode);
-
-void cbm_graphql_set_field_extractor(cbm_graphql_field_spans_t (*extract)(TSNode)) {
-    graphql_extract_field_spans = extract;
-}
-
 static bool extract_schema_field(CBMExtractCtx *ctx, TSNode child, const char *class_qn) {
     CBMArena *a = ctx->arena;
     TSNode name_node = {0};
     TSNode type_node = {0};
 
     cbm_graphql_field_spans_t spans = {0};
-    if (ctx->language == CBM_LANG_GRAPHQL && graphql_extract_field_spans) {
-        spans = graphql_extract_field_spans(child);
+    if (ctx->language == CBM_LANG_GRAPHQL) {
+        spans = mori_graphql_extract_field_spans(child);
         cbm_log_debug("extract.graphql_field_spans", "implementation", "rust");
-    } else if (ctx->language == CBM_LANG_GRAPHQL) {
-        name_node = ts_node_child_by_field_name(child, TS_FIELD("name"));
-        if (ts_node_is_null(name_node)) {
-            name_node = cbm_find_child_by_kind(child, "name");
-        }
-        type_node = ts_node_child_by_field_name(child, TS_FIELD("type"));
-        /* FIELD_COUNT 0: the declared type is a plain `type` child. */
-        if (ts_node_is_null(type_node)) {
-            type_node = cbm_find_child_by_kind(child, "type");
-        }
     } else if (ctx->language == CBM_LANG_PRISMA) {
         name_node = cbm_find_child_by_kind(child, "identifier");
         type_node = cbm_find_child_by_kind(child, "column_type");
