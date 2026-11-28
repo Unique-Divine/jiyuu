@@ -1734,6 +1734,37 @@ TEST(golsp_rust_walk_stages_results_until_complete) {
     PASS();
 }
 
+/* Past the walk depth limit, only the deep subtree goes unresolved, as in the
+ * C walker. A 2000-term `+` chain nests both the walk and the expression
+ * evaluator past the default limit of 512; the call beside it must resolve
+ * and the file must not report a Go resolution error. */
+TEST(golsp_depth_limit_skips_only_deep_subtree) {
+    const int terms = 2000;
+    size_t size = (size_t)terms * 4 + 512;
+    char *source = malloc(size);
+    ASSERT_NOT_NULL(source);
+    char *p = source;
+    p += snprintf(p, size,
+                  "package main\n\n"
+                  "type Database struct{}\n\n"
+                  "func (d *Database) Query() int { return 1 }\n\n"
+                  "func doWork(db *Database, a int) int {\n\tx := a");
+    for (int i = 1; i < terms; i++) {
+        memcpy(p, " + a", 4);
+        p += 4;
+    }
+    snprintf(p, size - (size_t)(p - source), "\n\tdb.Query()\n\treturn x\n}\n");
+
+    CBMFileResult *r = extract_go(source);
+    free(source);
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    ASSERT_FALSE(r->lsp_skipped);
+    ASSERT_GTE(require_resolved(r, "doWork", "Query"), 0);
+    cbm_free_result(r);
+    PASS();
+}
+
 #ifdef CBM_ENABLE_TEST_SEAMS
 TEST(golsp_cancelled_cross_walk_discards_metadata_and_ast_rows) {
     static const char source[] = "package app\nfunc Run() { Other(); Other() }\n";
@@ -1807,6 +1838,7 @@ TEST(golsp_cancelled_extraction_keeps_prior_facts) {
 
 SUITE(go_lsp) {
     RUN_TEST(golsp_rust_walk_stages_results_until_complete);
+    RUN_TEST(golsp_depth_limit_skips_only_deep_subtree);
 #ifdef CBM_ENABLE_TEST_SEAMS
     RUN_TEST(golsp_cancelled_cross_walk_discards_metadata_and_ast_rows);
     RUN_TEST(golsp_cancelled_extraction_keeps_prior_facts);
