@@ -4,9 +4,9 @@
  * In-process type-aware call resolver for Perl. Mirrors the php_lsp.c /
  * go_lsp.c shape:
  *   1. Build a CBMTypeRegistry from file-local definitions + stdlib
- *      (perlfunc builtins + curated CPAN types) plus a per-package type entry
- *      carrying @ISA parents and the package's sub method table.
- *   2. perl_lsp_process_file does a TWO-PASS walk:
+ *      (perlfunc builtins + curated CPAN types). The Perl package index
+ *      stores @ISA parents and package-local sub names.
+ *   2. The parser walk collects declarations before resolving calls:
  *        PASS 1 — collect `package` declarations (a file may switch packages
  *          mid-file), @ISA / `use parent` / `use base` inheritance, and
  *          Exporter-style `use Foo qw(...)` imports.
@@ -38,9 +38,7 @@
  * `module_qn.subname` — the package is NOT woven into the sub QN. This module
  * therefore matches caller/callee edges by registering each file-local sub
  * under its extractor QN and resolving calls to those QNs by short name. A
- * per-package CBMRegisteredType (keyed by the package name) carries
- * method_names/method_qns + embedded_types (@ISA parents) so method dispatch
- * can walk the inheritance chain.
+ * package index keeps package names distinct when dispatch follows @ISA.
  *
  * Zero-edge guarantee: if a receiver's type is unknown/unindexed, NO edge is
  * emitted (false edges are worse than missing edges). Symbol-table aliasing
@@ -48,6 +46,8 @@
  */
 
 #include "perl_lsp.h"
+#include "perl_lookup.h"
+#include "scope.h"
 #include "../helpers.h"
 #include "../arena.h"
 #include <ctype.h>
@@ -72,6 +72,31 @@
  * crash). The zero-edge guarantee is preserved: a skipped subtree emits no
  * edges, never a wrong one. */
 #define CBM_LSP_PERL_MAX_WALK_DEPTH 512
+
+typedef struct {
+    CBMArena *arena;
+    const char *source;
+    const CBMTypeRegistry *registry;
+    MoriPerlPackages *packages;
+    CBMScope *current_scope;
+
+    const char *current_package_qn;
+    const char *enclosing_package_qn;
+    const char *enclosing_func_qn;
+    const char *module_qn;
+
+    const char **use_local_names;
+    const char **use_target_qns;
+    int use_count;
+    int use_cap;
+
+    CBMResolvedCallArray *resolved_calls;
+    CBMUsageArray *usages;
+    int eval_depth;
+    int walk_depth;
+} PerlLSPContext;
+
+static const CBMType *perl_eval_expr_type(PerlLSPContext *ctx, TSNode node);
 
 /* ── forward declarations ───────────────────────────────────────── */
 
@@ -213,26 +238,9 @@ static TSNode perl_first_child_of_type(TSNode node, const char *kind) {
     return null_node;
 }
 
-/* ── public API: init / use map ─────────────────────────────────── */
+/* ── Exporter imports ──────────────────────────────────────────── */
 
-void perl_lsp_init(PerlLSPContext *ctx, CBMArena *arena, const char *source, int source_len,
-                   const CBMTypeRegistry *registry, const char *module_qn,
-                   CBMResolvedCallArray *out) {
-    memset(ctx, 0, sizeof(*ctx));
-    ctx->arena = arena;
-    ctx->source = source;
-    ctx->source_len = source_len;
-    ctx->registry = registry;
-    ctx->module_qn = module_qn;
-    ctx->current_package_qn = "";
-    ctx->resolved_calls = out;
-    ctx->current_scope = cbm_scope_push(arena, NULL);
-
-    const char *dbg = getenv("CBM_LSP_DEBUG");
-    ctx->debug = (dbg && dbg[0]);
-}
-
-void perl_lsp_add_use(PerlLSPContext *ctx, const char *local_name, const char *target_qn) {
+static void perl_lsp_add_use(PerlLSPContext *ctx, const char *local_name, const char *target_qn) {
     if (!ctx || !local_name || !target_qn)
         return;
     if (ctx->use_count >= ctx->use_cap) {
@@ -265,7 +273,7 @@ static const char *perl_find_import(PerlLSPContext *ctx, const char *local_name)
     return NULL;
 }
 
-const char *perl_resolve_package_name(PerlLSPContext *ctx, const char *name) {
+static const char *perl_resolve_package_name(PerlLSPContext *ctx, const char *name) {
     if (!name || !name[0])
         return name;
     /* `__PACKAGE__` resolves to the enclosing package. */
@@ -277,104 +285,15 @@ const char *perl_resolve_package_name(PerlLSPContext *ctx, const char *name) {
     return name;
 }
 
-/* ── @ISA registry helpers ──────────────────────────────────────── */
+static const MoriPerlRegistryLookup perl_registry_lookup = {
+    .exact = cbm_registry_lookup_func,
+    .direct_method = cbm_registry_lookup_method,
+};
 
-/* Record `pkg inherits from parent` in the ctx ISA table. Both are package
- * names (e.g. "Derived", "Base"). */
-static void perl_add_isa(PerlLSPContext *ctx, const char *pkg, const char *parent) {
-    if (!ctx || !pkg || !parent || !pkg[0] || !parent[0])
-        return;
-    if (ctx->isa_count >= ctx->isa_cap) {
-        int newcap = ctx->isa_cap ? ctx->isa_cap * 2 : 8;
-        const char **pk =
-            (const char **)cbm_arena_alloc(ctx->arena, (size_t)newcap * sizeof(char *));
-        const char **pa =
-            (const char **)cbm_arena_alloc(ctx->arena, (size_t)newcap * sizeof(char *));
-        if (!pk || !pa)
-            return;
-        for (int i = 0; i < ctx->isa_count; i++) {
-            pk[i] = ctx->isa_pkg_qns[i];
-            pa[i] = ctx->isa_parent_qns[i];
-        }
-        ctx->isa_pkg_qns = pk;
-        ctx->isa_parent_qns = pa;
-        ctx->isa_cap = newcap;
-    }
-    ctx->isa_pkg_qns[ctx->isa_count] = cbm_arena_strdup(ctx->arena, pkg);
-    ctx->isa_parent_qns[ctx->isa_count] = cbm_arena_strdup(ctx->arena, parent);
-    ctx->isa_count++;
-}
-
-/* ── method lookup over the @ISA chain ──────────────────────────── */
-
-/* Resolve a method on a package, searching the package's own subs first, then
- * walking parents (@ISA) depth-first. Returns the resolved sub's
- * CBMRegisteredFunc or NULL. Bounded by CBM_LSP_MAX_LOOKUP_DEPTH * 2 visited.
- *
- * package_qn is a package name (e.g. "Foo::Bar"). Methods are matched via the
- * registered type's method tables (populated in perl_attach_methods) or by a
- * direct receiver-keyed registry method (stdlib types). */
-const CBMRegisteredFunc *perl_lookup_method(PerlLSPContext *ctx, const char *package_qn,
-                                            const char *method_name) {
-    if (!ctx || !package_qn || !method_name)
-        return NULL;
-
-    enum { CAP = CBM_LSP_MAX_LOOKUP_DEPTH * 2 };
-    const char *frontier[CAP];
-    int frontier_count = 0;
-    const char *visited[CAP];
-    int visited_count = 0;
-
-    frontier[frontier_count++] = package_qn;
-
-    while (frontier_count > 0 && visited_count < CAP) {
-        const char *pkg = frontier[--frontier_count];
-        bool seen = false;
-        for (int v = 0; v < visited_count; v++) {
-            if (strcmp(visited[v], pkg) == 0) {
-                seen = true;
-                break;
-            }
-        }
-        if (seen)
-            continue;
-        visited[visited_count++] = pkg;
-
-        const CBMRegisteredType *t = cbm_registry_lookup_type(ctx->registry, pkg);
-        if (!t) {
-            /* Even without a type entry, a stdlib receiver-keyed method may
-             * exist (e.g. a curated CPAN class). */
-            const CBMRegisteredFunc *direct =
-                cbm_registry_lookup_method(ctx->registry, pkg, method_name);
-            if (direct)
-                return direct;
-            continue;
-        }
-
-        /* Own methods (sub table built in perl_attach_methods). */
-        if (t->method_names && t->method_qns) {
-            for (int i = 0; t->method_names[i]; i++) {
-                if (strcmp(t->method_names[i], method_name) == 0) {
-                    const CBMRegisteredFunc *f =
-                        cbm_registry_lookup_func(ctx->registry, t->method_qns[i]);
-                    if (f)
-                        return f;
-                }
-            }
-        }
-        /* Direct receiver-keyed method (stdlib types register this way). */
-        const CBMRegisteredFunc *direct =
-            cbm_registry_lookup_method(ctx->registry, pkg, method_name);
-        if (direct)
-            return direct;
-
-        /* Push parents (@ISA) onto the frontier. */
-        if (t->embedded_types) {
-            for (int i = 0; t->embedded_types[i] && frontier_count < CAP; i++)
-                frontier[frontier_count++] = t->embedded_types[i];
-        }
-    }
-    return NULL;
+static const CBMRegisteredFunc *perl_lookup_method(PerlLSPContext *ctx, const char *package,
+                                                   const char *name) {
+    return mori_perl_packages_lookup(ctx->packages, ctx->registry, &perl_registry_lookup, package,
+                                     name, false);
 }
 
 /* ── expression typing ──────────────────────────────────────────── */
@@ -460,7 +379,7 @@ static const CBMType *perl_eval_bless(PerlLSPContext *ctx, TSNode call_node) {
     return cbm_type_unknown();
 }
 
-const CBMType *perl_eval_expr_type(PerlLSPContext *ctx, TSNode node) {
+static const CBMType *perl_eval_expr_type(PerlLSPContext *ctx, TSNode node) {
     if (ts_node_is_null(node))
         return cbm_type_unknown();
 
@@ -852,18 +771,14 @@ static void perl_resolve_method_call(PerlLSPContext *ctx, TSNode call) {
     if (!mname || !mname[0])
         return;
 
-    /* $self->SUPER::method() — dispatch to the enclosing package's parent
-     * (MRO root recorded in process_package_decl). Resolve `method` starting
-     * at the parent so an overridden method in the child is skipped. No known
-     * parent or unresolved method → no edge (zero-edge guarantee). */
+    /* SUPER dispatch starts in the enclosing package's parent chain. */
     if (strncmp(mname, "SUPER::", 7) == 0) {
         const char *super_method = mname + 7;
         if (!super_method[0])
             return;
-        const char *parent_qn = ctx->enclosing_parent_qn;
-        if (!parent_qn || !parent_qn[0])
-            return;
-        const CBMRegisteredFunc *sf = perl_lookup_method(ctx, parent_qn, super_method);
+        const CBMRegisteredFunc *sf =
+            mori_perl_packages_lookup(ctx->packages, ctx->registry, &perl_registry_lookup,
+                                      ctx->enclosing_package_qn, super_method, true);
         if (sf)
             perl_emit_resolved(ctx, sf->qualified_name, "perl_method_super", PERL_CONF_LITERAL,
                                call);
@@ -1124,20 +1039,8 @@ static void process_package_decl(PerlLSPContext *ctx, TSNode node) {
     char *pkg = perl_node_text(ctx, name);
     if (!pkg || !pkg[0])
         return;
-    ctx->current_package_qn = cbm_arena_strdup(ctx->arena, pkg);
+    ctx->current_package_qn = pkg;
     ctx->enclosing_package_qn = ctx->current_package_qn;
-
-    /* Record the package's first @ISA parent for SUPER:: dispatch. The ISA
-     * table is fully populated by PASS 1 before this runs in PASS 2, so the
-     * MRO root is available here. NULL when the package has no known parent —
-     * SUPER:: then resolves to nothing (zero-edge guarantee). */
-    ctx->enclosing_parent_qn = NULL;
-    for (int i = 0; i < ctx->isa_count; i++) {
-        if (ctx->isa_pkg_qns[i] && strcmp(ctx->isa_pkg_qns[i], pkg) == 0) {
-            ctx->enclosing_parent_qn = ctx->isa_parent_qns[i];
-            break;
-        }
-    }
 }
 
 /* Parse the `qw(a b c)` list inside a node into the import map for module
@@ -1185,14 +1088,14 @@ static void perl_collect_parents(PerlLSPContext *ctx, TSNode node, const char *c
         char *raw = perl_node_text(ctx, node);
         char *inner = perl_unquote(ctx->arena, raw);
         if (inner && inner[0] && strcmp(inner, "-norequire") != 0)
-            perl_add_isa(ctx, child_pkg, inner);
+            mori_perl_packages_add_parent(ctx->packages, child_pkg, inner);
         return;
     }
     if (perl_is_bareword_node(k)) {
         char *bw = perl_node_text(ctx, node);
         if (bw && bw[0] && strcmp(bw, "parent") != 0 && strcmp(bw, "base") != 0 &&
             strcmp(bw, "-norequire") != 0 && bw[0] != '-')
-            perl_add_isa(ctx, child_pkg, bw);
+            mori_perl_packages_add_parent(ctx->packages, child_pkg, bw);
         return;
     }
     /* quoted_word_list words come through as named string-content children. */
@@ -1207,7 +1110,7 @@ static void perl_collect_parents(PerlLSPContext *ctx, TSNode node, const char *c
             if (pw && pw[0] && strcmp(pw, "-norequire") == 0)
                 continue;
             if (pw && pw[0])
-                perl_add_isa(ctx, child_pkg, pw);
+                mori_perl_packages_add_parent(ctx->packages, child_pkg, pw);
         }
         free(kids);
         return;
@@ -1353,21 +1256,7 @@ static void perl_pass1_scan_inner(PerlLSPContext *ctx, TSNode node) {
     free(kids);
 }
 
-/* ── process_file: two-pass walk ────────────────────────────────── */
-
-void perl_lsp_process_file(PerlLSPContext *ctx, TSNode root) {
-    if (ts_node_is_null(root))
-        return;
-
-    /* PASS 1: collect package context, @ISA inheritance, Exporter imports.
-     * Reset the per-file maps first so this is idempotent even when a caller
-     * (cbm_run_perl_lsp) has already run a pre-pass to build registry types. */
-    ctx->current_package_qn = "";
-    ctx->enclosing_package_qn = "";
-    ctx->use_count = 0;
-    ctx->isa_count = 0;
-    perl_pass1_scan(ctx, root);
-
+static void perl_resolve_file(PerlLSPContext *ctx, TSNode root) {
     /* PASS 2: walk subs in package order; resolve + emit call edges. */
     ctx->current_package_qn = "";
     ctx->enclosing_package_qn = "";
@@ -1401,242 +1290,58 @@ void perl_lsp_process_file(PerlLSPContext *ctx, TSNode root) {
     free(kids);
 }
 
-/* ── registry: per-package types + method tables ────────────────── */
-
-/* Register a per-package CBMRegisteredType for every package that participates
- * in @ISA (as child or parent), then attach @ISA parents (embedded_types). */
-static void perl_register_packages(PerlLSPContext *ctx, CBMTypeRegistry *reg) {
-    for (int i = 0; i < ctx->isa_count; i++) {
-        const char *names[2] = {ctx->isa_pkg_qns[i], ctx->isa_parent_qns[i]};
-        for (int s = 0; s < 2; s++) {
-            const char *pkg = names[s];
-            if (!pkg || !pkg[0] || cbm_registry_lookup_type(reg, pkg))
-                continue;
-            CBMRegisteredType rt;
-            memset(&rt, 0, sizeof(rt));
-            rt.qualified_name = cbm_arena_strdup(ctx->arena, pkg);
-            rt.short_name = rt.qualified_name;
-            cbm_registry_add_type(reg, rt);
-        }
-    }
-
-    /* Attach @ISA parents (embedded_types) to each child package type. */
-    for (int t = 0; t < reg->type_count; t++) {
-        CBMRegisteredType *rt = &reg->types[t];
-        if (!rt->qualified_name)
-            continue;
-        int pc = 0;
-        for (int i = 0; i < ctx->isa_count; i++) {
-            if (strcmp(ctx->isa_pkg_qns[i], rt->qualified_name) == 0)
-                pc++;
-        }
-        if (pc == 0)
-            continue;
-        const char **parents =
-            (const char **)cbm_arena_alloc(ctx->arena, (size_t)(pc + 1) * sizeof(char *));
-        if (!parents)
-            continue;
-        int w = 0;
-        for (int i = 0; i < ctx->isa_count; i++) {
-            if (strcmp(ctx->isa_pkg_qns[i], rt->qualified_name) == 0)
-                parents[w++] = ctx->isa_parent_qns[i];
-        }
-        parents[w] = NULL;
-        rt->embedded_types = parents;
-    }
-}
-
-/* One collected (package, short-name, sub-QN) mapping for the batch method-table
- * build. All three strings are arena-owned (they outlive the transient vector),
- * so the vector itself is a plain malloc'd scratch buffer freed in
- * perl_attach_methods. `order` is the source-encounter index — a stable
- * tiebreak so sorting by package preserves source order within a package
- * (first-defined wins on a same-name redefinition, matching the old
- * append-in-order behavior). */
-typedef struct {
-    const char *pkg;
-    const char *short_name;
-    const char *sub_qn;
-    int order;
-} PerlMethodEnt;
-
-typedef struct {
-    PerlMethodEnt *v;
-    int cnt;
-    int cap;
-    bool oom;
-} PerlMethodVec;
-
-/* Append a mapping. Geometric growth → O(1) amortized (the old per-sub
- * perl_type_add_method rebuilt each package's whole method array on every add,
- * which is O(methods^2) on a wide flat single-package file). On OOM the vector
- * latches `oom` and drops further mappings: their method calls simply stay
- * unresolved (graceful degradation, never a wrong edge). */
-static void perl_mvec_push(PerlMethodVec *mv, const char *pkg, const char *short_name,
-                           const char *sub_qn) {
-    if (mv->oom)
+/* Record each top-level sub, and each sub in a package block, under its
+ * package in the Rust package index. */
+static void perl_collect_sub(PerlLSPContext *ctx, TSNode node, const char *package) {
+    const char *kind = ts_node_type(node);
+    if (strcmp(kind, "subroutine_declaration_statement") != 0 &&
+        strcmp(kind, "method_declaration_statement") != 0)
         return;
-    if (mv->cnt == mv->cap) {
-        int ncap = mv->cap ? mv->cap * 2 : 32;
-        PerlMethodEnt *nv = (PerlMethodEnt *)realloc(mv->v, (size_t)ncap * sizeof(PerlMethodEnt));
-        if (!nv) {
-            mv->oom = true;
-            return;
-        }
-        mv->v = nv;
-        mv->cap = ncap;
-    }
-    PerlMethodEnt *e = &mv->v[mv->cnt];
-    e->pkg = pkg;
-    e->short_name = short_name;
-    e->sub_qn = sub_qn;
-    e->order = mv->cnt;
-    mv->cnt++;
+    const char *name = perl_sub_name(ctx, node);
+    if (name && name[0])
+        mori_perl_packages_add_sub(ctx->packages, package, name, ctx->module_qn);
 }
 
-/* Sort key: package name, then source order within a package. */
-static int perl_method_ent_cmp(const void *a, const void *b) {
-    const PerlMethodEnt *ea = (const PerlMethodEnt *)a;
-    const PerlMethodEnt *eb = (const PerlMethodEnt *)b;
-    int c = strcmp(ea->pkg, eb->pkg);
-    if (c != 0)
-        return c;
-    return ea->order - eb->order;
-}
-
-/* Build (or extend) a package type's method tables from a contiguous run of
- * `n` same-package mappings — one allocation for the run, not one per method.
- * Creating/finding the type is O(type_count) but happens once per DISTINCT
- * package, not once per sub. */
-static void perl_type_set_methods(PerlLSPContext *ctx, CBMTypeRegistry *reg, const char *pkg,
-                                  const PerlMethodEnt *ents, int n) {
-    CBMRegisteredType *rt = NULL;
-    for (int t = 0; t < reg->type_count; t++) {
-        if (reg->types[t].qualified_name && strcmp(reg->types[t].qualified_name, pkg) == 0) {
-            rt = &reg->types[t];
-            break;
-        }
-    }
-    if (!rt) {
-        CBMRegisteredType nt;
-        memset(&nt, 0, sizeof(nt));
-        nt.qualified_name = cbm_arena_strdup(ctx->arena, pkg);
-        nt.short_name = nt.qualified_name;
-        cbm_registry_add_type(reg, nt);
-        if (reg->type_count == 0)
-            return; /* add failed (OOM) */
-        rt = &reg->types[reg->type_count - 1];
-    }
-
-    int existing = 0;
-    if (rt->method_names)
-        while (rt->method_names[existing])
-            existing++;
-    int total = existing + n;
-    const char **mn =
-        (const char **)cbm_arena_alloc(ctx->arena, (size_t)(total + 1) * sizeof(char *));
-    const char **mq =
-        (const char **)cbm_arena_alloc(ctx->arena, (size_t)(total + 1) * sizeof(char *));
-    if (!mn || !mq)
-        return;
-    for (int j = 0; j < existing; j++) {
-        mn[j] = rt->method_names[j];
-        mq[j] = rt->method_qns[j];
-    }
-    for (int j = 0; j < n; j++) {
-        mn[existing + j] = ents[j].short_name;
-        mq[existing + j] = ents[j].sub_qn;
-    }
-    mn[total] = NULL;
-    mq[total] = NULL;
-    rt->method_names = mn;
-    rt->method_qns = mq;
-}
-
-/* Walk the top level mapping each sub to its enclosing package, registering the
- * sub's QN in that package's method table so method dispatch finds it. */
-static void perl_attach_methods(PerlLSPContext *ctx, CBMTypeRegistry *reg, TSNode root) {
-    const char *cur_pkg = "main";
-    PerlMethodVec mv;
-    memset(&mv, 0, sizeof(mv));
-    uint32_t nc = ts_node_child_count(root);
-    TSNode *kids = perl_collect_children(root, nc);
-    for (uint32_t i = 0; i < nc; i++) {
-        TSNode c = kids ? kids[i] : ts_node_child(root, i);
-        if (ts_node_is_null(c))
+static void perl_collect_package_subs(PerlLSPContext *ctx, TSNode root) {
+    const char *package = "main";
+    uint32_t count = ts_node_child_count(root);
+    TSNode *kids = perl_collect_children(root, count);
+    for (uint32_t i = 0; i < count; i++) {
+        TSNode node = kids ? kids[i] : ts_node_child(root, i);
+        if (ts_node_is_null(node))
             continue;
-        const char *k = ts_node_type(c);
-        if (strcmp(k, "package_statement") == 0) {
-            TSNode name = ts_node_child_by_field_name(c, "name", 4);
-            if (ts_node_is_null(name))
-                name = perl_first_child_of_type(c, "package");
-            if (!ts_node_is_null(name)) {
-                char *p = perl_node_text(ctx, name);
-                if (p && p[0])
-                    cur_pkg = cbm_arena_strdup(ctx->arena, p);
-            }
-            /* Block-scoped package body: subs are nested children. */
-            uint32_t bn = ts_node_child_count(c);
-            TSNode *bkids = perl_collect_children(c, bn);
-            for (uint32_t bi = 0; bi < bn; bi++) {
-                TSNode bc = bkids ? bkids[bi] : ts_node_child(c, bi);
-                if (ts_node_is_null(bc) || !ts_node_is_named(bc))
-                    continue;
-                if (strcmp(ts_node_type(bc), "subroutine_declaration_statement") != 0 &&
-                    strcmp(ts_node_type(bc), "method_declaration_statement") != 0)
-                    continue;
-                TSNode bname = ts_node_child_by_field_name(bc, "name", 4);
-                if (ts_node_is_null(bname))
-                    continue;
-                char *bsn = perl_node_text(ctx, bname);
-                if (!bsn || !bsn[0])
-                    continue;
-                const char *bqn = ctx->module_qn
-                                      ? cbm_arena_sprintf(ctx->arena, "%s.%s", ctx->module_qn, bsn)
-                                      : cbm_arena_strdup(ctx->arena, bsn);
-                perl_mvec_push(&mv, cur_pkg, bsn, bqn);
-            }
-            free(bkids);
+        if (strcmp(ts_node_type(node), "package_statement") != 0) {
+            perl_collect_sub(ctx, node, package);
             continue;
         }
-        if (strcmp(k, "subroutine_declaration_statement") != 0 &&
-            strcmp(k, "method_declaration_statement") != 0)
-            continue;
 
-        TSNode name = ts_node_child_by_field_name(c, "name", 4);
+        TSNode name = ts_node_child_by_field_name(node, "name", 4);
         if (ts_node_is_null(name))
-            continue;
-        char *sname = perl_node_text(ctx, name);
-        if (!sname || !sname[0])
-            continue;
-        const char *sub_qn = ctx->module_qn
-                                 ? cbm_arena_sprintf(ctx->arena, "%s.%s", ctx->module_qn, sname)
-                                 : cbm_arena_strdup(ctx->arena, sname);
-        perl_mvec_push(&mv, cur_pkg, sname, sub_qn);
+            name = perl_first_child_of_type(node, "package");
+        if (!ts_node_is_null(name)) {
+            const char *text = perl_node_text(ctx, name);
+            if (text && text[0])
+                package = text;
+        }
+
+        /* Block-scoped package body: subs are nested children. */
+        uint32_t body_count = ts_node_child_count(node);
+        TSNode *body = perl_collect_children(node, body_count);
+        for (uint32_t j = 0; j < body_count; j++) {
+            TSNode child = body ? body[j] : ts_node_child(node, j);
+            if (!ts_node_is_null(child) && ts_node_is_named(child))
+                perl_collect_sub(ctx, child, package);
+        }
+        free(body);
     }
     free(kids);
-
-    /* Build each package's method table once from the collected mappings:
-     * sort by package (source order preserved within a package), then set each
-     * contiguous same-package run in a single allocation. */
-    if (mv.cnt > 0 && mv.v) {
-        qsort(mv.v, (size_t)mv.cnt, sizeof(PerlMethodEnt), perl_method_ent_cmp);
-        int s = 0;
-        while (s < mv.cnt) {
-            int e = s + 1;
-            while (e < mv.cnt && strcmp(mv.v[e].pkg, mv.v[s].pkg) == 0)
-                e++;
-            perl_type_set_methods(ctx, reg, mv.v[s].pkg, &mv.v[s], e - s);
-            s = e;
-        }
-    }
-    free(mv.v);
 }
 
 /* ── entry: cbm_run_perl_lsp ────────────────────────────────────── */
 
 void cbm_run_perl_lsp(CBMArena *arena, CBMFileResult *result, const char *source, int source_len,
                       TSNode root) {
+    (void)source_len;
     if (!result || !arena || ts_node_is_null(root))
         return;
 
@@ -1673,39 +1378,32 @@ void cbm_run_perl_lsp(CBMArena *arena, CBMFileResult *result, const char *source
         }
     }
 
-    /* Phase B.1: pre-pass over the AST to populate the inheritance + import
-     * maps and build per-package types + method tables. This must happen
-     * before resolution (PASS 2) so method dispatch can walk @ISA. The
-     * mutable `reg` lives here; perl_lsp_process_file later runs on the
-     * finished (const) registry. */
-    PerlLSPContext ctx;
-    perl_lsp_init(&ctx, arena, source, source_len, &reg, module_qn, &result->resolved_calls);
-    ctx.usages = &result->usages;
+    PerlLSPContext ctx = {
+        .arena = arena,
+        .source = source,
+        .registry = &reg,
+        .packages = mori_perl_packages_new(),
+        .current_scope = cbm_scope_push(arena, NULL),
+        .current_package_qn = "",
+        .enclosing_package_qn = "",
+        .module_qn = module_qn,
+        .resolved_calls = &result->resolved_calls,
+        .usages = &result->usages,
+    };
 
-    ctx.current_package_qn = "";
-    ctx.enclosing_package_qn = "";
     perl_pass1_scan(&ctx, root);
-    perl_register_packages(&ctx, &reg);
-    perl_attach_methods(&ctx, &reg, root);
+    perl_collect_package_subs(&ctx, root);
 
-    /* Finalize the registry for O(1) lookups during resolution — mirrors
-     * php_lsp/java_lsp. Must come AFTER all registry mutations (stdlib, file
-     * defs, packages, methods) and BEFORE resolution. reg's arena is the
-     * pipeline-lifetime result arena, so per-file bucket allocations go to a
-     * per-call scratch arena that dies with this call rather than accumulating
-     * across a large repo. */
+    /* The registry index and package tables live only for this file. */
     CBMArena idx_arena;
     cbm_arena_init(&idx_arena);
     cbm_registry_finalize_into(&reg, &idx_arena);
+    perl_resolve_file(&ctx, root);
 
-    /* Phase C: two-pass resolution walk (PASS 1 re-populates the per-file use
-     * map + ISA context needed for the bless/$self idioms during PASS 2). */
-    perl_lsp_process_file(&ctx, root);
-
-    if (ctx.debug) {
-        fprintf(stderr, "[perl_lsp] module_qn=%s defs=%d resolved=%d isa=%d types=%d\n",
-                module_qn ? module_qn : "(null)", result->defs.count, result->resolved_calls.count,
-                ctx.isa_count, reg.type_count);
+    const char *debug = getenv("CBM_LSP_DEBUG");
+    if (debug && debug[0]) {
+        fprintf(stderr, "[perl_lsp] module_qn=%s defs=%d resolved=%d\n",
+                module_qn ? module_qn : "(null)", result->defs.count, result->resolved_calls.count);
         for (int i = 0; i < result->resolved_calls.count; i++) {
             CBMResolvedCall *r = &result->resolved_calls.items[i];
             fprintf(stderr, "[perl_lsp]   %s -> %s [%s %.2f]\n", r->caller_qn, r->callee_qn,
@@ -1713,5 +1411,6 @@ void cbm_run_perl_lsp(CBMArena *arena, CBMFileResult *result, const char *source
         }
     }
 
+    mori_perl_packages_free(ctx.packages);
     cbm_arena_destroy(&idx_arena);
 }

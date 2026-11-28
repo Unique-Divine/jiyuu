@@ -5,7 +5,7 @@
 #include "lsp/type_rep.c"
 #include "lsp/scope.c"
 #include "lsp/type_registry.c"
-#include "lsp/go_lsp.c"
+#include "lsp/go_resolver_bridge.c"
 #include "lsp/generated/go_stdlib_data.c"
 #include "lsp/c_lsp.c"
 #include "lsp/generated/c_stdlib_data.c"
