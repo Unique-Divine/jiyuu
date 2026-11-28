@@ -362,12 +362,9 @@ mod perl_packages;
 #[path = "../internal/cbm/lsp/ts_type_text.rs"]
 mod ts_type_text;
 
-#[cfg(feature = "c-backend")]
+#[cfg(feature = "native-engine-abi")]
 #[path = "../internal/cbm/rust_use_imports.rs"]
 mod rust_use_imports;
-
-#[cfg(feature = "c-backend")]
-pub use rust_use_imports::register as mori_register_rust_use_imports;
 
 #[cfg(feature = "native-engine-abi")]
 #[path = "../internal/cbm/markdown_extract/mod.rs"]

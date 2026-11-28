@@ -6,12 +6,6 @@ use crate::native_tree::RawNode;
 
 type Emit =
     unsafe extern "C" fn(*mut c_void, *const u8, usize, *const u8, usize);
-type Extract =
-    unsafe extern "C" fn(RawNode, *const u8, usize, *mut c_void, Emit) -> bool;
-
-unsafe extern "C" {
-    fn cbm_rust_set_use_extractor(extract: Extract);
-}
 
 enum Work {
     Visit(RawNode),
@@ -109,7 +103,13 @@ unsafe fn walk(
     emitted
 }
 
-unsafe extern "C" fn extract_use(
+/// Read top-level Rust use declarations and lend each row to the C sink.
+///
+/// # Safety
+/// The caller lends a live tree, its initialized source, and a sink that
+/// copies the output bytes before returning.
+#[unsafe(no_mangle)]
+unsafe extern "C" fn mori_rust_extract_use_imports(
     root: RawNode,
     source: *const u8,
     source_len: usize,
@@ -130,16 +130,6 @@ unsafe extern "C" fn extract_use(
         }
         emitted
     }
-}
-
-/// Install the parser callback for Rust use declarations.
-///
-/// # Safety
-///
-/// Register during process startup, before any extraction threads run.
-pub unsafe fn register() {
-    // SAFETY: Startup registration precedes all extractor workers.
-    unsafe { cbm_rust_set_use_extractor(extract_use) };
 }
 
 #[cfg(test)]

@@ -23,19 +23,16 @@ impl Drop for Scratch {
 
 struct IndexRun {
     root: PathBuf,
-    implementation: &'static str,
 }
 
 impl IndexRun {
-    fn new(root: &Path, implementation: &'static str) -> Self {
-        let root = root.join(implementation);
+    fn new(root: &Path) -> Self {
         let mut dirs = fs::DirBuilder::new();
         dirs.recursive(true).mode(0o700);
         dirs.create(root.join("cache")).unwrap();
         dirs.create(root.join("rt")).unwrap();
         Self {
-            root,
-            implementation,
+            root: root.to_owned(),
         }
     }
 
@@ -50,8 +47,7 @@ impl IndexRun {
             .env("CBM_RUNTIME_DIR", self.root.join("rt"))
             .env("CBM_PROFILE", "1")
             .env("CBM_LOG_LEVEL", "debug")
-            .env("CBM_WORKERS", "1")
-            .env("MORI_IMPL_RUST_IMPORTS", self.implementation);
+            .env("CBM_WORKERS", "1");
         command
     }
 
@@ -69,23 +65,6 @@ impl IndexRun {
 
     fn db_path(&self) -> PathBuf {
         self.root.join("cache").join(format!("{PROJECT}.db"))
-    }
-
-    fn graph(&self) -> Vec<u8> {
-        let output = self
-            .command()
-            .args([
-                "dev",
-                "export",
-                "--tables",
-                "nodes,edges,file_hashes",
-                "--db",
-            ])
-            .arg(self.db_path())
-            .output()
-            .unwrap();
-        assert!(output.status.success(), "{output:?}");
-        output.stdout
     }
 
     fn worker_markers(&self) -> Vec<String> {
@@ -171,11 +150,8 @@ pub fn relative() -> Relative { Relative }
         fs::write(repo.join(file), text).unwrap();
     }
 
-    let native = IndexRun::new(&scratch.0, "c");
-    native.index(&repo);
-    let rust = IndexRun::new(&scratch.0, "rust");
+    let rust = IndexRun::new(&scratch.0);
     rust.index(&repo);
-    assert_eq!(rust.graph(), native.graph(), "persistent graph differs");
 
     let db = Connection::open_with_flags(
         rust.db_path(),
@@ -209,7 +185,6 @@ pub fn relative() -> Relative { Relative }
         "grouped use lost the typed associated call"
     );
 
-    assert!(native.worker_markers().is_empty());
     let markers = rust.worker_markers();
     for file in ["src/main.rs", "src/sub/mod.rs"] {
         assert!(

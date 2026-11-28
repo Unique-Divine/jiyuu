@@ -2,6 +2,7 @@
 #include "arena.h" // CBMArena, cbm_arena_strdup/strndup/sprintf
 #include "helpers.h"
 #include "lang_specs.h"      // CBMLangSpec, CBMEmbeddedLangSpec, cbm_lang_spec, cbm_ts_language
+#include "native_tree_ffi.h"
 #include "tree_sitter/api.h" // TSNode, ts_node_*
 #include "foundation/constants.h"
 #include "foundation/log.h"
@@ -184,6 +185,7 @@ extern void mori_python_extract_imports(TSNode node, const char *source, size_t 
 static void python_emit_import_row(void *context, const python_import_row_t *row) {
     CBMExtractCtx *ctx = context;
     CBMArena *arena = ctx->arena;
+    CBM_MSAN_WRITTEN(row, sizeof(*row));
     char *module_path = NULL;
     if (row->prefix.len == 0 && !row->needs_dot) {
         module_path = cbm_arena_strndup(arena, row->member.data, row->member.len);
@@ -1627,12 +1629,19 @@ static bool emit_ts_static_import(void *context, TSNode source, const TSNode *lo
     CBMExtractCtx *ctx = output->ctx;
     CBMArena *arena = ctx->arena;
     if (!output->path) {
+        cbm_ffi_ts_node_written(&source);
         output->path = strip_quotes(arena, cbm_node_text(arena, source, ctx->source));
         /* The source is shared by every binding. Decline before writing any
          * row so the statement can fall back to native extraction. */
         if (!output->path || !output->path[0]) {
             return false;
         }
+    }
+    if (local) {
+        cbm_ffi_ts_node_written(local);
+    }
+    if (member) {
+        cbm_ffi_ts_node_written(member);
     }
     const char *exported = member ? cbm_node_text(arena, *member, ctx->source) : NULL;
     const char *name = local    ? cbm_node_text(arena, *local, ctx->source)
@@ -1842,43 +1851,6 @@ static void parse_java_imports(CBMExtractCtx *ctx) {
 // --- Rust imports ---
 // use_declaration -> use_list or scoped_use_list
 
-static TSNode rust_import_field(TSNode node, const char *field) {
-    return ts_node_child_by_field_name(node, field, (uint32_t)strlen(field));
-}
-
-static char *rust_import_node_text_compact(CBMArena *a, TSNode node, const char *source) {
-    if (ts_node_is_null(node)) {
-        return NULL;
-    }
-    uint32_t start = ts_node_start_byte(node);
-    uint32_t end = ts_node_end_byte(node);
-    if (end <= start) {
-        return cbm_arena_strdup(a, "");
-    }
-    char *out = (char *)cbm_arena_alloc(a, (size_t)(end - start) + SKIP_ONE);
-    if (!out) {
-        return NULL;
-    }
-    size_t w = 0;
-    for (uint32_t i = start; i < end; i++) {
-        if (!isspace((unsigned char)source[i])) {
-            out[w++] = source[i];
-        }
-    }
-    out[w] = '\0';
-    return out;
-}
-
-static char *rust_import_join(CBMArena *a, const char *prefix, const char *suffix) {
-    if (!prefix || !prefix[0]) {
-        return cbm_arena_strdup(a, suffix ? suffix : "");
-    }
-    if (!suffix || !suffix[0]) {
-        return cbm_arena_strdup(a, prefix);
-    }
-    return cbm_arena_sprintf(a, "%s::%s", prefix, suffix);
-}
-
 static bool rust_import_exists(const CBMImportArray *imports, const char *local,
                                const char *module_path) {
     for (int i = 0; i < imports->count; i++) {
@@ -1922,95 +1894,32 @@ static void rust_import_push(CBMExtractCtx *ctx, const char *full, const char *a
     cbm_imports_push(&ctx->result->imports, a, imp);
 }
 
-static void rust_import_walk(CBMExtractCtx *ctx, TSNode node, const char *prefix) {
-    if (ts_node_is_null(node)) {
-        return;
-    }
-
-    CBMArena *a = ctx->arena;
-    const char *kind = ts_node_type(node);
-    if (strcmp(kind, "use_list") == 0) {
-        uint32_t count = ts_node_named_child_count(node);
-        for (uint32_t i = 0; i < count; i++) {
-            rust_import_walk(ctx, ts_node_named_child(node, i), prefix);
-        }
-        return;
-    }
-    if (strcmp(kind, "scoped_use_list") == 0) {
-        char *path = rust_import_node_text_compact(a, rust_import_field(node, "path"), ctx->source);
-        char *next_prefix = rust_import_join(a, prefix, path);
-        rust_import_walk(ctx, rust_import_field(node, "list"), next_prefix);
-        return;
-    }
-    if (strcmp(kind, "use_as_clause") == 0) {
-        char *path = rust_import_node_text_compact(a, rust_import_field(node, "path"), ctx->source);
-        char *alias =
-            rust_import_node_text_compact(a, rust_import_field(node, "alias"), ctx->source);
-        char *full = rust_import_join(a, prefix, path);
-        rust_import_push(ctx, full, alias);
-        return;
-    }
-    if (strcmp(kind, "use_wildcard") == 0) {
-        TSNode inner =
-            ts_node_named_child_count(node) > 0 ? ts_node_named_child(node, 0) : (TSNode){0};
-        char *path = rust_import_node_text_compact(a, inner, ctx->source);
-        char *base = rust_import_join(a, prefix, path);
-        char *full =
-            base && base[0] ? cbm_arena_sprintf(a, "%s::*", base) : cbm_arena_strdup(a, "*");
-        rust_import_push(ctx, full, NULL);
-        return;
-    }
-    if (strcmp(kind, "line_comment") == 0 || strcmp(kind, "block_comment") == 0) {
-        return;
-    }
-
-    char *path = rust_import_node_text_compact(a, node, ctx->source);
-    char *full = rust_import_join(a, prefix, path);
-    rust_import_push(ctx, full, NULL);
-}
-
 /* Rust emits temporary path bytes and C materializes the original import
  * records, including local-name inference and duplicate suppression. */
 typedef void (*rust_use_emit_t)(void *, const char *, size_t, const char *, size_t);
-typedef bool (*rust_use_extractor_t)(TSNode, const char *, size_t, void *, rust_use_emit_t);
-static rust_use_extractor_t rust_use_extractor;
-
-void cbm_rust_set_use_extractor(rust_use_extractor_t extract);
-void cbm_rust_set_use_extractor(rust_use_extractor_t extract) {
-    rust_use_extractor = extract;
-}
+extern bool mori_rust_extract_use_imports(TSNode root, const char *source, size_t source_len,
+                                          void *context, rust_use_emit_t emit);
 
 static void emit_rust_use_import(void *context, const char *path, size_t path_len,
                                  const char *alias, size_t alias_len) {
     CBMExtractCtx *ctx = context;
+    CBM_MSAN_WRITTEN(path, path_len);
     const char *module = cbm_arena_strndup(ctx->arena, path, path_len);
-    const char *local = alias_len > 0 ? cbm_arena_strndup(ctx->arena, alias, alias_len) : NULL;
+    const char *local = NULL;
+    if (alias_len > 0) {
+        CBM_MSAN_WRITTEN(alias, alias_len);
+        local = cbm_arena_strndup(ctx->arena, alias, alias_len);
+    }
     rust_import_push(ctx, module, local);
 }
 
 static void parse_rust_imports(CBMExtractCtx *ctx) {
-    if (rust_use_extractor && ctx->source && ctx->source_len > 0 && !ts_node_is_null(ctx->root)) {
-        if (rust_use_extractor(ctx->root, ctx->source, (size_t)ctx->source_len, ctx,
-                               emit_rust_use_import)) {
-            cbm_log_debug("extract.rust_imports", "implementation", "rust", "file",
-                          ctx->rel_path ? ctx->rel_path : "");
-        }
-        return;
+    if (ctx->source && ctx->source_len > 0 && !ts_node_is_null(ctx->root) &&
+        mori_rust_extract_use_imports(ctx->root, ctx->source, (size_t)ctx->source_len, ctx,
+                                      emit_rust_use_import)) {
+        cbm_log_debug("extract.rust_imports", "implementation", "rust", "file",
+                      ctx->rel_path ? ctx->rel_path : "");
     }
-    TSTreeCursor cursor = ts_tree_cursor_new(ctx->root);
-    if (!ts_tree_cursor_goto_first_child(&cursor)) {
-        ts_tree_cursor_delete(&cursor);
-        return;
-    }
-    do {
-        TSNode node = ts_tree_cursor_current_node(&cursor);
-        if (strcmp(ts_node_type(node), "use_declaration") != 0) {
-            continue;
-        }
-
-        rust_import_walk(ctx, rust_import_field(node, "argument"), "");
-    } while (ts_tree_cursor_goto_next_sibling(&cursor));
-    ts_tree_cursor_delete(&cursor);
 }
 
 // --- C/C++ imports ---
