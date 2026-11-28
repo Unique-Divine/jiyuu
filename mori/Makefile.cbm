@@ -790,6 +790,7 @@ TEST_FOUNDATION_SRCS = \
 
 TEST_EXTRACTION_SRCS = \
     tests/test_extraction.c \
+    tests/test_node_helpers.c \
     tests/test_callable_sig.c \
     tests/test_test_conventions.c \
     tests/test_extraction_inheritance.c \
