@@ -382,6 +382,10 @@ mod stage_publish;
 #[path = "../internal/cbm/lsp/python_annotation.rs"]
 mod python_annotation;
 
+#[cfg(feature = "native-engine-abi")]
+#[path = "../internal/cbm/lsp/python_calls.rs"]
+mod python_calls;
+
 #[cfg(any(feature = "native-engine-abi", test))]
 #[path = "../internal/cbm/lsp/python_mro.rs"]
 mod python_mro;

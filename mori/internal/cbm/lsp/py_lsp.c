@@ -13,6 +13,7 @@
 #include "py_lsp.h"
 #include "../cbm.h"
 #include "../helpers.h"
+#include "../native_tree_ffi.h"
 #include "../../../src/foundation/sanitized.h"
 #include "../../../src/foundation/hash_table.h" /* module-scope suffix index (re-exports) */
 #include "lsp_node_iter.h"
@@ -1464,22 +1465,6 @@ static PyModuleMember py_module_member(PyLSPContext *ctx, const char *module_qn,
     return m;
 }
 
-/* Emit a call resolved through a module namespace. A re-export may bind the
- * definition under another name (`from .x import Orig as Renamed`): that is
- * an import alias, whose join reads the written name from `reason`. */
-static void py_emit_module_member_call(PyLSPContext *ctx, const char *callee_qn,
-                                       const char *strategy, float confidence,
-                                       const char *written_name, TSNode site) {
-    const char *dot = strrchr(callee_qn, '.');
-    const char *short_name = dot ? dot + 1 : callee_qn;
-    if (strcmp(short_name, written_name) != 0) {
-        py_emit_resolved_call_reason(ctx, callee_qn, "lsp_import_alias", confidence, written_name,
-                                     site);
-    } else {
-        py_emit_resolved_call(ctx, callee_qn, strategy, confidence, site);
-    }
-}
-
 /* ── The C3 method resolution order ──────────────────────────────── */
 
 /* Maximum order accepted by the Rust merge, including the class itself. */
@@ -1637,6 +1622,7 @@ static const CBMRegisteredFunc *py_lookup_attribute(PyLSPContext *ctx, const cha
                                       CBM_LSP_MAX_LOOKUP_DEPTH);
 }
 
+#ifdef CBM_ENABLE_TEST_SEAMS
 /* The method super().attr reaches from inside `class_qn`, or for an
  * undeclared `__init__` the first base's constructor QN. NULL: no target. */
 static const char *py_super_target(PyLSPContext *ctx, const char *class_qn,
@@ -1650,7 +1636,6 @@ static const char *py_super_target(PyLSPContext *ctx, const char *class_qn,
                : NULL;
 }
 
-#ifdef CBM_ENABLE_TEST_SEAMS
 const CBMRegisteredFunc *cbm_py_mro_test_lookup(PyLSPContext *ctx, const char *type_qn,
                                                 const char *member) {
     return py_lookup_attribute(ctx, type_qn, member);
@@ -3223,7 +3208,258 @@ static void py_process_statement(PyLSPContext *ctx, TSNode node) {
 
 /* ── Recursive walker: process statements + emit resolved_calls ── */
 
-static void py_emit_call_for(PyLSPContext *ctx, TSNode call_node) {
+typedef struct {
+    const char *data;
+    size_t size;
+} PyCallName;
+
+typedef struct {
+    bool present;
+    const char *callable;
+    const char *named;
+} PyCallBinding;
+
+enum {
+    PY_RECEIVER_NAMED = 1,
+    PY_RECEIVER_BUILTIN = 2,
+    PY_RECEIVER_TEMPLATE = 3,
+    PY_RECEIVER_MODULE = 4,
+    PY_RECEIVER_UNION = 5,
+};
+
+typedef struct {
+    uint32_t kind;
+    const char *name;
+    const CBMType *type;
+    size_t members;
+} PyCallReceiver;
+
+typedef struct {
+    const char *function;
+    const char *class_name;
+} PyCallModuleMember;
+
+typedef struct {
+    const char *method;
+    const char *constructor_base;
+} PyCallSuperTarget;
+
+typedef struct {
+    const char *(*text)(PyLSPContext *, const TSNode *);
+    bool (*lambda)(PyLSPContext *, PyCallName, const TSNode *);
+    PyCallBinding (*scope)(PyLSPContext *, PyCallName);
+    bool (*imported)(PyLSPContext *, PyCallName, PyCallName);
+    const char *(*symbol)(PyLSPContext *, PyCallName, PyCallName);
+    const char *(*class_name)(PyLSPContext *, PyCallName);
+    const char *(*method)(PyLSPContext *, PyCallName, PyCallName, bool);
+    const char *(*dispatch)(PyLSPContext *, PyCallName, const TSNode *);
+    PyCallSuperTarget (*super_target)(PyLSPContext *, PyCallName);
+    PyCallReceiver (*receiver)(PyLSPContext *, const TSNode *);
+    const char *(*union_member)(const CBMType *, size_t);
+    PyCallModuleMember (*module_member)(PyLSPContext *, PyCallName, PyCallName);
+    void (*emit)(PyLSPContext *, const TSNode *, PyCallName, PyCallName, float, PyCallName);
+} PyCallNative;
+
+extern void mori_py_invoke(PyLSPContext *, const PyCallNative *, const TSNode *, const char *,
+                           bool);
+
+static const char *py_call_name(PyCallName name) {
+    if (name.size)
+        CBM_MSAN_WRITTEN(name.data, name.size);
+    return name.data;
+}
+
+static const char *py_call_text(PyLSPContext *ctx, const TSNode *node) {
+    cbm_ffi_ts_node_written(node);
+    return py_node_text(ctx, *node);
+}
+
+static bool py_call_lambda(PyLSPContext *ctx, PyCallName name, const TSNode *node) {
+    int lambda_idx = py_lookup_lambda(ctx, py_call_name(name));
+    if (lambda_idx < 0)
+        return false;
+    cbm_ffi_ts_node_written(node);
+    TSNode call_node = *node;
+    TSNode lambda_node = ctx->lambdas[lambda_idx].lambda_node;
+    TSNode params = ts_node_child_by_field_name(lambda_node, "parameters", 10);
+    TSNode body = ts_node_child_by_field_name(lambda_node, "body", 4);
+    TSNode args = ts_node_child_by_field_name(call_node, "arguments", 9);
+    // A lambda that reaches itself again (directly or through another
+    // lambda) would re-walk its body once per nesting level up to the
+    // walk-depth cap, and two such calls in one body double the work
+    // per level. Walk each body at most once per chain.
+    if (ctx->lambdas[lambda_idx].expanding)
+        return true;
+    CBMScope *saved = ctx->current_scope;
+    ctx->current_scope = py_scope_push_checked(ctx);
+    // Bind each lambda param to the call-site arg's type.
+    if (!ts_node_is_null(params) && !ts_node_is_null(args)) {
+        uint32_t pn = ts_node_named_child_count(params);
+        uint32_t an = ts_node_named_child_count(args);
+        for (uint32_t pi = 0; pi < pn && pi < an; pi++) {
+            TSNode p = ts_node_named_child(params, pi);
+            TSNode a = ts_node_named_child(args, pi);
+            const char *pname = NULL;
+            if (strcmp(ts_node_type(p), "identifier") == 0) {
+                pname = py_node_text(ctx, p);
+            } else if (strcmp(ts_node_type(p), "default_parameter") == 0 ||
+                       strcmp(ts_node_type(p), "typed_parameter") == 0) {
+                TSNode pi_n = ts_node_child_by_field_name(p, "name", 4);
+                if (!ts_node_is_null(pi_n) &&
+                    strcmp(ts_node_type(pi_n), "identifier") == 0) {
+                    pname = py_node_text(ctx, pi_n);
+                }
+            }
+            if (pname) {
+                const CBMType *arg_type = py_eval_expr_type(ctx, a);
+                py_scope_bind(ctx, pname, arg_type);
+            }
+        }
+    }
+    // Set enclosing func to a synthetic <lambda> so emissions
+    // attribute correctly (find_resolved by "<lambda>" works).
+    const char *prev_func = ctx->enclosing_func_qn;
+    ctx->enclosing_func_qn = cbm_arena_sprintf(ctx->arena, "%s.<lambda>",
+                                               prev_func ? prev_func : ctx->module_qn);
+    if (!ts_node_is_null(body)) {
+        ctx->lambdas[lambda_idx].expanding = true;
+        py_resolve_calls_in(ctx, body);
+        ctx->lambdas[lambda_idx].expanding = false;
+    }
+    ctx->enclosing_func_qn = prev_func;
+    py_scope_restore(ctx, saved);
+    return true;
+}
+
+static PyCallBinding py_call_scope(PyLSPContext *ctx, PyCallName name) {
+    const CBMVarBinding *binding =
+        cbm_scope_lookup_binding(ctx->current_scope, py_call_name(name));
+    if (!binding)
+        return (PyCallBinding){0};
+    const CBMType *type = binding->type;
+    const char *named = !cbm_type_is_unknown(type) && type->kind == CBM_TYPE_NAMED
+                            ? type->data.named.qualified_name : NULL;
+    return (PyCallBinding){true, binding->callable_qn, named};
+}
+
+/* A typed local carrying a matching import row can prove an alias join. */
+static bool py_call_imported(PyLSPContext *ctx, PyCallName spelling, PyCallName qualified) {
+    const char *name = py_call_name(spelling);
+    const char *qn = py_call_name(qualified);
+    for (int i = py_import_row_first(ctx, name); i >= 0; i = py_import_row_next(ctx, name, i)) {
+        const char *local = ctx->import_local_names[i];
+        const char *import_qn = ctx->import_module_qns[i];
+        if (local && import_qn && strcmp(local, name) == 0 && strcmp(import_qn, qn) == 0 &&
+            py_import_index_is_from_binding(ctx, i))
+            return true;
+    }
+    return false;
+}
+
+static const char *py_call_symbol(PyLSPContext *ctx, PyCallName module, PyCallName name) {
+    const CBMRegisteredFunc *func =
+        cbm_registry_lookup_symbol(ctx->registry, py_call_name(module), py_call_name(name));
+    return func ? func->qualified_name : NULL;
+}
+
+static const char *py_call_class(PyLSPContext *ctx, PyCallName name) {
+    const CBMRegisteredType *type = cbm_registry_lookup_type(ctx->registry, py_call_name(name));
+    return type ? type->qualified_name : NULL;
+}
+
+static const char *py_call_method(PyLSPContext *ctx, PyCallName class_name, PyCallName member,
+                                  bool inherited) {
+    const char *class_qn = py_call_name(class_name);
+    const char *name = py_call_name(member);
+    const CBMRegisteredFunc *func = inherited ? py_lookup_attribute(ctx, class_qn, name)
+        : cbm_registry_lookup_method(ctx->registry, class_qn, name);
+    return func ? func->qualified_name : NULL;
+}
+
+static const char *py_call_dispatch(PyLSPContext *ctx, PyCallName name, const TSNode *key) {
+    cbm_ffi_ts_node_written(key);
+    return py_lookup_dict_dispatch(ctx, py_call_name(name), py_string_literal_value(ctx, *key));
+}
+
+static PyCallSuperTarget py_call_super_target(PyLSPContext *ctx, PyCallName member) {
+    if (!ctx->enclosing_class_qn)
+        return (PyCallSuperTarget){0};
+    PySuperTarget target = mori_py_lookup_super(ctx, &py_mro_native, ctx->enclosing_class_qn,
+        py_call_name(member), CBM_LSP_MAX_LOOKUP_DEPTH);
+    return (PyCallSuperTarget){
+        target.method ? target.method->qualified_name : NULL,
+        target.constructor_base,
+    };
+}
+
+static PyCallReceiver py_call_receiver(PyLSPContext *ctx, const TSNode *node) {
+    cbm_ffi_ts_node_written(node);
+    const CBMType *type = py_eval_expr_type(ctx, *node);
+    if (!type)
+        return (PyCallReceiver){0};
+    switch (type->kind) {
+    case CBM_TYPE_NAMED:
+        return (PyCallReceiver){PY_RECEIVER_NAMED, type->data.named.qualified_name, NULL, 0};
+    case CBM_TYPE_BUILTIN:
+        return (PyCallReceiver){PY_RECEIVER_BUILTIN, type->data.builtin.name, NULL, 0};
+    case CBM_TYPE_TEMPLATE:
+        return (PyCallReceiver){PY_RECEIVER_TEMPLATE, type->data.template_type.template_name, NULL, 0};
+    case CBM_TYPE_MODULE:
+        return (PyCallReceiver){PY_RECEIVER_MODULE, type->data.module.module_qn, NULL, 0};
+    case CBM_TYPE_UNION:
+        return (PyCallReceiver){PY_RECEIVER_UNION, NULL, type,
+            type->data.union_type.count > 0 ? (size_t)type->data.union_type.count : 0};
+    default:
+        return (PyCallReceiver){0};
+    }
+}
+
+static const char *py_call_union_member(const CBMType *type, size_t index) {
+    const CBMType *member = type->data.union_type.members[index];
+    return member && member->kind == CBM_TYPE_NAMED ? member->data.named.qualified_name : NULL;
+}
+
+static PyCallModuleMember py_call_module_member(PyLSPContext *ctx, PyCallName module,
+                                              PyCallName member) {
+    PyModuleMember result = py_module_member(ctx, py_call_name(module), py_call_name(member));
+    return (PyCallModuleMember){
+        result.func ? result.func->qualified_name : NULL,
+        result.type ? result.type->qualified_name : NULL,
+    };
+}
+
+static void py_call_emit(PyLSPContext *ctx, const TSNode *node, PyCallName target,
+                         PyCallName strategy, float confidence, PyCallName reason) {
+    cbm_ffi_ts_node_written(node);
+    py_emit_resolved_call_reason(ctx, py_call_name(target), py_call_name(strategy), confidence,
+                                 py_call_name(reason), *node);
+}
+
+#ifdef CBM_ENABLE_TEST_SEAMS
+/* ── C reference for python_calls.rs, kept for the parity test ───────── */
+
+/* Routes invocation target selection through the C below instead of
+ * python_calls.rs (cbm_py_lsp_test_use_c_reference). */
+static bool py_test_c_reference;
+
+void cbm_py_lsp_test_use_c_reference(bool enabled) {
+    py_test_c_reference = enabled;
+}
+
+static void py_c_emit_module_member_call(PyLSPContext *ctx, const char *callee_qn,
+                                       const char *strategy, float confidence,
+                                       const char *written_name, TSNode site) {
+    const char *dot = strrchr(callee_qn, '.');
+    const char *short_name = dot ? dot + 1 : callee_qn;
+    if (strcmp(short_name, written_name) != 0) {
+        py_emit_resolved_call_reason(ctx, callee_qn, "lsp_import_alias", confidence, written_name,
+                                     site);
+    } else {
+        py_emit_resolved_call(ctx, callee_qn, strategy, confidence, site);
+    }
+}
+
+static void py_c_emit_call_for(PyLSPContext *ctx, TSNode call_node) {
     if (!ctx || ctx->eval_failure)
         return;
     if (!ctx || ctx->callable_value_proof_disabled)
@@ -3446,12 +3682,12 @@ static void py_emit_call_for(PyLSPContext *ctx, TSNode call_node) {
             // module re-exports (`models.CharField`).
             PyModuleMember mm = py_module_member(ctx, mod, attr_name);
             if (mm.func) {
-                py_emit_module_member_call(ctx, mm.func->qualified_name, "lsp_module_attr", 0.92f,
+                py_c_emit_module_member_call(ctx, mm.func->qualified_name, "lsp_module_attr", 0.92f,
                                            attr_name, call_node);
                 return;
             }
             if (mm.type) {
-                py_emit_module_member_call(ctx, mm.type->qualified_name, "lsp_constructor", 0.88f,
+                py_c_emit_module_member_call(ctx, mm.type->qualified_name, "lsp_constructor", 0.88f,
                                            attr_name, call_node);
                 return;
             }
@@ -3520,6 +3756,34 @@ static void py_emit_call_for(PyLSPContext *ctx, TSNode call_node) {
         }
         return;
     }
+}
+#endif /* CBM_ENABLE_TEST_SEAMS */
+
+static void py_emit_call_for(PyLSPContext *ctx, TSNode call_node) {
+#ifdef CBM_ENABLE_TEST_SEAMS
+    if (py_test_c_reference) {
+        py_c_emit_call_for(ctx, call_node);
+        return;
+    }
+#endif
+    if (!ctx || ctx->eval_failure || ctx->callable_value_proof_disabled)
+        return;
+    static const PyCallNative native = {
+        .text = py_call_text,
+        .lambda = py_call_lambda,
+        .scope = py_call_scope,
+        .imported = py_call_imported,
+        .symbol = py_call_symbol,
+        .class_name = py_call_class,
+        .method = py_call_method,
+        .dispatch = py_call_dispatch,
+        .super_target = py_call_super_target,
+        .receiver = py_call_receiver,
+        .union_member = py_call_union_member,
+        .module_member = py_call_module_member,
+        .emit = py_call_emit,
+    };
+    mori_py_invoke(ctx, &native, &call_node, ctx->module_qn, ctx->class_body_outer_scope != NULL);
 }
 
 /* Detect `isinstance(x, T)` / `isinstance(x, (T1, T2))` and return
