@@ -40,7 +40,7 @@ typedef enum {
 } CBMTestExtractStatus;
 
 // Language enum mirrors lang.Language in Go.
-// Order must match lang_specs.c tables.
+// Order must match the lang module in lang_specs.rs.
 typedef enum {
     CBM_LANG_GO = 0,
     CBM_LANG_PYTHON,
