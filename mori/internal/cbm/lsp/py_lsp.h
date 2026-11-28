@@ -216,6 +216,9 @@ bool cbm_py_lsp_test_register_defs(CBMArena *arena, CBMTypeRegistry *reg, CBMLSP
                                    int def_count);
 const CBMType *cbm_py_lsp_test_eval(PyLSPContext *ctx, TSNode node);
 void cbm_py_lsp_test_bind_external_classes(PyLSPContext *ctx, TSNode root);
+/* Routes callable-value proof through the C reference kept for
+ * comparison instead of Rust. */
+void cbm_py_lsp_test_use_c_reference(bool enabled);
 /* Annotation text in registry form (no file context) or resolved in ctx's
  * scope (python_annotation.rs). */
 const CBMType *cbm_py_annotation_test_parse(CBMArena *arena, const char *ann,

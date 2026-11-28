@@ -1,6 +1,6 @@
 //! Choose Python invocation targets and their graph-join provenance.
 
-use std::ffi::{CStr, CString, c_char, c_void};
+use std::ffi::{CStr, CString, c_char, c_int, c_void};
 use std::ptr;
 
 use crate::native_tree::{BorrowedNode as Node, RawNode};
@@ -54,9 +54,32 @@ const MODULE: u32 = 4;
 const UNION: u32 = 5;
 
 #[repr(C)]
+struct Function {
+    name: Spelling,
+    exact: bool,
+}
+
+#[repr(C)]
 struct ModuleMember {
-    function: Spelling,
+    function: Function,
     class: Spelling,
+}
+
+#[repr(C)]
+struct Import {
+    index: c_int,
+    target: Spelling,
+}
+
+#[repr(C)]
+struct Proof {
+    target: Spelling,
+    lexical_alias: bool,
+}
+
+struct Callable<'a> {
+    target: &'a CStr,
+    lexical_alias: bool,
 }
 
 #[repr(C)]
@@ -70,16 +93,21 @@ struct Native {
     text: unsafe extern "C" fn(Context, *const RawNode) -> Spelling,
     lambda: unsafe extern "C" fn(Context, Name, *const RawNode) -> bool,
     scope: unsafe extern "C" fn(Context, Name) -> Binding,
-    imported: unsafe extern "C" fn(Context, Name, Name) -> bool,
-    symbol: unsafe extern "C" fn(Context, Name, Name) -> Spelling,
+    aliased_scope_named: unsafe extern "C" fn(Context, Name) -> Spelling,
+    imported: unsafe extern "C" fn(Context, Name, c_int) -> Import,
+    symbol: unsafe extern "C" fn(Context, Name, Name) -> Function,
     class: unsafe extern "C" fn(Context, Name) -> Spelling,
-    method: unsafe extern "C" fn(Context, Name, Name, bool) -> Spelling,
+    method: unsafe extern "C" fn(Context, Name, Name, bool) -> Function,
     dispatch: unsafe extern "C" fn(Context, Name, *const RawNode) -> Spelling,
     super_target: unsafe extern "C" fn(Context, Name) -> SuperTarget,
-    receiver: unsafe extern "C" fn(Context, *const RawNode) -> Receiver,
+    receiver: unsafe extern "C" fn(Context, *const RawNode, bool) -> Receiver,
     union_member: unsafe extern "C" fn(Type, usize) -> Spelling,
     module_member: unsafe extern "C" fn(Context, Name, Name) -> ModuleMember,
+    proof_enabled: unsafe extern "C" fn(Context) -> bool,
+    field: unsafe extern "C" fn(Context, Name, Name) -> bool,
     emit: unsafe extern "C" fn(Context, *const RawNode, Name, Name, f32, Name),
+    reference: unsafe extern "C" fn(Context, *const RawNode, Name, Name, Name),
+    unresolved_reference: unsafe extern "C" fn(Context, *const RawNode, Name),
 }
 
 struct File<'a> {
@@ -156,28 +184,76 @@ impl File<'_> {
         }
     }
 
-    fn method(
+    fn method_row(
         &self,
         class: &CStr,
         member: &CStr,
         inherited: bool,
-    ) -> Option<&CStr> {
+    ) -> Function {
         // SAFETY: Both strings are borrowed during the lookup.
-        self.name(unsafe {
+        unsafe {
             (self.native.method)(
                 self.context,
                 class.into(),
                 member.into(),
                 inherited,
             )
-        })
+        }
     }
 
-    fn symbol(&self, module: &CStr, name: &CStr) -> Option<&CStr> {
+    fn method(
+        &self,
+        class: &CStr,
+        member: &CStr,
+        inherited: bool,
+    ) -> Option<&CStr> {
+        self.name(self.method_row(class, member, inherited).name)
+    }
+
+    fn symbol_row(&self, module: &CStr, name: &CStr) -> Function {
         // SAFETY: Both strings are borrowed during the lookup.
-        self.name(unsafe {
-            (self.native.symbol)(self.context, module.into(), name.into())
+        unsafe { (self.native.symbol)(self.context, module.into(), name.into()) }
+    }
+
+    fn exact_function(&self, function: Function) -> Option<&CStr> {
+        function.exact.then(|| self.name(function.name)).flatten()
+    }
+
+    fn imports<'a>(&'a self, name: &'a CStr) -> impl Iterator<Item = &'a CStr> {
+        let name = Name::from(name);
+        let mut index = -1;
+        std::iter::from_fn(move || {
+            // SAFETY: The name is valid until the caller consumes the iterator.
+            let entry =
+                unsafe { (self.native.imported)(self.context, name, index) };
+            index = entry.index;
+            self.name(entry.target)
         })
+        .fuse()
+    }
+
+    fn scope(&self, name: &CStr) -> Binding {
+        // SAFETY: The scope borrows this name during lookup.
+        unsafe { (self.native.scope)(self.context, name.into()) }
+    }
+
+    fn receiver(&self, object: Node<'_>, resolve_alias: bool) -> Receiver {
+        // SAFETY: The operand borrows the active tree. The evaluator retains
+        // all returned type facts in the current file arena.
+        unsafe {
+            (self.native.receiver)(self.context, object.as_raw(), resolve_alias)
+        }
+    }
+
+    fn module_entry(&self, module: &CStr, member: &CStr) -> ModuleMember {
+        // SAFETY: Both names are borrowed throughout lookup.
+        unsafe {
+            (self.native.module_member)(
+                self.context,
+                module.into(),
+                member.into(),
+            )
+        }
     }
 
     fn class(&self, name: &CStr) -> Option<&CStr> {
@@ -201,9 +277,7 @@ impl File<'_> {
             return;
         }
 
-        // SAFETY: This only borrows a name from the active file.
-        let binding =
-            unsafe { (self.native.scope)(self.context, scope_name.into()) };
+        let binding = self.scope(scope_name);
         if binding.present {
             if let Some(target) = self.name(binding.callable) {
                 self.emit(
@@ -220,12 +294,13 @@ impl File<'_> {
             return;
         }
 
-        if let Some(target) = self
-            .module
-            .and_then(|module| self.symbol(module, scope_name))
-        {
+        if let Some(target) = self.module.and_then(|module| {
+            self.name(self.symbol_row(module, scope_name).name)
+        }) {
             self.emit(call, target, c"lsp_direct", 0.95, None);
-        } else if let Some(target) = self.symbol(c"builtins", scope_name) {
+        } else if let Some(target) =
+            self.name(self.symbol_row(c"builtins", scope_name).name)
+        {
             self.emit(call, target, c"lsp_builtin", 0.92, None);
         } else if let Some(target) =
             self.class(&qualified(c"builtins", scope_name))
@@ -236,11 +311,8 @@ impl File<'_> {
 
     fn named_binding(&self, call: Node<'_>, spelling: &CStr, qn: &CStr) {
         let exact_spelling = leaf(qn) == spelling.to_bytes();
-        // SAFETY: Both strings are live and borrowed during the lookup.
-        let imported = !exact_spelling
-            && unsafe {
-                (self.native.imported)(self.context, spelling.into(), qn.into())
-            };
+        let imported =
+            !exact_spelling && self.imports(spelling).any(|target| target == qn);
         if imported {
             self.emit(call, qn, c"lsp_import_alias", 0.85, Some(spelling));
         } else if self.class(qn).is_some() {
@@ -314,16 +386,9 @@ impl File<'_> {
     }
 
     fn module_member(&self, call: Node<'_>, module: &CStr, member: &CStr) {
-        // SAFETY: Native borrows both spellings through the lookup.
-        let entry = unsafe {
-            (self.native.module_member)(
-                self.context,
-                module.into(),
-                member.into(),
-            )
-        };
+        let entry = self.module_entry(module, member);
         let entry = self
-            .name(entry.function)
+            .name(entry.function.name)
             .map(|f| (f, c"lsp_module_attr", 0.92))
             .or_else(|| {
                 self.name(entry.class)
@@ -369,10 +434,7 @@ impl File<'_> {
         if self.super_call(call, object, member).is_some() {
             return Some(());
         }
-        // SAFETY: The operand borrows the active tree. The evaluator retains
-        // all returned type facts in the current file arena.
-        let receiver =
-            unsafe { (self.native.receiver)(self.context, object.as_raw()) };
+        let receiver = self.receiver(object, false);
         if receiver.kind == MODULE {
             self.module_member(call, self.name(receiver.name)?, member);
             return Some(());
@@ -410,6 +472,127 @@ impl File<'_> {
         Some(())
     }
 
+    fn callable(&self, mut node: Node<'_>) -> Option<Callable<'_>> {
+        // SAFETY: The flag lives in the active resolver context.
+        if !unsafe { (self.native.proof_enabled)(self.context) } {
+            return None;
+        }
+        while node.kind() == c"parenthesized_expression" {
+            let mut children = node.children().filter(|child| child.is_named());
+            let inner = children.next()?;
+            if children.next().is_some() {
+                return None;
+            }
+            node = inner;
+        }
+        if node.kind() == c"identifier" {
+            let name = self.text(node)?;
+            let bound = self.scope(name);
+            let symbol =
+                || self.module.map(|module| self.symbol_row(module, name));
+            if bound.present {
+                let target = self.name(bound.callable)?;
+                let same_symbol =
+                    symbol().and_then(|row| self.name(row.name)) == Some(target);
+                return Some(Callable {
+                    target,
+                    lexical_alias: !same_symbol,
+                });
+            }
+            let target = self.exact_function(symbol()?)?;
+            return Some(Callable {
+                target,
+                lexical_alias: false,
+            });
+        }
+        if node.kind() != c"attribute" {
+            return None;
+        }
+        let object = node.field(c"object")?;
+        let attribute = node.field(c"attribute")?;
+        let member = self.text(attribute);
+        let receiver = self.receiver(object, true);
+        let member = member?;
+        let name = self.name(receiver.name)?;
+        let function = match receiver.kind {
+            MODULE => self.module_entry(name, member).function,
+            NAMED => {
+                // SAFETY: Both strings remain live through the field lookup.
+                if unsafe {
+                    (self.native.field)(self.context, name.into(), member.into())
+                } {
+                    return None;
+                }
+                self.method_row(name, member, true)
+            }
+            _ => return None,
+        };
+        let target = self.exact_function(function)?;
+        Some(Callable {
+            target,
+            lexical_alias: false,
+        })
+    }
+
+    fn imported_reference<'a>(&'a self, name: &'a CStr) -> Option<&'a CStr> {
+        let target = single_import(self.imports(name))?;
+        // SAFETY: The name is live and only borrowed by the scope query.
+        let binding = unsafe {
+            (self.native.aliased_scope_named)(self.context, name.into())
+        };
+        (self.name(binding) == Some(target)).then_some(target)
+    }
+
+    fn reference(&self, arg: Node<'_>) {
+        let arg = if arg.kind() == c"keyword_argument" {
+            let Some(value) = arg.field(c"value") else {
+                return;
+            };
+            value
+        } else {
+            arg
+        };
+        let kind = arg.kind().to_bytes();
+        if !matches!(
+            kind,
+            b"identifier" | b"attribute" | b"parenthesized_expression"
+        ) {
+            return;
+        }
+        let exact = self.callable(arg);
+        let source = self.text(arg);
+        if let Some(exact) = exact {
+            let strategy = if exact.lexical_alias {
+                c"lsp_callable_alias"
+            } else {
+                c"lsp_callable_value_reference"
+            };
+            // SAFETY: The outer argument span, including parentheses, is the
+            // span held by the usage occurrence. Native retains copied strings.
+            unsafe {
+                (self.native.reference)(
+                    self.context,
+                    arg.as_raw(),
+                    exact.target.into(),
+                    source.map_or(Name::NONE, Name::from),
+                    strategy.into(),
+                )
+            };
+        } else if kind == b"identifier"
+            && let Some(candidate) =
+                source.and_then(|name| self.imported_reference(name))
+        {
+            // SAFETY: The project pass receives the same argument occurrence.
+            unsafe {
+                (self.native.unresolved_reference)(
+                    self.context,
+                    arg.as_raw(),
+                    candidate.into(),
+                )
+            };
+        }
+    }
+
     fn invoke(&self, call: Node<'_>) {
         let Some(fn_node) = call.field(c"function") else {
             return;
@@ -431,6 +614,15 @@ impl File<'_> {
     }
 }
 
+fn single_import<'a>(
+    mut imports: impl Iterator<Item = &'a CStr>,
+) -> Option<&'a CStr> {
+    let target = imports.next()?;
+    imports
+        .all(|candidate| candidate == target)
+        .then_some(target)
+}
+
 #[unsafe(no_mangle)]
 unsafe extern "C" fn mori_py_invoke(
     context: Context,
@@ -439,22 +631,70 @@ unsafe extern "C" fn mori_py_invoke(
     module: Spelling,
     class_body: bool,
 ) {
-    // SAFETY: The host lends a live node, module spelling, and callback table
-    // for this invocation. Borrowed values cannot outlive the call.
-    let (node, module, native) = unsafe {
-        (
-            Node::from_root(&*call),
-            (!module.is_null()).then(|| CStr::from_ptr(module)),
-            &*native,
-        )
-    };
-    File {
-        context,
-        native,
-        module,
-        class_body,
+    // SAFETY: The host lends this call's live tree, context, native queries, and module.
+    let file = unsafe { File::borrow(context, native, module, class_body) };
+    file.invoke(unsafe { Node::from_root(&*call) });
+}
+
+impl File<'_> {
+    unsafe fn borrow(
+        context: Context,
+        native: *const Native,
+        module: Spelling,
+        class_body: bool,
+    ) -> Self {
+        // SAFETY: The host binds these borrowed inputs to the active resolver call.
+        let (native, module) = unsafe {
+            (
+                &*native,
+                (!module.is_null()).then(|| CStr::from_ptr(module)),
+            )
+        };
+        Self {
+            context,
+            native,
+            module,
+            class_body,
+        }
     }
-    .invoke(node);
+}
+
+#[unsafe(no_mangle)]
+unsafe extern "C" fn mori_py_callable_value(
+    context: Context,
+    native: *const Native,
+    node: *const RawNode,
+    module: Spelling,
+) -> Proof {
+    // SAFETY: The host lends the expression's tree, context, native queries, and module.
+    let file = unsafe { File::borrow(context, native, module, false) };
+    file.callable(unsafe { Node::from_root(&*node) }).map_or(
+        Proof {
+            target: ptr::null(),
+            lexical_alias: false,
+        },
+        |callable| Proof {
+            target: callable.target.as_ptr(),
+            lexical_alias: callable.lexical_alias,
+        },
+    )
+}
+
+#[unsafe(no_mangle)]
+unsafe extern "C" fn mori_py_argument_references(
+    context: Context,
+    native: *const Native,
+    call: *const RawNode,
+    module: Spelling,
+) {
+    // SAFETY: The host lends the call's tree, context, native queries, and module.
+    let file = unsafe { File::borrow(context, native, module, false) };
+    let node = unsafe { Node::from_root(&*call) };
+    if let Some(arguments) = node.field(c"arguments") {
+        for arg in arguments.children().filter(|child| child.is_named()) {
+            file.reference(arg);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -476,6 +716,14 @@ mod tests {
             )),
             None
         );
+    }
+
+    #[test]
+    fn only_duplicate_identical_imports_prove_one_target() {
+        let target = c"app.impl.F";
+        assert_eq!(single_import([].into_iter()), None);
+        assert_eq!(single_import([target, target].into_iter()), Some(target));
+        assert_eq!(single_import([target, c"app.other.F"].into_iter()), None);
     }
 
     #[test]

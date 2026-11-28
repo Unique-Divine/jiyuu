@@ -229,6 +229,8 @@ static void py_resolve_calls_in(PyLSPContext *ctx, TSNode node) {
     py_resolve_calls_in_inner(ctx, node);
     ctx->walk_depth--;
 }
+static const char *py_exact_callable_target(PyLSPContext *ctx, TSNode node,
+                                              bool *lexical_alias);
 static const CBMType *py_eval_expr_type(PyLSPContext *ctx, TSNode node);
 static const CBMType *py_eval_expr_type_uncached(PyLSPContext *ctx, TSNode node);
 static void py_process_statement(PyLSPContext *ctx, TSNode node);
@@ -1253,153 +1255,6 @@ static void py_emit_unresolved_reference(PyLSPContext *ctx, const char *candidat
     rc.site_start_byte = ts_node_start_byte(site);
     rc.site_end_byte = ts_node_end_byte(site);
     cbm_resolvedcall_push(ctx->resolved_calls, ctx->arena, rc);
-}
-
-/* Return a project-pass candidate only when the import metadata itself names
- * one exact from-import target. Module imports and ambiguous duplicate local
- * bindings deliberately return NULL. */
-static const char *py_exact_imported_reference_candidate(PyLSPContext *ctx,
-                                                         const char *local_name) {
-    if (!ctx || !local_name)
-        return NULL;
-    const char *candidate = NULL;
-    for (int i = py_import_row_first(ctx, local_name); i >= 0;
-         i = py_import_row_next(ctx, local_name, i)) {
-        const char *local = ctx->import_local_names[i];
-        const char *qn = ctx->import_module_qns[i];
-        if (!local || !qn || strcmp(local, local_name) != 0 ||
-            !py_import_index_is_from_binding(ctx, i)) {
-            continue;
-        }
-        if (candidate && strcmp(candidate, qn) != 0)
-            return NULL;
-        candidate = qn;
-    }
-    return candidate;
-}
-
-/* Return one graph target only for an expression whose callable identity is
- * statically exact. Complex containers/conditionals deliberately return NULL
- * so their constituent function names stay ordinary USAGE. */
-/* `occurrence_out` receives the node the callable name actually occupies after
- * parentheses are stripped, so a caller can record the reference at the same
- * occurrence the usage carrier uses. `lexical_alias_out` reports that the name
- * was proven through a lexical binding rather than a module symbol -- see
- * py_resolve_value_references_at for why that distinction decides a strategy.
- * Both are optional. */
-static const char *py_exact_callable_target_ex(PyLSPContext *ctx, TSNode node,
-                                               TSNode *occurrence_out, bool *lexical_alias_out) {
-    if (lexical_alias_out)
-        *lexical_alias_out = false;
-    if (!ctx || ctx->callable_value_proof_disabled || ts_node_is_null(node))
-        return NULL;
-
-    /* Parentheses do not change callable identity. Unwrap them iteratively:
-     * an assignment such as `fn = (((target)))` reaches this helper after
-     * expression-type inference, and adversarial nesting must not consume one
-     * native stack frame per parenthesized_expression. */
-    const char *kind = ts_node_type(node);
-    while (strcmp(kind, "parenthesized_expression") == 0 && ts_node_named_child_count(node) == 1) {
-        node = ts_node_named_child(node, 0);
-        kind = ts_node_type(node);
-    }
-    if (occurrence_out)
-        *occurrence_out = node;
-    if (strcmp(kind, "identifier") == 0) {
-        char *name = py_node_text(ctx, node);
-        if (!name)
-            return NULL;
-        const CBMVarBinding *binding = cbm_scope_lookup_binding(ctx->current_scope, name);
-        if (binding) {
-            const char *bound = binding->callable_qn;
-            if (bound && lexical_alias_out) {
-                /* A lexical binding that does NOT simply name the module symbol
-                 * of the same spelling is an alias introduced in this body. Only
-                 * that case may claim the alias strategy; a module function
-                 * referenced by its own name keeps the plain value-reference
-                 * strategy it has always had. */
-                const CBMRegisteredFunc *module_symbol =
-                    cbm_registry_lookup_symbol(ctx->registry, ctx->module_qn, name);
-                *lexical_alias_out = !module_symbol || !module_symbol->qualified_name ||
-                                     strcmp(module_symbol->qualified_name, bound) != 0;
-            }
-            return bound;
-        }
-        const CBMRegisteredFunc *f =
-            cbm_registry_lookup_symbol(ctx->registry, ctx->module_qn, name);
-        return py_func_is_exact_callable_value(f) ? f->qualified_name : NULL;
-    }
-    if (strcmp(kind, "attribute") == 0) {
-        TSNode object = ts_node_child_by_field_name(node, "object", 6);
-        TSNode attribute = ts_node_child_by_field_name(node, "attribute", 9);
-        if (ts_node_is_null(object) || ts_node_is_null(attribute))
-            return NULL;
-        char *member = py_node_text(ctx, attribute);
-        const CBMType *receiver = py_eval_expr_type(ctx, object);
-        if (!member || !receiver)
-            return NULL;
-        receiver = cbm_type_resolve_alias(receiver);
-        if (receiver->kind == CBM_TYPE_MODULE) {
-            const CBMRegisteredFunc *f =
-                py_module_member(ctx, receiver->data.module.module_qn, member).func;
-            return py_func_is_exact_callable_value(f) ? f->qualified_name : NULL;
-        }
-        if (receiver->kind == CBM_TYPE_NAMED) {
-            /* Instance fields shadow class methods. Without an exact callable
-             * identity for the field value, promoting the same-named method
-             * would fabricate a callable target. */
-            if (py_lookup_field(ctx, receiver->data.named.qualified_name, member))
-                return NULL;
-            const CBMRegisteredFunc *f =
-                py_lookup_attribute(ctx, receiver->data.named.qualified_name, member);
-            return py_func_is_exact_callable_value(f) ? f->qualified_name : NULL;
-        }
-    }
-    return NULL;
-}
-
-static void py_resolve_value_references_at(PyLSPContext *ctx, TSNode call) {
-    if (!ctx || ctx->callable_value_proof_disabled)
-        return;
-    TSNode args = ts_node_child_by_field_name(call, "arguments", 9);
-    if (ts_node_is_null(args))
-        return;
-    uint32_t count = ts_node_named_child_count(args);
-    for (uint32_t i = 0; i < count; i++) {
-        TSNode arg = ts_node_named_child(args, i);
-        if (strcmp(ts_node_type(arg), "keyword_argument") == 0) {
-            arg = ts_node_child_by_field_name(arg, "value", 5);
-            if (ts_node_is_null(arg))
-                continue;
-        }
-        const char *kind = ts_node_type(arg);
-        if (strcmp(kind, "identifier") != 0 && strcmp(kind, "attribute") != 0 &&
-            strcmp(kind, "parenthesized_expression") != 0)
-            continue;
-        bool lexical_alias = false;
-        const char *target = py_exact_callable_target_ex(ctx, arg, NULL, &lexical_alias);
-        char *source_name = py_node_text(ctx, arg);
-        if (target) {
-            /* `arg` is the outermost direct-argument node, parentheses included,
-             * which is the occurrence the usage carrier also reports. */
-            py_emit_resolved_reference(ctx, target, source_name, arg,
-                                       lexical_alias ? "lsp_callable_alias"
-                                                     : "lsp_callable_value_reference");
-            continue;
-        }
-        const char *candidate = strcmp(kind, "identifier") == 0
-                                    ? py_exact_imported_reference_candidate(ctx, source_name)
-                                    : NULL;
-        const CBMVarBinding *scope_binding =
-            candidate ? cbm_scope_lookup_binding(ctx->current_scope, source_name) : NULL;
-        if (scope_binding) {
-            const CBMType *type = cbm_type_resolve_alias(scope_binding->type);
-            if (type && type->kind == CBM_TYPE_NAMED && type->data.named.qualified_name &&
-                strcmp(type->data.named.qualified_name, candidate) == 0) {
-                py_emit_unresolved_reference(ctx, candidate, arg);
-            }
-        }
-    }
 }
 
 static PyModuleMember py_module_member_exact(PyLSPContext *ctx, const char *module_qn,
@@ -2915,7 +2770,7 @@ static void py_process_statement(PyLSPContext *ctx, TSNode node) {
         const char *rhs_callable =
             ts_node_is_null(right)
                 ? NULL
-                : py_exact_callable_target_ex(ctx, right, NULL, &rhs_lexical_alias);
+                : py_exact_callable_target(ctx, right, &rhs_lexical_alias);
         /* A proven callable value on the right of an assignment is a reference
          * to that callable, exactly as it would be as a call argument -- the
          * policy is proven exact value => CALL_REFERENCE, and `cb = handler`
@@ -3235,9 +3090,24 @@ typedef struct {
 } PyCallReceiver;
 
 typedef struct {
-    const char *function;
+    const char *name;
+    bool exact;
+} PyCallFunction;
+
+typedef struct {
+    PyCallFunction function;
     const char *class_name;
 } PyCallModuleMember;
+
+typedef struct {
+    int index;
+    const char *target;
+} PyCallImport;
+
+typedef struct {
+    const char *target;
+    bool lexical_alias;
+} PyCallProof;
 
 typedef struct {
     const char *method;
@@ -3248,20 +3118,30 @@ typedef struct {
     const char *(*text)(PyLSPContext *, const TSNode *);
     bool (*lambda)(PyLSPContext *, PyCallName, const TSNode *);
     PyCallBinding (*scope)(PyLSPContext *, PyCallName);
-    bool (*imported)(PyLSPContext *, PyCallName, PyCallName);
-    const char *(*symbol)(PyLSPContext *, PyCallName, PyCallName);
+    const char *(*aliased_scope_named)(PyLSPContext *, PyCallName);
+    PyCallImport (*imported)(PyLSPContext *, PyCallName, int);
+    PyCallFunction (*symbol)(PyLSPContext *, PyCallName, PyCallName);
     const char *(*class_name)(PyLSPContext *, PyCallName);
-    const char *(*method)(PyLSPContext *, PyCallName, PyCallName, bool);
+    PyCallFunction (*method)(PyLSPContext *, PyCallName, PyCallName, bool);
     const char *(*dispatch)(PyLSPContext *, PyCallName, const TSNode *);
     PyCallSuperTarget (*super_target)(PyLSPContext *, PyCallName);
-    PyCallReceiver (*receiver)(PyLSPContext *, const TSNode *);
+    PyCallReceiver (*receiver)(PyLSPContext *, const TSNode *, bool);
     const char *(*union_member)(const CBMType *, size_t);
     PyCallModuleMember (*module_member)(PyLSPContext *, PyCallName, PyCallName);
+    bool (*proof_enabled)(PyLSPContext *);
+    bool (*field)(PyLSPContext *, PyCallName, PyCallName);
     void (*emit)(PyLSPContext *, const TSNode *, PyCallName, PyCallName, float, PyCallName);
+    void (*reference)(PyLSPContext *, const TSNode *, PyCallName, PyCallName, PyCallName);
+    void (*unresolved_reference)(PyLSPContext *, const TSNode *, PyCallName);
 } PyCallNative;
 
 extern void mori_py_invoke(PyLSPContext *, const PyCallNative *, const TSNode *, const char *,
                            bool);
+
+extern PyCallProof mori_py_callable_value(PyLSPContext *, const PyCallNative *, const TSNode *,
+                                          const char *);
+extern void mori_py_argument_references(PyLSPContext *, const PyCallNative *, const TSNode *,
+                                        const char *);
 
 static const char *py_call_name(PyCallName name) {
     if (name.size)
@@ -3342,24 +3222,34 @@ static PyCallBinding py_call_scope(PyLSPContext *ctx, PyCallName name) {
     return (PyCallBinding){true, binding->callable_qn, named};
 }
 
-/* A typed local carrying a matching import row can prove an alias join. */
-static bool py_call_imported(PyLSPContext *ctx, PyCallName spelling, PyCallName qualified) {
-    const char *name = py_call_name(spelling);
-    const char *qn = py_call_name(qualified);
-    for (int i = py_import_row_first(ctx, name); i >= 0; i = py_import_row_next(ctx, name, i)) {
-        const char *local = ctx->import_local_names[i];
-        const char *import_qn = ctx->import_module_qns[i];
-        if (local && import_qn && strcmp(local, name) == 0 && strcmp(import_qn, qn) == 0 &&
-            py_import_index_is_from_binding(ctx, i))
-            return true;
-    }
-    return false;
+static const char *py_call_aliased_scope_named(PyLSPContext *ctx, PyCallName name) {
+    const CBMVarBinding *binding =
+        cbm_scope_lookup_binding(ctx->current_scope, py_call_name(name));
+    const CBMType *type = binding ? cbm_type_resolve_alias(binding->type) : NULL;
+    return type && type->kind == CBM_TYPE_NAMED ? type->data.named.qualified_name : NULL;
 }
 
-static const char *py_call_symbol(PyLSPContext *ctx, PyCallName module, PyCallName name) {
-    const CBMRegisteredFunc *func =
-        cbm_registry_lookup_symbol(ctx->registry, py_call_name(module), py_call_name(name));
-    return func ? func->qualified_name : NULL;
+static PyCallImport py_call_imported(PyLSPContext *ctx, PyCallName spelling, int previous) {
+    const char *name = py_call_name(spelling);
+    int index = previous < 0 ? py_import_row_first(ctx, name)
+                             : py_import_row_next(ctx, name, previous);
+    for (; index >= 0; index = py_import_row_next(ctx, name, index)) {
+        const char *local = ctx->import_local_names[index];
+        const char *qn = ctx->import_module_qns[index];
+        if (local && qn && strcmp(local, name) == 0 && py_import_index_is_from_binding(ctx, index))
+            return (PyCallImport){index, qn};
+    }
+    return (PyCallImport){-1, NULL};
+}
+
+static PyCallFunction py_call_function(const CBMRegisteredFunc *func) {
+    return (PyCallFunction){func ? func->qualified_name : NULL,
+                            py_func_is_exact_callable_value(func)};
+}
+
+static PyCallFunction py_call_symbol(PyLSPContext *ctx, PyCallName module, PyCallName name) {
+    return py_call_function(
+        cbm_registry_lookup_symbol(ctx->registry, py_call_name(module), py_call_name(name)));
 }
 
 static const char *py_call_class(PyLSPContext *ctx, PyCallName name) {
@@ -3367,13 +3257,13 @@ static const char *py_call_class(PyLSPContext *ctx, PyCallName name) {
     return type ? type->qualified_name : NULL;
 }
 
-static const char *py_call_method(PyLSPContext *ctx, PyCallName class_name, PyCallName member,
+static PyCallFunction py_call_method(PyLSPContext *ctx, PyCallName class_name, PyCallName member,
                                   bool inherited) {
     const char *class_qn = py_call_name(class_name);
     const char *name = py_call_name(member);
     const CBMRegisteredFunc *func = inherited ? py_lookup_attribute(ctx, class_qn, name)
         : cbm_registry_lookup_method(ctx->registry, class_qn, name);
-    return func ? func->qualified_name : NULL;
+    return py_call_function(func);
 }
 
 static const char *py_call_dispatch(PyLSPContext *ctx, PyCallName name, const TSNode *key) {
@@ -3392,9 +3282,11 @@ static PyCallSuperTarget py_call_super_target(PyLSPContext *ctx, PyCallName memb
     };
 }
 
-static PyCallReceiver py_call_receiver(PyLSPContext *ctx, const TSNode *node) {
+static PyCallReceiver py_call_receiver(PyLSPContext *ctx, const TSNode *node, bool resolve_alias) {
     cbm_ffi_ts_node_written(node);
     const CBMType *type = py_eval_expr_type(ctx, *node);
+    if (resolve_alias)
+        type = cbm_type_resolve_alias(type);
     if (!type)
         return (PyCallReceiver){0};
     switch (type->kind) {
@@ -3423,9 +3315,17 @@ static PyCallModuleMember py_call_module_member(PyLSPContext *ctx, PyCallName mo
                                               PyCallName member) {
     PyModuleMember result = py_module_member(ctx, py_call_name(module), py_call_name(member));
     return (PyCallModuleMember){
-        result.func ? result.func->qualified_name : NULL,
+        py_call_function(result.func),
         result.type ? result.type->qualified_name : NULL,
     };
+}
+
+static bool py_call_proof_enabled(PyLSPContext *ctx) {
+    return !ctx->callable_value_proof_disabled;
+}
+
+static bool py_call_field(PyLSPContext *ctx, PyCallName class_name, PyCallName member) {
+    return py_lookup_field(ctx, py_call_name(class_name), py_call_name(member)) != NULL;
 }
 
 static void py_call_emit(PyLSPContext *ctx, const TSNode *node, PyCallName target,
@@ -3435,25 +3335,230 @@ static void py_call_emit(PyLSPContext *ctx, const TSNode *node, PyCallName targe
                                  py_call_name(reason), *node);
 }
 
+static void py_call_reference(PyLSPContext *ctx, const TSNode *node, PyCallName target,
+                               PyCallName source, PyCallName strategy) {
+    cbm_ffi_ts_node_written(node);
+    py_emit_resolved_reference(ctx, py_call_name(target), py_call_name(source), *node,
+                                py_call_name(strategy));
+}
+
+static void py_call_unresolved_reference(PyLSPContext *ctx, const TSNode *node,
+                                          PyCallName target) {
+    cbm_ffi_ts_node_written(node);
+    py_emit_unresolved_reference(ctx, py_call_name(target), *node);
+}
+
+static const PyCallNative py_call_native = {
+    .text = py_call_text,
+    .lambda = py_call_lambda,
+    .scope = py_call_scope,
+    .aliased_scope_named = py_call_aliased_scope_named,
+    .imported = py_call_imported,
+    .symbol = py_call_symbol,
+    .class_name = py_call_class,
+    .method = py_call_method,
+    .dispatch = py_call_dispatch,
+    .super_target = py_call_super_target,
+    .receiver = py_call_receiver,
+    .union_member = py_call_union_member,
+    .module_member = py_call_module_member,
+    .proof_enabled = py_call_proof_enabled,
+    .field = py_call_field,
+    .emit = py_call_emit,
+    .reference = py_call_reference,
+    .unresolved_reference = py_call_unresolved_reference,
+};
+
+#ifdef CBM_ENABLE_TEST_SEAMS
+/* ── C reference for the python_calls.rs callable-value proof, kept for
+ * the parity test ─────────────────────────────────────────────────── */
+
+/* Routes callable-value proof through the C below instead of
+ * python_calls.rs (cbm_py_lsp_test_use_c_reference). */
+static bool py_test_c_reference;
+
+void cbm_py_lsp_test_use_c_reference(bool enabled) {
+    py_test_c_reference = enabled;
+}
+
+/* Return a project-pass candidate only when the import metadata itself names
+ * one exact from-import target. Module imports and ambiguous duplicate local
+ * bindings deliberately return NULL. */
+static const char *py_c_exact_imported_reference_candidate(PyLSPContext *ctx,
+                                                         const char *local_name) {
+    if (!ctx || !local_name)
+        return NULL;
+    const char *candidate = NULL;
+    for (int i = py_import_row_first(ctx, local_name); i >= 0;
+         i = py_import_row_next(ctx, local_name, i)) {
+        const char *local = ctx->import_local_names[i];
+        const char *qn = ctx->import_module_qns[i];
+        if (!local || !qn || strcmp(local, local_name) != 0 ||
+            !py_import_index_is_from_binding(ctx, i)) {
+            continue;
+        }
+        if (candidate && strcmp(candidate, qn) != 0)
+            return NULL;
+        candidate = qn;
+    }
+    return candidate;
+}
+
+/* Return one graph target only for an expression whose callable identity is
+ * statically exact. Complex containers/conditionals deliberately return NULL
+ * so their constituent function names stay ordinary USAGE. */
+/* `occurrence_out` receives the node the callable name actually occupies after
+ * parentheses are stripped, so a caller can record the reference at the same
+ * occurrence the usage carrier uses. `lexical_alias_out` reports that the name
+ * was proven through a lexical binding rather than a module symbol -- see
+ * py_resolve_value_references_at for why that distinction decides a strategy.
+ * Both are optional. */
+static const char *py_c_exact_callable_target_ex(PyLSPContext *ctx, TSNode node,
+                                               TSNode *occurrence_out, bool *lexical_alias_out) {
+    if (lexical_alias_out)
+        *lexical_alias_out = false;
+    if (!ctx || ctx->callable_value_proof_disabled || ts_node_is_null(node))
+        return NULL;
+
+    /* Parentheses do not change callable identity. Unwrap them iteratively:
+     * an assignment such as `fn = (((target)))` reaches this helper after
+     * expression-type inference, and adversarial nesting must not consume one
+     * native stack frame per parenthesized_expression. */
+    const char *kind = ts_node_type(node);
+    while (strcmp(kind, "parenthesized_expression") == 0 && ts_node_named_child_count(node) == 1) {
+        node = ts_node_named_child(node, 0);
+        kind = ts_node_type(node);
+    }
+    if (occurrence_out)
+        *occurrence_out = node;
+    if (strcmp(kind, "identifier") == 0) {
+        char *name = py_node_text(ctx, node);
+        if (!name)
+            return NULL;
+        const CBMVarBinding *binding = cbm_scope_lookup_binding(ctx->current_scope, name);
+        if (binding) {
+            const char *bound = binding->callable_qn;
+            if (bound && lexical_alias_out) {
+                /* A lexical binding that does NOT simply name the module symbol
+                 * of the same spelling is an alias introduced in this body. Only
+                 * that case may claim the alias strategy; a module function
+                 * referenced by its own name keeps the plain value-reference
+                 * strategy it has always had. */
+                const CBMRegisteredFunc *module_symbol =
+                    cbm_registry_lookup_symbol(ctx->registry, ctx->module_qn, name);
+                *lexical_alias_out = !module_symbol || !module_symbol->qualified_name ||
+                                     strcmp(module_symbol->qualified_name, bound) != 0;
+            }
+            return bound;
+        }
+        const CBMRegisteredFunc *f =
+            cbm_registry_lookup_symbol(ctx->registry, ctx->module_qn, name);
+        return py_func_is_exact_callable_value(f) ? f->qualified_name : NULL;
+    }
+    if (strcmp(kind, "attribute") == 0) {
+        TSNode object = ts_node_child_by_field_name(node, "object", 6);
+        TSNode attribute = ts_node_child_by_field_name(node, "attribute", 9);
+        if (ts_node_is_null(object) || ts_node_is_null(attribute))
+            return NULL;
+        char *member = py_node_text(ctx, attribute);
+        const CBMType *receiver = py_eval_expr_type(ctx, object);
+        if (!member || !receiver)
+            return NULL;
+        receiver = cbm_type_resolve_alias(receiver);
+        if (receiver->kind == CBM_TYPE_MODULE) {
+            const CBMRegisteredFunc *f =
+                py_module_member(ctx, receiver->data.module.module_qn, member).func;
+            return py_func_is_exact_callable_value(f) ? f->qualified_name : NULL;
+        }
+        if (receiver->kind == CBM_TYPE_NAMED) {
+            /* Instance fields shadow class methods. Without an exact callable
+             * identity for the field value, promoting the same-named method
+             * would fabricate a callable target. */
+            if (py_lookup_field(ctx, receiver->data.named.qualified_name, member))
+                return NULL;
+            const CBMRegisteredFunc *f =
+                py_lookup_attribute(ctx, receiver->data.named.qualified_name, member);
+            return py_func_is_exact_callable_value(f) ? f->qualified_name : NULL;
+        }
+    }
+    return NULL;
+}
+
+static void py_c_resolve_value_references_at(PyLSPContext *ctx, TSNode call) {
+    if (!ctx || ctx->callable_value_proof_disabled)
+        return;
+    TSNode args = ts_node_child_by_field_name(call, "arguments", 9);
+    if (ts_node_is_null(args))
+        return;
+    uint32_t count = ts_node_named_child_count(args);
+    for (uint32_t i = 0; i < count; i++) {
+        TSNode arg = ts_node_named_child(args, i);
+        if (strcmp(ts_node_type(arg), "keyword_argument") == 0) {
+            arg = ts_node_child_by_field_name(arg, "value", 5);
+            if (ts_node_is_null(arg))
+                continue;
+        }
+        const char *kind = ts_node_type(arg);
+        if (strcmp(kind, "identifier") != 0 && strcmp(kind, "attribute") != 0 &&
+            strcmp(kind, "parenthesized_expression") != 0)
+            continue;
+        bool lexical_alias = false;
+        const char *target = py_c_exact_callable_target_ex(ctx, arg, NULL, &lexical_alias);
+        char *source_name = py_node_text(ctx, arg);
+        if (target) {
+            /* `arg` is the outermost direct-argument node, parentheses included,
+             * which is the occurrence the usage carrier also reports. */
+            py_emit_resolved_reference(ctx, target, source_name, arg,
+                                       lexical_alias ? "lsp_callable_alias"
+                                                     : "lsp_callable_value_reference");
+            continue;
+        }
+        const char *candidate = strcmp(kind, "identifier") == 0
+                                    ? py_c_exact_imported_reference_candidate(ctx, source_name)
+                                    : NULL;
+        const CBMVarBinding *scope_binding =
+            candidate ? cbm_scope_lookup_binding(ctx->current_scope, source_name) : NULL;
+        if (scope_binding) {
+            const CBMType *type = cbm_type_resolve_alias(scope_binding->type);
+            if (type && type->kind == CBM_TYPE_NAMED && type->data.named.qualified_name &&
+                strcmp(type->data.named.qualified_name, candidate) == 0) {
+                py_emit_unresolved_reference(ctx, candidate, arg);
+            }
+        }
+    }
+}
+#endif /* CBM_ENABLE_TEST_SEAMS */
+
+static const char *py_exact_callable_target(PyLSPContext *ctx, TSNode node, bool *lexical_alias) {
+#ifdef CBM_ENABLE_TEST_SEAMS
+    if (py_test_c_reference)
+        return py_c_exact_callable_target_ex(ctx, node, NULL, lexical_alias);
+#endif
+    *lexical_alias = false;
+    if (!ctx || ts_node_is_null(node))
+        return NULL;
+    PyCallProof proof = mori_py_callable_value(ctx, &py_call_native, &node, ctx->module_qn);
+    *lexical_alias = proof.lexical_alias;
+    return proof.target;
+}
+
+static void py_resolve_value_references_at(PyLSPContext *ctx, TSNode call) {
+#ifdef CBM_ENABLE_TEST_SEAMS
+    if (py_test_c_reference) {
+        py_c_resolve_value_references_at(ctx, call);
+        return;
+    }
+#endif
+    if (!ctx || ctx->callable_value_proof_disabled)
+        return;
+    mori_py_argument_references(ctx, &py_call_native, &call, ctx->module_qn);
+}
+
 static void py_emit_call_for(PyLSPContext *ctx, TSNode call_node) {
     if (!ctx || ctx->eval_failure || ctx->callable_value_proof_disabled)
         return;
-    static const PyCallNative native = {
-        .text = py_call_text,
-        .lambda = py_call_lambda,
-        .scope = py_call_scope,
-        .imported = py_call_imported,
-        .symbol = py_call_symbol,
-        .class_name = py_call_class,
-        .method = py_call_method,
-        .dispatch = py_call_dispatch,
-        .super_target = py_call_super_target,
-        .receiver = py_call_receiver,
-        .union_member = py_call_union_member,
-        .module_member = py_call_module_member,
-        .emit = py_call_emit,
-    };
-    mori_py_invoke(ctx, &native, &call_node, ctx->module_qn, ctx->class_body_outer_scope != NULL);
+    mori_py_invoke(ctx, &py_call_native, &call_node, ctx->module_qn,
+                    ctx->class_body_outer_scope != NULL);
 }
 
 /* Detect `isinstance(x, T)` / `isinstance(x, (T1, T2))` and return
