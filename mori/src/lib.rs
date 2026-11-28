@@ -319,6 +319,10 @@ mod native_tree;
 #[path = "../internal/cbm/lsp/rust_path.rs"]
 mod rust_path;
 
+#[cfg(any(feature = "native-engine-abi", test))]
+#[path = "../internal/cbm/lsp/ts_type_text.rs"]
+mod ts_type_text;
+
 #[cfg(feature = "c-backend")]
 #[path = "../internal/cbm/rust_use_imports.rs"]
 mod rust_use_imports;

@@ -52,10 +52,9 @@ void cbm_ts_full_registry_builds_reset(void) {
 }
 
 /* Dynamic work budget for parse_ts_type_text (thread-local, reset at every
- * per-file/per-build entry point). The type-text parser is self-recursive
- * over string SLICES and re-derives lengths per call, so an adversarial or
- * generated type text can cost far more than its bytes suggest. Instead of
- * a fixed depth cap, the total work SCALES WITH THE INPUT: budget =
+ * per-file/per-build entry point). Nested type expressions rescan their
+ * child slices, so the budget scales with input length instead of fixing
+ * a maximum depth: budget =
  * 1M + 64 x source_len units, each call charging 1 + slice_len/16 — i.e.
  * total scanned bytes are bounded at ~1024x the source size, generous
  * enough that no real-world file ever hits it. CBM_TS_TYPE_BUDGET (absolute
@@ -339,13 +338,35 @@ static void ts_emit_unresolved_call_at(TSLSPContext *ctx, const char *expr_text,
     cbm_resolvedcall_push(ctx->resolved_calls, ctx->arena, rc);
 }
 
+/* Parse a textual TS type into a CBMType through ts_type_text.rs. The parser
+ * trims a leading ":" and surrounding whitespace, charges the thread's type
+ * budget for every slice it reads, and returns UNKNOWN once the budget runs
+ * out. Seam builds keep the C reference below for comparison. */
+extern const CBMType *cbm_rust_ts_parse_type_text(CBMArena *arena, const char *text,
+                                                  const char *module_qn, long *budget);
+
+static const CBMType *parse_ts_type_text(CBMArena *arena, const char *text, const char *module_qn) {
+    const bool budget_armed = g_ts_type_budget >= 0;
+    const CBMType *type = cbm_rust_ts_parse_type_text(arena, text, module_qn, &g_ts_type_budget);
+    if (budget_armed && g_ts_type_budget < 0 && !g_ts_type_budget_warned) {
+        g_ts_type_budget_warned = true;
+        fprintf(stderr,
+                "  [tslsp] type-text parse budget exhausted (module %s); returning unknown\n",
+                module_qn ? module_qn : "?");
+    }
+    return type;
+}
+
+#ifdef CBM_ENABLE_TEST_SEAMS
+// C reference for ts_type_text.rs, kept so seam builds can compare the two.
 // Parse a textual TS type into a CBMType. Pragmatic v1: handle the common cases
 // (identifier, qualified.identifier, T[], T<U,V>, Promise<T>, T | U, T & U, predefined).
 // Anything more complex falls back to NAMED with the original text.
 //
 // Trims leading whitespace, leading ":" (TS type-annotation prefix produced by
 // `cbm_node_text` on a `type_annotation` AST node), and trailing whitespace/`;`.
-static const CBMType *parse_ts_type_text(CBMArena *arena, const char *text, const char *module_qn) {
+static const CBMType *ref_parse_ts_type_text(CBMArena *arena, const char *text,
+                                             const char *module_qn) {
     if (!text || !text[0])
         return cbm_type_unknown();
 
@@ -403,7 +424,7 @@ static const CBMType *parse_ts_type_text(CBMArena *arena, const char *text, cons
         if (after + 2 <= len && text[after] == '=' && text[after + 1] == '>') {
             // Parse return type.
             const char *ret_text = text + after + 2;
-            const CBMType *ret = parse_ts_type_text(arena, ret_text, module_qn);
+            const CBMType *ret = ref_parse_ts_type_text(arena, ret_text, module_qn);
 
             // Parse params: split by top-level commas, each "name: type" or just "type".
             const char *fn_param_names[16] = {0};
@@ -434,10 +455,10 @@ static const CBMType *parse_ts_type_text(CBMArena *arena, const char *text, cons
                                     nl--;
                                 fn_param_names[pc] = cbm_arena_strndup(arena, nm, nl);
                                 fn_param_types[pc] =
-                                    parse_ts_type_text(arena, colon + 1, module_qn);
+                                    ref_parse_ts_type_text(arena, colon + 1, module_qn);
                             } else {
                                 fn_param_names[pc] = cbm_arena_sprintf(arena, "_%d", pc);
-                                fn_param_types[pc] = parse_ts_type_text(arena, part, module_qn);
+                                fn_param_types[pc] = ref_parse_ts_type_text(arena, part, module_qn);
                             }
                             pc++;
                         }
@@ -506,10 +527,10 @@ static const CBMType *parse_ts_type_text(CBMArena *arena, const char *text, cons
             char *true_text = cbm_arena_strndup(arena, text + q_pos + 3, colon_pos - (q_pos + 3));
             char *false_text =
                 cbm_arena_strndup(arena, text + colon_pos + 3, len - (colon_pos + 3));
-            const CBMType *check = parse_ts_type_text(arena, check_text, module_qn);
-            const CBMType *extends = parse_ts_type_text(arena, extends_text, module_qn);
-            const CBMType *true_branch = parse_ts_type_text(arena, true_text, module_qn);
-            const CBMType *false_branch = parse_ts_type_text(arena, false_text, module_qn);
+            const CBMType *check = ref_parse_ts_type_text(arena, check_text, module_qn);
+            const CBMType *extends = ref_parse_ts_type_text(arena, extends_text, module_qn);
+            const CBMType *true_branch = ref_parse_ts_type_text(arena, true_text, module_qn);
+            const CBMType *false_branch = ref_parse_ts_type_text(arena, false_text, module_qn);
             return cbm_type_conditional(arena, check, extends, true_branch, false_branch);
         }
     }
@@ -533,7 +554,7 @@ static const CBMType *parse_ts_type_text(CBMArena *arena, const char *text, cons
         while (*rest == ' ' || *rest == '\t')
             rest++;
         char *rest_term = cbm_arena_strdup(arena, rest);
-        const CBMType *operand = parse_ts_type_text(arena, rest_term, module_qn);
+        const CBMType *operand = ref_parse_ts_type_text(arena, rest_term, module_qn);
         return cbm_type_keyof(arena, operand);
     }
 
@@ -561,7 +582,7 @@ static const CBMType *parse_ts_type_text(CBMArena *arena, const char *text, cons
                 depth--;
             else if (c == ',' && depth == 0) {
                 char *part = cbm_arena_strndup(arena, inner_text + start, i - start);
-                elems[ec++] = parse_ts_type_text(arena, part, module_qn);
+                elems[ec++] = ref_parse_ts_type_text(arena, part, module_qn);
                 start = i + 1;
             }
         }
@@ -587,7 +608,7 @@ static const CBMType *parse_ts_type_text(CBMArena *arena, const char *text, cons
                      (text[i - 1] == ' ' || text[i - 1] == '\t')) {
                 if (mc < 15) {
                     char *part = cbm_arena_strndup(arena, text + start, i - start);
-                    members[mc++] = parse_ts_type_text(arena, part, module_qn);
+                    members[mc++] = ref_parse_ts_type_text(arena, part, module_qn);
                 }
                 if (c == '|')
                     is_union = true;
@@ -603,7 +624,7 @@ static const CBMType *parse_ts_type_text(CBMArena *arena, const char *text, cons
             // (UBSan: index 16 out of bounds for 'const CBMType *[16]').
             if (mc < 15) {
                 char *part = cbm_arena_strndup(arena, text + start, len - start);
-                members[mc++] = parse_ts_type_text(arena, part, module_qn);
+                members[mc++] = ref_parse_ts_type_text(arena, part, module_qn);
             }
             members[mc] = NULL;
             return is_union ? cbm_type_union(arena, members, mc)
@@ -626,7 +647,7 @@ static const CBMType *parse_ts_type_text(CBMArena *arena, const char *text, cons
     // Trailing `[]` → Array<elem>. Strip and recurse.
     if (len >= 2 && text[len - 1] == ']' && text[len - 2] == '[') {
         char *inner = cbm_arena_strndup(arena, text, len - 2);
-        const CBMType *elem = parse_ts_type_text(arena, inner, module_qn);
+        const CBMType *elem = ref_parse_ts_type_text(arena, inner, module_qn);
         const CBMType *args[2] = {elem, NULL};
         return cbm_type_template(arena, "Array", args, 1);
     }
@@ -664,7 +685,7 @@ static const CBMType *parse_ts_type_text(CBMArena *arena, const char *text, cons
                     adepth--;
                 else if (c == ',' && adepth == 0) {
                     char *part = cbm_arena_strndup(arena, args_text + start, i - start);
-                    args[arg_count++] = parse_ts_type_text(arena, part, module_qn);
+                    args[arg_count++] = ref_parse_ts_type_text(arena, part, module_qn);
                     start = i + 1;
                 }
             }
@@ -806,6 +827,18 @@ static const CBMType *parse_ts_type_text(CBMArena *arena, const char *text, cons
     }
     return cbm_type_named(arena, cbm_arena_strndup(arena, text, len));
 }
+
+const CBMType *cbm_ts_lsp_test_parse_type_text(CBMArena *arena, const char *text,
+                                               const char *module_qn, bool c_reference) {
+    return c_reference ? ref_parse_ts_type_text(arena, text, module_qn)
+                       : parse_ts_type_text(arena, text, module_qn);
+}
+
+void cbm_ts_lsp_test_set_type_budget(long budget) {
+    g_ts_type_budget = budget;
+    g_ts_type_budget_warned = false;
+}
+#endif
 
 typedef struct {
     const char *module_qn;

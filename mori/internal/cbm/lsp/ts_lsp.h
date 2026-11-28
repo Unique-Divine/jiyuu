@@ -89,6 +89,12 @@ static inline int ts_import_next(const TSLSPContext *ctx, const char *name, int 
 }
 
 #ifdef CBM_ENABLE_TEST_SEAMS
+// Parse type text through ts_type_text.rs, or through the C reference kept for
+// comparison when `c_reference` is set. Both charge the thread's type budget.
+const CBMType *cbm_ts_lsp_test_parse_type_text(CBMArena *arena, const char *text,
+                                               const char *module_qn, bool c_reference);
+// Arm the thread's type budget (-1 disables it) and clear its warned flag.
+void cbm_ts_lsp_test_set_type_budget(long budget);
 // Complexity-regression seam: remaining expression-eval budget / warned flag
 // for the calling thread, valid after a cbm_run_ts_lsp on the same thread.
 long cbm_ts_lsp_test_budget_remaining(void);
