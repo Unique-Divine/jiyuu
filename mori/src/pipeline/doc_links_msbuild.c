@@ -51,9 +51,8 @@
 
 enum {
     MSB_FIELDS = 5,
-    MSB_NAME_MAX = 256,   /* a property name; a longer one never has a known value */
-    MSB_VALUE_MAX = 4096, /* an expanded value; a longer one is unknown */
-    MSB_PATH_MARK = 1,    /* first byte of a repository-absolute path */
+    MSB_NAME_MAX = 256, /* a property name; a longer one never has a known value */
+    MSB_PATH_MARK = 1,  /* first byte of a repository-absolute path */
     MSB_INIT = 16,
 };
 
@@ -1592,15 +1591,22 @@ static const msb_prop_t *prop_lookup(msb_eval_t *ev, const char *key) {
     return p;
 }
 
-/* The value of $(name) read in `file`; NULL when it is not known. */
-static const char *msb_ref(msb_eval_t *ev, int file, const char *name, size_t len) {
+typedef struct {
+    msb_eval_t *ev;
+    int file;
+} msb_eval_file_t;
+
+/* Resolve a property and record any dependency on incoming state. */
+static const char *msb_expand_lookup(void *context, const char *name, size_t len) {
+    msb_eval_file_t *host = context;
+    msb_eval_t *ev = host->ev;
     char key[MSB_NAME_MAX];
     if (!msb_key(name, len, key)) {
         return NULL;
     }
     static const char this_file[] = "msbuildthisfile";
     if (strncmp(key, this_file, sizeof(this_file) - SKIP_ONE) == 0) {
-        const msb_file_t *f = &ev->m->files[file];
+        const msb_file_t *f = &ev->m->files[host->file];
         const char *rest = key + sizeof(this_file) - SKIP_ONE;
         if (strcmp(rest, "directory") == 0) {
             return f->abs_dir;
@@ -1622,81 +1628,25 @@ static const char *msb_ref(msb_eval_t *ev, int file, const char *name, size_t le
     return p ? p->value : NULL;
 }
 
-/* A value being put together; `over` once it is longer than a value may be. */
-typedef struct {
-    msb_eval_t *ev;
-    char *buf;
-    size_t len;
-    size_t cap;
-    bool over;
-} msb_sb_t;
+const char *mori_msbuild_expand(const char *text, void *context,
+                                const char *(*lookup)(void *, const char *, size_t),
+                                char *(*alloc)(void *, size_t), const bool *oom, size_t *work);
 
-static void msb_sb_put(msb_sb_t *b, const char *s, size_t n) {
-    if (b->over || b->ev->oom) {
-        return;
-    }
-    if (b->len + n >= MSB_VALUE_MAX) {
-        b->over = true;
-        return;
-    }
-    if (b->len + n + SKIP_ONE > b->cap) {
-        size_t ncap = b->cap ? b->cap * PAIR_LEN : CBM_SZ_64;
-        while (ncap < b->len + n + SKIP_ONE) {
-            ncap *= PAIR_LEN;
-        }
-        char *grown = (char *)scratch_alloc(b->ev, ncap);
-        if (!grown) {
-            return;
-        }
-        if (b->len > 0) {
-            memcpy(grown, b->buf, b->len);
-            msb_work(b->len);
-        }
-        b->buf = grown;
-        b->cap = ncap;
-    }
-    memcpy(b->buf + b->len, s, n);
-    b->len += n;
-    b->buf[b->len] = '\0';
-    msb_work(n + SKIP_ONE); /* append plus its terminator */
+static char *msb_expand_alloc(void *context, size_t size) {
+    msb_eval_file_t *host = context;
+    return scratch_alloc(host->ev, size);
 }
 
 /* `text` with its $(Property) references replaced. NULL when it has no value
  * this reader knows: a property that is not known, a property function, an
- * item or metadata reference, an escape, a value past MSB_VALUE_MAX. */
+ * item or metadata reference, an escape, a value of 4096 bytes or more. */
 static const char *msb_expand(msb_eval_t *ev, int file, const char *text) {
-    msb_sb_t b = {.ev = ev};
-    for (const char *p = text; *p;) {
-        if (p[0] == '$' && p[1] == '(') {
-            const char *nm = p + PAIR_LEN;
-            const char *e = nm;
-            while (isalnum((unsigned char)*e) || *e == '_') {
-                e++;
-            }
-            if (e == nm || *e != ')' || isdigit((unsigned char)nm[0])) {
-                return NULL;
-            }
-            const char *v = msb_ref(ev, file, nm, (size_t)(e - nm));
-            if (!v) {
-                return NULL;
-            }
-            msb_sb_put(&b, v, strlen(v));
-            p = e + SKIP_ONE;
-            continue;
-        }
-        if ((p[0] == '@' || p[0] == '%') && p[1] == '(') {
-            return NULL;
-        }
-        if (p[0] == '%' && isxdigit((unsigned char)p[1]) && isxdigit((unsigned char)p[2])) {
-            return NULL;
-        }
-        msb_sb_put(&b, p, SKIP_ONE);
-        p++;
-    }
-    if (b.over || ev->oom) {
-        return NULL;
-    }
-    return b.buf ? b.buf : "";
+    msb_eval_file_t host = {.ev = ev, .file = file};
+    size_t work;
+    const char *value =
+        mori_msbuild_expand(text, &host, msb_expand_lookup, msb_expand_alloc, &ev->oom, &work);
+    msb_work(work);
+    return value;
 }
 
 /* ── Conditions ──────────────────────────────────────────────────── */
@@ -1741,32 +1691,25 @@ static void trim_span(const char **s, size_t *n) {
     }
 }
 
-/* The Rust parser borrows operands until its per-comparison reset. The
- * existing expansion path owns scratch allocation and records property reads
- * against the current file and cache dependency view. */
-typedef struct {
-    msb_eval_t *ev;
-    int file;
-} msb_cond_host_t;
-
+/* The Rust condition parser borrows operands until its per-comparison reset. */
 int mori_msbuild_condition(const char *condition, void *context,
                            const char *(*read)(void *, const char *, size_t, bool),
                            void (*reset)(void *));
 int mori_msbuild_equal(const char *left, const char *right);
 
 static const char *msb_cond_read(void *context, const char *text, size_t len, bool expand) {
-    msb_cond_host_t *host = context;
+    msb_eval_file_t *host = context;
     const char *value = scratch_strndup(host->ev, text, len);
     return value && expand ? msb_expand(host->ev, host->file, value) : value;
 }
 
 static void msb_cond_reset(void *context) {
-    msb_cond_host_t *host = context;
+    msb_eval_file_t *host = context;
     cbm_arena_reset(&host->ev->scratch);
 }
 
 static msb_tri_t msb_cond(msb_eval_t *ev, int file, const char *condition) {
-    msb_cond_host_t host = {.ev = ev, .file = file};
+    msb_eval_file_t host = {.ev = ev, .file = file};
     return mori_msbuild_condition(condition, &host, msb_cond_read, msb_cond_reset);
 }
 
