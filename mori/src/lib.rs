@@ -386,12 +386,9 @@ mod source_publish;
 #[path = "pipeline/stage_publish.rs"]
 mod stage_publish;
 
-#[cfg(feature = "c-backend")]
+#[cfg(feature = "native-engine-abi")]
 #[path = "../internal/cbm/python_imports.rs"]
 mod python_imports;
-
-#[cfg(feature = "c-backend")]
-pub use python_imports::register as mori_register_python_imports;
 
 #[cfg(all(
     feature = "native-engine-abi",

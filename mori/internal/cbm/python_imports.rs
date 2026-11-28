@@ -28,12 +28,6 @@ struct ImportRow {
 }
 
 type Emit = unsafe extern "C" fn(*mut c_void, *const ImportRow);
-type Extract =
-    unsafe extern "C" fn(RawNode, *const u8, usize, Emit, *mut c_void);
-
-unsafe extern "C" {
-    fn cbm_python_set_import_extractor(extract: Extract);
-}
 
 struct ImportSink {
     emit: Emit,
@@ -46,6 +40,8 @@ impl ImportSink {
             local: local.into(),
             prefix: prefix.unwrap_or_default().into(),
             member: member.into(),
+            // A package-relative module (`from . import x`) already ends in
+            // the separator. Another dot would name the parent package.
             needs_dot: prefix.is_some_and(|prefix| !prefix.ends_with(b".")),
         };
         // SAFETY: C lends the sink and copies these bytes before returning.
@@ -170,7 +166,15 @@ unsafe fn from_import(node: RawNode, source: &[u8], sink: &ImportSink) {
     }
 }
 
-unsafe extern "C" fn extract(
+/// Read one Python import statement and lend each row to `emit`.
+///
+/// # Safety
+///
+/// C passes a live `import_statement`, `import_from_statement`, or
+/// `future_import_statement` node, its initialized source, and a sink that
+/// copies each row before returning.
+#[unsafe(no_mangle)]
+unsafe extern "C" fn mori_python_extract_imports(
     node: RawNode,
     source: *const u8,
     source_len: usize,
@@ -187,15 +191,4 @@ unsafe extern "C" fn extract(
             from_import(node, source, &sink);
         }
     }
-}
-
-/// Install the native Python import callback.
-///
-/// # Safety
-///
-/// Call during process startup, before other threads extract files or
-/// install callbacks.
-pub unsafe fn register() {
-    // SAFETY: The caller guarantees exclusive startup registration.
-    unsafe { cbm_python_set_import_extractor(extract) };
 }

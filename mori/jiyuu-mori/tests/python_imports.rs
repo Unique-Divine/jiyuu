@@ -1,4 +1,4 @@
-//! Python import extraction parity on persisted IMPORTS and CALLS edges.
+//! Python import extraction on persisted IMPORTS and CALLS edges.
 #![cfg(all(feature = "c-backend", unix))]
 
 use std::fs::{self, DirBuilder};
@@ -12,11 +12,8 @@ use serde_json::{Value, json};
 struct Fixture(PathBuf);
 
 impl Fixture {
-    fn new(backend: &str) -> Self {
-        let dir = PathBuf::from(format!(
-            "/tmp/mori-py-{}-{backend}",
-            std::process::id()
-        ));
+    fn new() -> Self {
+        let dir = PathBuf::from(format!("/tmp/mori-py-{}", std::process::id()));
         let mut dirs = DirBuilder::new();
         dirs.mode(0o700).create(&dir).expect("create fixture");
         for name in ["repo", "cache", "rt"] {
@@ -159,13 +156,12 @@ impl Edge {
     }
 }
 
-fn index(backend: &str) -> (Vec<Edge>, String) {
-    let fixture = Fixture::new(backend);
+fn index() -> (Vec<Edge>, String) {
+    let fixture = Fixture::new();
     let args =
         json!({"repo_path": fixture.0.join("repo"), "name": "py-imports"});
     let output = fixture
         .command()
-        .env("MORI_IMPL_PYTHON_IMPORTS", backend)
         .env("CBM_PROFILE", "1")
         .env("CBM_LOG_LEVEL", "debug")
         .args(["cli", "--quiet", "index_repository", &args.to_string()])
@@ -220,12 +216,9 @@ fn index(backend: &str) -> (Vec<Edge>, String) {
 }
 
 #[test]
-fn python_imports_match_c_for_aliases_relative_paths_and_type_checking() {
-    let (native, native_logs) = index("c");
-    let (rust, rust_logs) = index("rust");
-    assert_eq!(rust, native);
+fn python_imports_keep_aliases_relative_paths_and_type_checking() {
+    let (rust, rust_logs) = index();
     let marker = "msg=extract.python_imports implementation=rust";
-    assert!(!native_logs.contains(marker), "{native_logs}");
     assert!(rust_logs.contains(marker), "{rust_logs}");
 
     for (target, alias) in [
@@ -264,8 +257,9 @@ fn python_imports_match_c_for_aliases_relative_paths_and_type_checking() {
         })
         .collect();
     form_imports.sort();
-    // C bound only the first name of `import beta, wildcards` and skipped
-    // imports nested in try blocks and functions; Rust keeps that behavior.
+    // Rows generated from the retired C extractor: it bound only the first
+    // name of `import beta, wildcards` and skipped imports nested in try
+    // blocks and functions.
     assert_eq!(
         form_imports,
         [

@@ -44,7 +44,7 @@
  * Language   Extraction expected   Reasoning
  * ---------  --------------------  ------------------------------------------
  * Go         GREEN (all)           dedicated parse_go_imports; stress test passes
- * Python     GREEN (all)           process_py_import_stmt/from; existing tests pass
+ * Python     GREEN (all)           mori_python_extract_imports (Rust); tests pass
  * TypeScript GREEN (all)           process_es_import_statement; existing tests pass
  * JavaScript GREEN (all)           walk_es_imports + CommonJS; existing tests pass
  * Rust       GREEN (basic)         parse_rust_imports strips "use "/";" text-based;
@@ -245,7 +245,7 @@ TEST(go_import_table) {
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
- * Python — process_py_import_stmt + process_py_import_from, expected GREEN
+ * Python — mori_python_extract_imports (Rust), expected GREEN
  * ═══════════════════════════════════════════════════════════════════════════ */
 
 static const import_case_t python_cases[] = {
