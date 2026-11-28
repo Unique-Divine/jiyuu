@@ -546,7 +546,7 @@ TEST(sem_admit_best_first_rust_matches_c) {
                                       INFINITY, -INFINITY, 0.75F, 1.0F, 0.85F};
     const int score_count = (int)(sizeof(score_set) / sizeof(score_set[0]));
     uint32_t state = 0x5eed1234U;
-    cbm_semantic_pair_t pairs[SEM_PARITY_MAX_PAIRS];
+    cbm_semantic_pair_t pairs[SEM_PARITY_MAX_PAIRS] = {0};
     int start_counts[SEM_PARITY_MAX_FUNCS];
 
     /* Empty input: both leave counts alone. */
