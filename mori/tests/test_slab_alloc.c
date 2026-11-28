@@ -11,6 +11,15 @@
 #include <stdlib.h>
 #include <string.h>
 
+#if !defined(_WIN32) && defined(CBM_MEM_TEST_API) && CBM_MEM_TEST_API
+#include <foundation/mem_core.h>
+#include <signal.h>
+#include <sys/wait.h>
+#include <unistd.h>
+
+extern void *(*ts_current_malloc)(size_t);
+#endif
+
 /* ── Constants from slab_alloc.c ─────────────────────────────────── */
 enum { SLAB_CHUNK_SIZE = 64 };
 
@@ -58,6 +67,26 @@ TEST(slab_calloc_overflows) {
     ASSERT_NULL(p);
     PASS();
 }
+
+#if !defined(_WIN32) && defined(CBM_MEM_TEST_API) && CBM_MEM_TEST_API
+TEST(slab_tree_sitter_malloc_aborts_on_failure) {
+    const size_t heap_size = SLAB_CHUNK_SIZE + 1;
+    pid_t child = fork();
+    ASSERT_GTE(child, 0);
+    if (child == 0) {
+        cbm_slab_install();
+        cbm_mem_test_fail_alloc_size(CBM_MEM_CLASS_TS_TREE, heap_size);
+        (void)ts_current_malloc(heap_size);
+        _exit(0);
+    }
+
+    int status = 0;
+    ASSERT_EQ(waitpid(child, &status, 0), child);
+    ASSERT_TRUE(WIFSIGNALED(status));
+    ASSERT_EQ(WTERMSIG(status), SIGABRT);
+    PASS();
+}
+#endif
 
 /* ── Realloc ─────────────────────────────────────────────────────── */
 
@@ -183,6 +212,9 @@ SUITE(slab_alloc) {
     RUN_TEST(slab_malloc_zero_size);
     RUN_TEST(slab_calloc_zeros);
     RUN_TEST(slab_calloc_overflows);
+#if !defined(_WIN32) && defined(CBM_MEM_TEST_API) && CBM_MEM_TEST_API
+    RUN_TEST(slab_tree_sitter_malloc_aborts_on_failure);
+#endif
     RUN_TEST(slab_realloc_null_is_malloc);
     RUN_TEST(slab_realloc_shrink_to_zero);
     RUN_TEST(slab_realloc_small_keep_same);
