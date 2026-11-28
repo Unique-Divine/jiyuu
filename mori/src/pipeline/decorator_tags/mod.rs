@@ -42,12 +42,6 @@ const STOPWORDS: &[&[u8]] = &[
     b"router",
 ];
 
-/// The labels whose nodes give and receive tags, in collection order.
-/// Struct sits beside Class so Go, Rust, Swift and D structs keep the tags
-/// they had when structs were labelled Class.
-pub(super) const LABELS: [&[u8]; 4] =
-    [b"Function", b"Method", b"Class", b"Struct"];
-
 /// Splits `s` where a lowercase ASCII letter meets an uppercase one, keeping
 /// at most `max` parts. Later parts are dropped, not merged.
 fn split_camel_case(s: &[u8], max: usize) -> Vec<&[u8]> {
@@ -203,7 +197,7 @@ mod native {
     use super::super::native_graph_buffer::{
         Node, cbm_gbuf_find_by_label, cbm_gbuf_find_by_qn,
     };
-    use super::{LABELS, plan, with_tags};
+    use super::{plan, with_tags};
     use std::ffi::{CStr, CString, c_char, c_int, c_void};
     use std::{ptr, slice};
 
@@ -222,6 +216,11 @@ mod native {
     }
 
     const LOG_INFO: c_int = 1;
+
+    /// The labels whose nodes give and receive tags, in collection order.
+    /// Struct sits beside Class so Go, Rust, Swift and D structs keep the tags
+    /// they had when structs were labelled Class.
+    const LABELS: [&CStr; 4] = [c"Function", c"Method", c"Class", c"Struct"];
 
     // SAFETY: a non-null ptr is NUL-terminated and outlives the copy.
     unsafe fn owned(ptr: *const c_char) -> Option<CString> {
@@ -245,7 +244,6 @@ mod native {
         // Snapshot the candidates first: updating a node replaces its strings.
         let mut nodes: Vec<(CString, Option<Vec<u8>>)> = Vec::new();
         for label in LABELS {
-            let label = CString::new(label).expect("labels have no NUL");
             let mut found: *const *const Node = ptr::null();
             let mut count: c_int = 0;
             // SAFETY: the buffer owns the returned array for this call.
