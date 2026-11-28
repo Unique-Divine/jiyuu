@@ -278,6 +278,10 @@ pub use go_imports::register as mori_register_go_import_extractor;
 #[path = "../internal/cbm/native_tree.rs"]
 mod native_tree;
 
+#[cfg(any(feature = "native-engine-abi", test))]
+#[path = "../internal/cbm/lsp/php_resolver/mod.rs"]
+mod php_resolver;
+
 #[cfg(feature = "native-engine-abi")]
 #[path = "../internal/cbm/lsp/rust_path.rs"]
 mod rust_path;

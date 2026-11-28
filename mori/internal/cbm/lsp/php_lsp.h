@@ -107,9 +107,27 @@ const CBMType *php_parse_type_node(PHPLSPContext *ctx, TSNode node);
 /* Resolve a class name (bare or qualified) using current namespace + use map. */
 const char *php_resolve_class_name(PHPLSPContext *ctx, const char *name);
 
-/* Look up a method on a class, walking parent chain (registry-based). */
+/* Look up a method on a class, walking parent chain (registry-based).
+ * Implemented in Rust (php_resolver/native.rs). */
 const CBMRegisteredFunc *php_lookup_method(PHPLSPContext *ctx, const char *class_qn,
                                             const char *method_name);
+
+/* Resolve a class QN to its registered type: exact key, module-prefixed key,
+ * then the closest same-short-name type. NULL under an unresolved vendor
+ * `use`. Implemented in Rust (php_resolver/native.rs). */
+const CBMRegisteredType *cbm_php_lookup_type(const PHPLSPContext *ctx, const char *qn);
+
+/* True when `qn` is, or lies under, the target of a class `use` the pipeline
+ * left unresolved. Implemented in Rust (php_resolver/native.rs). */
+bool cbm_php_external_qn(const PHPLSPContext *ctx, const char *qn);
+
+#ifdef CBM_ENABLE_TEST_SEAMS
+/* C reference spellings of the php_resolver exports, kept for comparison. */
+bool cbm_php_c_external_qn(const PHPLSPContext *ctx, const char *qn);
+const CBMRegisteredType *cbm_php_c_lookup_type(PHPLSPContext *ctx, const char *qn);
+const CBMRegisteredFunc *cbm_php_c_lookup_method(PHPLSPContext *ctx, const char *class_qn,
+                                                 const char *method_name);
+#endif
 
 /* Entry point: build registry from file defs + stdlib + composer (if present),
  * then run resolution. Called from cbm_extract_file(). */
