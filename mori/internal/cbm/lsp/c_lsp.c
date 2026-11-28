@@ -3293,6 +3293,7 @@ typedef bool (*CFieldVisit)(void *state, CFieldRecord row);
 typedef struct {
     const void *data;
     CFieldRecord (*exact)(const void *data, const char *name);
+    CFieldRecord (*exact_long_in_module)(const void *data, const char *name);
     void (*visit_short)(const void *data, const char *name, CFieldVisit visit, void *state);
     const char *module;
     const char *const *includes;
@@ -3315,13 +3316,21 @@ static CFieldRecord c_field_record(const CBMRegisteredType *record) {
 }
 
 static CFieldRecord c_field_exact(const void *data, const char *name) {
-    return c_field_record(cbm_registry_lookup_type(data, name));
+    const CLSPContext *ctx = data;
+    return c_field_record(cbm_registry_lookup_type(ctx->registry, name));
+}
+
+static CFieldRecord c_field_exact_long_in_module(const void *data, const char *name) {
+    const CLSPContext *ctx = data;
+    const char *prefixed = cbm_arena_sprintf(ctx->arena, "%s.%s", ctx->module_qn, name);
+    return c_field_exact(ctx, prefixed);
 }
 
 static void c_field_visit_short(const void *data, const char *name, CFieldVisit visit,
                                 void *state) {
+    const CLSPContext *ctx = data;
     CBMTypeShortIter it;
-    cbm_registry_types_by_short_name_chain(data, name, &it);
+    cbm_registry_types_by_short_name_chain(ctx->registry, name, &it);
     int index;
     while ((index = cbm_type_short_iter_next(&it)) >= 0) {
         if (!visit(state, c_field_record(&it.reg->types[index])))
@@ -3336,8 +3345,13 @@ static const CBMRegisteredType *c_find_field(CLSPContext *ctx, const char *type_
                                              const char *field_name, const CBMType **field_type) {
     if (!ctx->registry)
         return NULL;
-    CFieldRegistry registry = {ctx->registry,  c_field_exact,       c_field_visit_short,
-                               ctx->module_qn, ctx->include_ns_qns, (size_t)ctx->include_count};
+    CFieldRegistry registry = {.data = ctx,
+                               .exact = c_field_exact,
+                               .exact_long_in_module = c_field_exact_long_in_module,
+                               .visit_short = c_field_visit_short,
+                               .module = ctx->module_qn,
+                               .includes = ctx->include_ns_qns,
+                               .include_count = (size_t)ctx->include_count};
     return mori_c_field_lookup(&registry, type_qn, field_name, field_type);
 }
 

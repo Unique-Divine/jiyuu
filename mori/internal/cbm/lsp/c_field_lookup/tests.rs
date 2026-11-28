@@ -19,16 +19,33 @@ fn row(name: &CStr) -> RecordRow {
 
 struct Rows<'a>(&'a [RecordRow]);
 
+struct TestRegistry<'a> {
+    rows: &'a Rows<'a>,
+    module: &'a CStr,
+}
+
 unsafe extern "C" fn exact(
     data: *const c_void,
     name: *const c_char,
 ) -> RecordRow {
-    let rows = unsafe { &*data.cast::<Rows>() };
+    let rows = unsafe { (*data.cast::<TestRegistry>()).rows };
     rows.0
         .iter()
         .copied()
         .find(|row| unsafe { c_str(row.qualified_name) == c_str(name) })
         .unwrap_or_else(|| row(c"").without_identity())
+}
+
+unsafe extern "C" fn exact_long_in_module(
+    data: *const c_void,
+    name: *const c_char,
+) -> RecordRow {
+    let module = unsafe { (*data.cast::<TestRegistry>()).module };
+    let name = unsafe { CStr::from_ptr(name) };
+    let mut prefixed = module.to_bytes().to_vec();
+    prefixed.push(b'.');
+    prefixed.extend_from_slice(name.to_bytes_with_nul());
+    unsafe { exact(data, prefixed.as_ptr().cast()) }
 }
 
 impl RecordRow {
@@ -45,23 +62,21 @@ unsafe extern "C" fn visit_short(
     state: *mut c_void,
 ) {
     // Like the linear native iterator, offer every row. Rust must check the leaf.
-    for &row in unsafe { &*data.cast::<Rows>() }.0 {
+    let rows = unsafe { (*data.cast::<TestRegistry>()).rows };
+    for &row in rows.0 {
         if !unsafe { visit(state, row) } {
             break;
         }
     }
 }
 
-fn registry(
-    rows: &Rows<'_>,
-    module: &CStr,
-    includes: &[*const c_char],
-) -> Registry {
+fn registry(source: &TestRegistry<'_>, includes: &[*const c_char]) -> Registry {
     Registry {
-        data: (rows as *const Rows<'_>).cast(),
+        data: (source as *const TestRegistry<'_>).cast(),
         exact,
+        exact_long_in_module,
         visit_short,
-        module: module.as_ptr(),
+        module: source.module.as_ptr(),
         includes: includes.as_ptr(),
         include_count: includes.len(),
     }
@@ -107,7 +122,11 @@ fn exact_receiver_owns_the_same_named_field_in_its_own_record() {
         ..row(c"repo.use.Beta")
     };
     let rows = Rows(&[alpha, beta]);
-    let registry = registry(&rows, c"repo.use", &[]);
+    let source = TestRegistry {
+        rows: &rows,
+        module: c"repo.use",
+    };
+    let registry = registry(&source, &[]);
     assert_eq!(owner(&registry, c"Alpha", c"count"), alpha.identity);
     assert_eq!(typed(&registry, c"Alpha", c"count"), ty(0));
     assert_eq!(owner(&registry, c"repo.use.Beta", c"count"), beta.identity);
@@ -134,7 +153,11 @@ fn nested_pointer_field_uses_header_record_instead_of_parameter_stub() {
         ..row(c"repo.ops.Ops")
     };
     let rows = Rows(&[row(c"repo.use.Dev"), row(c"repo.use.Ops"), dev, ops]);
-    let registry = registry(&rows, c"repo.use", &[c"repo.ops".as_ptr()]);
+    let source = TestRegistry {
+        rows: &rows,
+        module: c"repo.use",
+    };
+    let registry = registry(&source, &[c"repo.ops".as_ptr()]);
     assert_eq!(typed(&registry, c"repo.use.Dev", c"ops"), ty(0));
     assert_eq!(owner(&registry, c"repo.use.Ops", c"shut"), ops.identity);
     assert_eq!(typed(&registry, c"repo.use.Ops", c"shut"), ty(1));
@@ -153,14 +176,18 @@ fn include_evidence_requires_a_unique_record_and_a_module_boundary() {
     };
     let stub = row(c"repo.use.Ops");
     let rows = Rows(&[stub, first, second]);
+    let source = TestRegistry {
+        rows: &rows,
+        module: c"repo.use",
+    };
     for includes in
         [&[][..], &[c"repo.ops".as_ptr(), c"repo.ops_other".as_ptr()]]
     {
-        let registry = registry(&rows, c"repo.use", includes);
+        let registry = registry(&source, includes);
         assert!(owner(&registry, c"repo.use.Ops", c"open").is_null());
         assert!(registry.resolve_record(c"repo.use.Ops").is_none());
     }
-    let registry = registry(&rows, c"repo.use", &[c"repo.ops".as_ptr()]);
+    let registry = registry(&source, &[c"repo.ops".as_ptr()]);
     assert_eq!(owner(&registry, c"repo.use.Ops", c"open"), first.identity);
     assert_eq!(
         owner(&registry, c"repo.ops_other.Ops", c"open"),
@@ -195,7 +222,11 @@ fn aliases_and_bases_preserve_owner_and_type_as_distinct_answers() {
         ..row(c"repo.Cycle")
     };
     let rows = Rows(&[base, child, alias, cycle]);
-    let registry = registry(&rows, c"repo", &[]);
+    let source = TestRegistry {
+        rows: &rows,
+        module: c"repo",
+    };
+    let registry = registry(&source, &[]);
     assert_eq!(owner(&registry, c"Alias", c"unparsed"), child.identity);
     assert_eq!(typed(&registry, c"Alias", c"unparsed"), ty(1));
     assert_eq!(typed(&registry, c"Alias", c"count"), ty(0));
@@ -216,7 +247,11 @@ fn module_qualified_exact_lookup_accepts_long_and_non_utf8_names() {
         ..row(&qualified)
     };
     let rows = Rows(&[record]);
-    let mut registry = registry(&rows, &module, &[]);
+    let source = TestRegistry {
+        rows: &rows,
+        module: &module,
+    };
+    let mut registry = registry(&source, &[]);
     unsafe extern "C" fn empty(
         _: *const c_void,
         _: *const c_char,

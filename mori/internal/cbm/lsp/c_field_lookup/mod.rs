@@ -31,6 +31,8 @@ type VisitRecord = unsafe extern "C" fn(*mut c_void, RecordRow) -> bool;
 struct Registry {
     data: *const c_void,
     exact: unsafe extern "C" fn(*const c_void, *const c_char) -> RecordRow,
+    exact_long_in_module:
+        unsafe extern "C" fn(*const c_void, *const c_char) -> RecordRow,
     visit_short: unsafe extern "C" fn(
         *const c_void,
         *const c_char,
@@ -138,6 +140,10 @@ impl Registry {
     fn exact(&self, name: &CStr) -> Option<Record<'_>> {
         // SAFETY: The host callback returns a borrowed row. A null identity marks a miss.
         let row = unsafe { (self.exact)(self.data, name.as_ptr()) };
+        self.borrow_row(row)
+    }
+
+    fn borrow_row(&self, row: RecordRow) -> Option<Record<'_>> {
         (!row.identity.is_null()).then_some(Record(row, PhantomData))
     }
 
@@ -182,13 +188,14 @@ impl Registry {
     fn exact_in_module(&self, module: &CStr, name: &CStr) -> Option<Record<'_>> {
         let len = module.to_bytes().len() + 1 + name.to_bytes_with_nul().len();
         let mut stack = [0; 1024];
-        let mut long;
-        let full = if len <= stack.len() {
-            &mut stack[..len]
-        } else {
-            long = vec![0; len];
-            &mut long
-        };
+        if len > stack.len() {
+            // SAFETY: The host builds the key in its arena and returns a borrowed
+            // row. An allocation failure is a miss, so the short-name scan runs.
+            let row =
+                unsafe { (self.exact_long_in_module)(self.data, name.as_ptr()) };
+            return self.borrow_row(row);
+        }
+        let full = &mut stack[..len];
         let (prefix, suffix) = full.split_at_mut(module.to_bytes().len());
         prefix.copy_from_slice(module.to_bytes());
         suffix[0] = b'.';
