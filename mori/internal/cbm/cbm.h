@@ -1130,9 +1130,6 @@ typedef struct {
      * POD section index. */
     void *doc_memo;
     void *doc_pod_index;
-    /* Markdown: the settled names of the file's headings (extract_defs.c),
-     * NULL until the first heading; allocated in `scratch`. */
-    void *md_headings;
     const cbm_test_declarations_t *test_declarations; /* borrowed for this call only */
     bool test_declarations_raw_source;
     struct CBMTestDefinitionMatch *test_definition_matches; /* traversal scratch */
@@ -1463,7 +1460,7 @@ void cbm_extract_channels(CBMExtractCtx *ctx);
 void cbm_extract_diagrams(CBMExtractCtx *ctx);
 /* Is a Markdown block a diagram fence, and the labels its parser reads from
  * it (space-joined; NULL for none): a Section's text keeps those labels in
- * place of the fence (extract_markdown_section_body). */
+ * place of the fence in the section body. */
 bool cbm_diagram_fence_is_diagram(const char *source, TSNode block);
 const char *cbm_diagram_fence_labels(CBMExtractCtx *ctx, TSNode block);
 /* A diagram file (CBM_LANG_DIAGRAM): its format comes from its extension. */

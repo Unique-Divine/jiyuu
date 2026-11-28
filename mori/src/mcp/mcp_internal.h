@@ -9,7 +9,74 @@
 
 #include <yyjson/yyjson.h>
 
-/* Shared compact transport for the C and Rust project response writers. */
+/* The Rust request opens the native directory, pulls one owned row at a
+ * time, and hydrates only selected rows before releasing them. A failed
+ * open returns an owned MCP error through error. */
+typedef struct cbm_mcp_project_catalog cbm_mcp_project_catalog_t;
+typedef enum {
+    CBM_MCP_CATALOG_END = 0,
+    CBM_MCP_CATALOG_RECORD = 1,
+    CBM_MCP_CATALOG_FAILED = 2,
+    CBM_MCP_CATALOG_CANCELLED = 3,
+} cbm_mcp_project_catalog_result_t;
+
+cbm_mcp_project_catalog_t *cbm_mcp_project_catalog_open(cbm_mcp_server_t *server, char **error);
+cbm_mcp_project_catalog_result_t cbm_mcp_project_catalog_next(
+    cbm_mcp_project_catalog_t *catalog, cbm_mcp_project_record_t *record);
+cbm_mcp_project_catalog_result_t cbm_mcp_project_catalog_hydrate(
+    cbm_mcp_project_catalog_t *catalog, cbm_mcp_project_record_t *record, bool include_stats);
+void cbm_mcp_project_catalog_release_record(cbm_mcp_project_record_t *record);
+void cbm_mcp_project_catalog_close(cbm_mcp_project_catalog_t *catalog);
+
+char *cbm_rust_mcp_list_projects(cbm_mcp_server_t *server, const char *args_json);
+
+/* Snippet inputs are borrowed until Rust returns a C-owned MCP result. */
+typedef struct {
+    const cbm_node_t *node;
+    const cbm_mcp_snippet_window_t *window;
+    cbm_store_t *store;
+    const char *display_path;
+    const char *generation;
+    const char *source;
+    const char *freshness;
+    const char *match_method;
+    const cbm_node_t *members;
+    const cbm_coverage_row_t *coverage;
+    char **caller_names;
+    char **callee_names;
+    int member_count;
+    int coverage_count;
+    int caller_count;
+    int callee_count;
+    int member_offset;
+    int member_limit;
+    int callers;
+    int callees;
+    bool content_verified;
+    bool source_drift;
+    bool json_format;
+} cbm_mcp_snippet_input_t;
+
+typedef struct {
+    const cbm_node_t *node;
+    double probability;
+    const char *kind;
+    const char *position;
+    int shared_terms;
+    int name_tokens;
+    bool has_shared_terms;
+    bool has_name_tokens;
+} cbm_mcp_snippet_candidate_t;
+
+typedef void (*cbm_mcp_snippet_candidate_sink_fn)(void *context,
+                                                  const cbm_mcp_snippet_candidate_t *candidate);
+void cbm_mcp_snippet_visit_candidates(cbm_store_t *store, const cbm_node_t *node, bool by_section,
+                                      cbm_mcp_snippet_candidate_sink_fn emit, void *context);
+void cbm_mcp_snippet_free_tree(char *tree);
+char *mori_snippet_response(const cbm_mcp_snippet_input_t *input);
+char *mori_snippet_suggestions(const char *input, const cbm_node_t *nodes, int count);
+
+/* Compact table rendering retains the C emitter's escaping and column profiles. */
 void cbm_mcp_render_project_table(cbm_sb_t *sb, const cbm_mcp_project_record_t *records,
                                    int page_count, bool metadata_only, bool include_stats);
 

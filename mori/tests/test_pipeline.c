@@ -20,6 +20,7 @@
 #include "pipeline/artifact.h"
 #include "store/store.h"
 #include "semantic/semantic.h"
+#include "simhash/minhash.h"
 #include "git/git_context.h"
 #include "foundation/dump_verify.h"
 #include "foundation/sha256.h"
@@ -4304,6 +4305,47 @@ static bool cx_order_first_diff(const char *want, const char *got, char *out, si
     return true;
 }
 
+static int64_t similarity_fixture_node(cbm_gbuf_t *gbuf, const char *label, const char *name,
+                                       const char *path, const cbm_minhash_t *fp) {
+    char hex[CBM_MINHASH_HEX_BUF];
+    cbm_minhash_to_hex(fp, hex, sizeof(hex));
+    char props[CBM_MINHASH_HEX_BUF + CBM_MINHASH_JSON_OVERHEAD];
+    snprintf(props, sizeof(props), "{\"fp\":\"%s\"}", hex);
+    return cbm_gbuf_upsert_node(gbuf, label, name, name, path, 1, 3, props);
+}
+
+TEST(pipeline_similarity_emits_canonical_edge_at_threshold) {
+    cbm_gbuf_t *gbuf = cbm_gbuf_new("test-proj", "/tmp/test");
+    ASSERT_NOT_NULL(gbuf);
+    cbm_minhash_t original = {0};
+    cbm_minhash_t matches = {0};
+    cbm_minhash_t below_threshold = {0};
+    for (int i = 0; i < 3; i++) {
+        matches.values[i] = 1;
+    }
+    for (int i = CBM_MINHASH_K - 4; i < CBM_MINHASH_K; i++) {
+        below_threshold.values[i] = 2;
+    }
+    int64_t target = similarity_fixture_node(gbuf, "Method", "b", "test.py", &matches);
+    int64_t source = similarity_fixture_node(gbuf, "Function", "a", "test.py", &original);
+    similarity_fixture_node(gbuf, "Function", "c", "test.py", &below_threshold);
+    similarity_fixture_node(gbuf, "Function", "d", "test.rb", &original);
+    similarity_fixture_node(gbuf, "Class", "e", "test.py", &original);
+    cbm_pipeline_ctx_t ctx = {.gbuf = gbuf};
+    int rc = cbm_pipeline_pass_similarity(&ctx);
+    const cbm_gbuf_edge_t **edges = NULL;
+    int count = 0;
+    cbm_gbuf_find_edges_by_type(gbuf, "SIMILAR_TO", &edges, &count);
+    bool edge_matches = count == 1 && edges[0]->source_id == source &&
+                        edges[0]->target_id == target &&
+                        strcmp(edges[0]->properties_json, "{\"jaccard\":0.953,\"same_file\":true}") == 0;
+    cbm_gbuf_free(gbuf);
+    ASSERT_EQ(rc, 0);
+    ASSERT_EQ(count, 1);
+    ASSERT_TRUE(edge_matches);
+    PASS();
+}
+
 TEST(pipeline_complexity_props_independent_of_worker_order) {
     char tmp[256];
     snprintf(tmp, sizeof(tmp), "/tmp/cbm_cx_order_XXXXXX");
@@ -5170,6 +5212,49 @@ TEST(incremental_env_edit_replaces_scoped_envvars) {
     ASSERT_STR_EQ(got, "old=0 new=2 keep=1");
     free(got);
 #endif
+    PASS();
+}
+
+TEST(deploy_image_reference_validation_and_identity) {
+    ASSERT_TRUE(cbm_image_ref_valid("localhost:5000/team/foo__bar:_RC.1"));
+    ASSERT_TRUE(cbm_image_ref_valid("[::1]:5000/team/foo"));
+    ASSERT_TRUE(cbm_image_ref_valid("foo:tag@sha256:0123456789abcdef0123456789abcdef"));
+    ASSERT_FALSE(cbm_image_ref_valid("foo@sha256:0123"));
+    ASSERT_FALSE(cbm_image_ref_valid("foo___bar:tag"));
+    ASSERT_FALSE(cbm_image_ref_valid("foo//bar:tag"));
+    ASSERT_FALSE(cbm_image_ref_valid("<.Values.image>"));
+    ASSERT_FALSE(cbm_image_ref_valid(NULL));
+
+    char tag[4 + 129 + 1] = "foo:";
+    memset(tag + 4, 't', 129);
+    tag[4 + 128] = '\0';
+    ASSERT_TRUE(cbm_image_ref_valid(tag));
+    tag[4 + 128] = 't';
+    ASSERT_FALSE(cbm_image_ref_valid(tag));
+
+    cbm_pipeline_ctx_t ctx = {.gbuf = cbm_gbuf_new("image-ref", "/unused")};
+    ASSERT_NOT_NULL(ctx.gbuf);
+    int64_t redis = cbm_pipeline_image_node(&ctx, "registry-1.docker.io/redis:7");
+    ASSERT_GT(redis, 0);
+    ASSERT_EQ(redis, cbm_pipeline_image_node(&ctx, "index.docker.io/library/redis@sha256:0123"));
+    ASSERT_NEQ(redis, cbm_pipeline_image_node(&ctx, "redis:7"));
+    ASSERT_EQ(cbm_pipeline_image_node(&ctx, "SCRATCH"), 0);
+    const cbm_gbuf_node_t *node = cbm_gbuf_find_by_qn(ctx.gbuf, "__image__docker.io/library/redis");
+    ASSERT_NOT_NULL(node);
+    ASSERT_STR_EQ(node->properties_json,
+                  "{\"repository\":\"docker.io/library/redis\",\"registry\":\"docker.io\"}");
+
+    char long_ref[520];
+    memset(long_ref, 'x', sizeof(long_ref) - 1);
+    long_ref[sizeof(long_ref) - 1] = '\0';
+    int64_t long_image = cbm_pipeline_image_node(&ctx, long_ref);
+    ASSERT_GT(long_image, 0);
+    long_ref[511] = '\0';
+    ASSERT_EQ(long_image, cbm_pipeline_image_node(&ctx, long_ref));
+    long_ref[511] = 'x';
+    long_ref[512] = '$';
+    ASSERT_EQ(cbm_pipeline_image_node(&ctx, long_ref), 0);
+    cbm_gbuf_free(ctx.gbuf);
     PASS();
 }
 
@@ -9936,6 +10021,41 @@ TEST(pipeline_full_cancel_after_destination_prepare_preserves_previous_generatio
     ASSERT_EQ(cancelled_rc, CBM_PIPELINE_ABORT_PRESERVE_DB);
     ASSERT_EQ(before_count, 1);
     ASSERT_EQ(after_count, 0);
+    ASSERT_EQ(stage_count, 0);
+    PASS();
+}
+
+TEST(pipeline_stage_install_rename_failure_keeps_destination_and_releases_owner) {
+    char tmp[256];
+    snprintf(tmp, sizeof(tmp), "/tmp/cbm_stage_install_rename_XXXXXX");
+    ASSERT_NOT_NULL(cbm_mkdtemp(tmp));
+    char db_path[512];
+    snprintf(db_path, sizeof(db_path), "%s/generation.db", tmp);
+    cbm_store_t *store = cbm_store_open_path(db_path);
+    ASSERT_NOT_NULL(store);
+    ASSERT_EQ(cbm_store_upsert_project(store, "previous", tmp), CBM_STORE_OK);
+    cbm_store_close(store);
+
+    char *stage = cbm_pipeline_create_staging_path(db_path);
+    ASSERT_NOT_NULL(stage);
+    /* Leave the owner lock in place and make the final rename fail. */
+    ASSERT_EQ(cbm_unlink(stage), 0);
+    int rc = cbm_pipeline_finalize_staged_generation(stage, db_path, NULL, true);
+    int stage_count = count_generation_stage_artifacts(tmp, "generation.db");
+    free(stage);
+
+    cbm_project_t previous = {0};
+    store = cbm_store_open_path_query(db_path);
+    ASSERT_NOT_NULL(store);
+    int previous_rc = cbm_store_get_project(store, "previous", &previous);
+    free((char *)previous.name);
+    free((char *)previous.indexed_at);
+    free((char *)previous.root_path);
+    cbm_store_close(store);
+    th_rmtree(tmp);
+
+    ASSERT_EQ(rc, CBM_PIPELINE_PERSIST_FAILED);
+    ASSERT_EQ(previous_rc, CBM_STORE_OK);
     ASSERT_EQ(stage_count, 0);
     PASS();
 }
@@ -32963,9 +33083,9 @@ TEST(pipeline_python_iris_cls_class_aware_calls) {
  * hit. It used to write nodes_fts with a hand-rolled four-column INSERT of
  * its own; with a fifth `body` column that literal leaves prose NULL for every
  * node arriving by delta, invisibly — a full reindex still looks perfect.
- * Routing the write through cbm_store_fts_rebuild() is what this test binds:
- * revert pipeline_delta.c to a four-column INSERT and it fails. */
-TEST(pipeline_delta_patch_indexes_docstring_into_fts_body) {
+ * Check that the delta patch retains the source prose for the final staged
+ * publisher's shared FTS refresh. */
+TEST(pipeline_delta_patch_preserves_docstrings_for_fts) {
     char *td = th_mktempdir("cbm_delta_fts");
     ASSERT_NOT_NULL(td);
     char dbpath[512];
@@ -32999,6 +33119,10 @@ TEST(pipeline_delta_patch_indexes_docstring_into_fts_body) {
 
     ASSERT_EQ(cbm_delta_patch(store, proj, gb, max_db_id, NULL, 0), 0);
     cbm_gbuf_free(gb);
+    ASSERT_EQ(cbm_store_begin(store), CBM_STORE_OK);
+    ASSERT_EQ(cbm_store_fts_refresh_closure(store, NULL, NULL), CBM_STORE_OK);
+    ASSERT_EQ(cbm_store_commit(store), CBM_STORE_OK);
+
 
     /* nodes_fts is contentless, so a column-filtered MATCH is the only way to
      * observe WHICH column a token landed in — and the only assertion that
@@ -35240,6 +35364,7 @@ SUITE(pipeline) {
     RUN_TEST(pipeline_env_access_configures_sequential_parallel_parity);
     RUN_TEST(pipeline_call_reference_sequential_parallel_edge_set_parity);
     RUN_TEST(pipeline_complexity_props_independent_of_worker_order);
+    RUN_TEST(pipeline_similarity_emits_canonical_edge_at_threshold);
     RUN_TEST(pipeline_incremental_cross_file_call_reference_matches_fresh_full);
     RUN_TEST(pipeline_registry_ranks_by_extractor_verdict_full_and_incremental);
     RUN_TEST(pipeline_registry_ranks_test_doubles_last_full_and_incremental);
@@ -35640,7 +35765,7 @@ SUITE(pipeline) {
     RUN_TEST(pipeline_ensemble_routing_attr_does_not_leak_across_items);
     RUN_TEST(pipeline_ensemble_routing_settings_targets);
     RUN_TEST(pipeline_ensemble_routing_unterminated_item_is_safe);
-    RUN_TEST(pipeline_delta_patch_indexes_docstring_into_fts_body);
+    RUN_TEST(pipeline_delta_patch_preserves_docstrings_for_fts);
     RUN_TEST(pipeline_markdown_and_config_prose_reaches_fts_body);
     RUN_TEST(pipeline_semantic_edges_no_functions);
     RUN_TEST(pipeline_semantic_batched_matches_unbatched);
@@ -35682,6 +35807,7 @@ SUITE(pipeline_semantic_manifest_repro) {
     RUN_TEST(incremental_edit_keeps_retrofit_http_calls_issue2723);
     RUN_TEST(incremental_compose_edit_replaces_build_edges);
     RUN_TEST(incremental_env_edit_replaces_scoped_envvars);
+    RUN_TEST(deploy_image_reference_validation_and_identity);
     RUN_TEST(incremental_image_split_change_rebuilds);
     RUN_TEST(incremental_helm_values_edit_keeps_chart_edge);
     RUN_TEST(incremental_werf_values_edit_keeps_chart_edge);
@@ -35768,6 +35894,7 @@ SUITE(pipeline_semantic_manifest_repro) {
     RUN_TEST(pipeline_existing_artifact_refreshes_after_default_forced_full_reindex);
     RUN_TEST(pipeline_full_cancel_after_predump_preserves_previous_generation);
     RUN_TEST(pipeline_full_cancel_after_destination_prepare_preserves_previous_generation);
+    RUN_TEST(pipeline_stage_install_rename_failure_keeps_destination_and_releases_owner);
     RUN_TEST(pipeline_full_persist_failure_after_stage_dump_preserves_previous_generation);
     RUN_TEST(pipeline_incremental_persist_failure_preserves_previous_generation_and_retries);
     RUN_TEST(pipeline_incremental_successful_publication_preserves_adr);

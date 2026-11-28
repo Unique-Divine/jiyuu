@@ -33,7 +33,6 @@
 #include "daemon/version_cohort.h"
 #include "mcp/mcp.h"
 #include "mcp/index_supervisor.h"
-#include "mcp/test_impact_engine.h"
 #include "cli/cli.h"
 #include "cli/runtime_settings.h"
 #include "foundation/platform.h"
@@ -1289,7 +1288,7 @@ static int main_run_allow_root(int argc, char **argv) {
     return 0;
 }
 
-/* Keep the values in sync with Subcommand in jiyuu-mori/src/ffi.rs. */
+/* Keep the values in sync with Subcommand in src/cli/startup.rs. */
 typedef enum {
     MAIN_SUBCOMMAND_NONE = 0,
     MAIN_SUBCOMMAND_VERSION,
@@ -1304,54 +1303,46 @@ typedef enum {
     MAIN_SUBCOMMAND_CONFIG,
 } main_subcommand_t;
 
-#ifdef CBM_AS_LIBRARY
-extern cbm_daemon_process_role_t cbm_rust_main_role(int argc, char *const argv[]);
 extern main_subcommand_t cbm_rust_main_subcommand(int argc, char *const argv[], int *next_arg);
-#else
-static main_subcommand_t main_c_subcommand(int argc, char *const argv[], int *next_arg) {
-    static const struct {
-        const char *name;
-        main_subcommand_t subcommand;
-    } commands[] = {
-        {"--version", MAIN_SUBCOMMAND_VERSION},
-        {"--help", MAIN_SUBCOMMAND_HELP},
-        {"-h", MAIN_SUBCOMMAND_HELP},
-        {"allow-root", MAIN_SUBCOMMAND_ALLOW_ROOT},
-        {"cli", MAIN_SUBCOMMAND_CLI},
-        {"hook-augment", MAIN_SUBCOMMAND_HOOK_AUGMENT},
-        {"test-impact", MAIN_SUBCOMMAND_TEST_IMPACT},
-        {"install", MAIN_SUBCOMMAND_INSTALL},
-        {"uninstall", MAIN_SUBCOMMAND_UNINSTALL},
-        {"update", MAIN_SUBCOMMAND_UPDATE},
-        {"config", MAIN_SUBCOMMAND_CONFIG},
-    };
-    for (int i = SKIP_ONE; i < argc; i++) {
-        for (size_t j = 0; j < sizeof(commands) / sizeof(commands[0]); j++) {
-            if (strcmp(argv[i], commands[j].name) == 0) {
-                *next_arg = i + SKIP_ONE;
-                return commands[j].subcommand;
-            }
-        }
-    }
-    *next_arg = argc;
-    return MAIN_SUBCOMMAND_NONE;
-}
-#endif
 
-static int handle_subcommand(int argc, char **argv, cbm_project_lock_manager_t *project_locks,
-                             main_local_maintenance_context_t *maintenance_context) {
+static void main_init_diagnostics(bool quiet_by_default, bool worker) {
+    cbm_cli_set_version(CBM_VERSION);
+    cbm_profile_init();
+    cbm_log_init_for_process(quiet_by_default, worker);
+}
+
+static void main_enable_requested_profile(int argc, char **argv) {
     /* Apply --profile even when it follows the selected command. */
     for (int i = SKIP_ONE; i < argc; i++) {
         if (strcmp(argv[i], "--profile") == 0) {
             cbm_profile_enable();
         }
     }
-    int next_arg;
+}
+
 #ifdef CBM_AS_LIBRARY
-    main_subcommand_t subcommand = cbm_rust_main_subcommand(argc, argv, &next_arg);
-#else
-    main_subcommand_t subcommand = main_c_subcommand(argc, argv, &next_arg);
+/* Called only for the informational role, before any database or parser use. */
+const char *cbm_linked_startup_prepare_info(int argc, char **argv);
+const char *cbm_linked_startup_prepare_info(int argc, char **argv) {
+    cbm_alloc_init();
+    main_init_diagnostics(true, false);
+    main_enable_requested_profile(argc, argv);
+    return CBM_VERSION;
+}
+
+void cbm_linked_startup_print_help(void);
+void cbm_linked_startup_print_help(void) {
+    print_help();
+}
 #endif
+
+extern int cbm_rust_test_impact_cli(int argc, char **argv, FILE *out, FILE *err);
+
+static int handle_subcommand(int argc, char **argv, cbm_project_lock_manager_t *project_locks,
+                             main_local_maintenance_context_t *maintenance_context) {
+    main_enable_requested_profile(argc, argv);
+    int next_arg;
+    main_subcommand_t subcommand = cbm_rust_main_subcommand(argc, argv, &next_arg);
     argc -= next_arg;
     argv += next_arg;
     switch (subcommand) {
@@ -1372,7 +1363,7 @@ static int handle_subcommand(int argc, char **argv, cbm_project_lock_manager_t *
         return cbm_cmd_hook_augment(argc, argv);
     case MAIN_SUBCOMMAND_TEST_IMPACT:
         cbm_mem_init(cbm_mem_ram_fraction_for_total(cbm_system_info().total_ram));
-        return cbm_test_impact_cli(argc, argv);
+        return cbm_rust_test_impact_cli(argc, argv, stdout, stderr);
     case MAIN_SUBCOMMAND_INSTALL:
         return cbm_cmd_install(argc, argv);
     case MAIN_SUBCOMMAND_UNINSTALL:
@@ -2886,11 +2877,7 @@ int main(int argc, char **argv) {
         }
     }
 #endif
-#ifdef CBM_AS_LIBRARY
-    cbm_daemon_process_role_t role = cbm_rust_main_role(argc, argv);
-#else
     cbm_daemon_process_role_t role = cbm_daemon_process_role(argc, argv);
-#endif
     if (role == CBM_DAEMON_PROCESS_WORKER) {
         /* Before this process writes ANYTHING. A worker's stderr is a file the
          * supervisor keeps for post-mortem, and setvbuf only binds before a
@@ -2919,8 +2906,6 @@ int main(int argc, char **argv) {
             return EXIT_FAILURE;
         }
     }
-    cbm_cli_set_version(CBM_VERSION);
-    cbm_profile_init();
     /* The library default stays INFO (embedders and the test runner observe
      * INFO records through the sink); the process policy is applied here, as
      * early as argv can be classified: thin frontends go quiet, detached
@@ -2928,7 +2913,7 @@ int main(int argc, char **argv) {
      * INFO because those records are their supervisor's quiet-timeout
      * heartbeat. */
     bool quiet_log_default = role != CBM_DAEMON_PROCESS_DAEMON && role != CBM_DAEMON_PROCESS_WORKER;
-    cbm_log_init_for_process(quiet_log_default, role == CBM_DAEMON_PROCESS_WORKER);
+    main_init_diagnostics(quiet_log_default, role == CBM_DAEMON_PROCESS_WORKER);
     if (role == CBM_DAEMON_PROCESS_LOCAL_CLI && main_cli_flag_present(argc, argv, "--quiet")) {
         /* Apply quiet before local coordination begins, not only once tool
          * dispatch is reached, so pre-dispatch WARN chatter is suppressed. */

@@ -35,10 +35,12 @@
  * paths and links bind EXACTLY, at 99 % precision on 53 repositories.
  */
 #include "doclink.h"
+#include "markdown_extract.h"
 
 #include "arena.h"
 #include "foundation/constants.h"
 #include "foundation/mem_core.h"
+#include "foundation/sanitized.h"
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -943,15 +945,6 @@ static int32_t md_next_at(const md_list_t *l, int32_t x) {
 /* ── The scan ────────────────────────────────────────────────────── */
 
 typedef struct {
-    uint32_t line;
-    const char *qn;
-    /* Another heading of the file has the same qualified name: the graph keeps
-     * one node for both, which owns only one of the headings, so this
-     * section's references belong to the file. */
-    bool shared_qn;
-} md_section_t;
-
-typedef struct {
     bool in_front;
     bool in_fence;
     bool in_comment;
@@ -961,7 +954,7 @@ typedef struct {
 
 typedef struct {
     CBMExtractCtx *ctx;
-    md_section_t *secs;
+    cbm_markdown_section_owner_t *secs;
     int nsecs;
     char *buf; /* the current line, masked in place */
     int len;
@@ -979,21 +972,6 @@ typedef struct {
     md_list_t blanks; /* runs of spaces and tabs: start, end */
     bool failed;
 } md_scan_t;
-
-static int md_section_cmp(const void *a, const void *b) {
-    const md_section_t *x = (const md_section_t *)a;
-    const md_section_t *y = (const md_section_t *)b;
-    if (x->line != y->line) {
-        return x->line < y->line ? -1 : 1;
-    }
-    return strcmp(x->qn, y->qn);
-}
-
-static int md_section_ptr_qn_cmp(const void *a, const void *b) {
-    const md_section_t *x = *(const md_section_t *const *)a;
-    const md_section_t *y = *(const md_section_t *const *)b;
-    return strcmp(x->qn, y->qn);
-}
 
 static int md_pair_cmp(const void *a, const void *b) {
     const int32_t *x = (const int32_t *)a;
@@ -1063,19 +1041,12 @@ static void md_emit(md_scan_t *s, int syntax, const char *text, int n) {
     if (n <= 0 || memchr(text, MD_MASK, (size_t)n) || !md_clean_text(text, n)) {
         return;
     }
-    int lo = 0;
-    int hi = s->nsecs;
-    while (lo < hi) {
-        int mid = lo + ((hi - lo) / PAIR_LEN);
-        if (s->secs[mid].line <= s->line) {
-            lo = mid + SKIP_ONE;
-        } else {
-            hi = mid;
-        }
-    }
-    const md_section_t *sec = lo > 0 ? &s->secs[lo - SKIP_ONE] : NULL;
-    if (sec && sec->shared_qn) {
-        sec = NULL; /* the file, not the node another heading owns */
+    const cbm_markdown_section_owner_t *sec =
+        mori_markdown_reference_owner(s->secs, (size_t)s->nsecs, s->line);
+    if (sec) {
+        /* Sorting moved these fields in Rust. The QN string stays C-owned. */
+        CBM_MSAN_WRITTEN(&sec->qn, sizeof(sec->qn));
+        CBM_MSAN_WRITTEN(&sec->line, sizeof(sec->line));
     }
     char *raw = cbm_arena_strndup(s->ctx->arena, text, (size_t)n);
     if (!raw) {
@@ -1718,7 +1689,8 @@ static void md_line(md_scan_t *s, md_state_t *st, const char *raw, int len, bool
 
 /* The file's sections: its Section definitions by start line. False only when
  * memory ran out (a file without headings has none, and that is no failure). */
-static bool md_sections(CBMExtractCtx *ctx, CBMArena *a, md_section_t **out, int *count) {
+static bool md_sections(CBMExtractCtx *ctx, CBMArena *a, cbm_markdown_section_owner_t **out,
+                        int *count) {
     const CBMDefArray *defs = &ctx->result->defs;
     int n = 0;
     for (int i = 0; i < defs->count; i++) {
@@ -1730,34 +1702,18 @@ static bool md_sections(CBMExtractCtx *ctx, CBMArena *a, md_section_t **out, int
     if (n == 0) {
         return true;
     }
-    md_section_t *secs = (md_section_t *)cbm_arena_alloc(a, (size_t)n * sizeof(*secs));
+    cbm_markdown_section_owner_t *secs = cbm_arena_alloc(a, (size_t)n * sizeof(*secs));
     if (!secs) {
         return false;
     }
     for (int i = 0; i < defs->count; i++) {
         const CBMDefinition *d = &defs->items[i];
         if (d->label && d->qualified_name && strcmp(d->label, "Section") == 0) {
-            secs[(*count)++] =
-                (md_section_t){.line = d->start_line, .qn = d->qualified_name, .shared_qn = false};
+            secs[(*count)++] = (cbm_markdown_section_owner_t){
+                .line = d->start_line, .qn = d->qualified_name, .shared_qn = false};
         }
     }
-    /* repeated qualified names, found through a copy sorted by name */
-    const md_section_t **by_qn =
-        (const md_section_t **)cbm_arena_alloc(a, (size_t)n * sizeof(*by_qn));
-    if (!by_qn) {
-        return false;
-    }
-    for (int i = 0; i < *count; i++) {
-        by_qn[i] = &secs[i];
-    }
-    qsort(by_qn, (size_t)*count, sizeof(*by_qn), md_section_ptr_qn_cmp);
-    for (int i = SKIP_ONE; i < *count; i++) {
-        if (strcmp(by_qn[i]->qn, by_qn[i - SKIP_ONE]->qn) == 0) {
-            ((md_section_t *)by_qn[i])->shared_qn = true;
-            ((md_section_t *)by_qn[i - SKIP_ONE])->shared_qn = true;
-        }
-    }
-    qsort(secs, (size_t)*count, sizeof(*secs), md_section_cmp);
+    mori_markdown_sort_section_owners(secs, (size_t)*count);
     *out = secs;
     return true;
 }

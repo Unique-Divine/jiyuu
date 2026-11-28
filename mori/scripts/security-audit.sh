@@ -58,11 +58,9 @@ done < <(find "$ROOT/src" -name '*.c' -type f | sort)
 
 # ── 1b. Raw network calls (count-bounded explicit exceptions) ───
 #
-# The graph-UI HTTP server (src/ui/httpd.c) is the one component that owns a
-# listening socket. It is first-party, binds 127.0.0.1 only, and is audited
-# separately by scripts/security-ui.sh (binding + CORS checks), so it is
-# exempt from this scan. Coordination and authenticated UI readiness may use
-# only explicitly count-bounded, helper-scoped AF_UNIX or loopback-v4 calls.
+# scripts/security-ui.sh checks the Rust Graph UI listener separately.
+# Native coordination and authenticated UI readiness use helper-scoped
+# allowances for AF_UNIX or IPv4 loopback calls.
 
 echo ""
 echo "--- Scanning for raw network calls ---"

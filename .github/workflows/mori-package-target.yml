@@ -1,0 +1,393 @@
+name: Mori package target
+
+on:
+  workflow_call:
+    inputs:
+      platform:
+        description: JSON entry from the Mori release matrix
+        type: string
+        required: true
+      source_sha:
+        type: string
+        required: true
+      version:
+        type: string
+        required: true
+      mode:
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build candidate
+    if: inputs.mode != 'prewarm'
+    runs-on: ${{ fromJSON(inputs.platform).runner }}
+    timeout-minutes: 120
+    defaults:
+      run:
+        working-directory: mori
+    env: &build-environment
+      VERSION: ${{ inputs.version }}
+      RUST_TARGET: ${{ fromJSON(inputs.platform).rust_target }}
+      CC: ${{ fromJSON(inputs.platform).goos == 'linux' && 'gcc' || 'cc' }}
+      CXX: ${{ fromJSON(inputs.platform).goos == 'linux' && 'g++' || 'c++' }}
+      MACOSX_DEPLOYMENT_TARGET: "14.0"
+    steps:
+      - &checkout-release-source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.source_sha }}
+      - &install-release-bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.4.3
+      # npm builds the graph UI (mori/graph-ui), which the binary embeds.
+      - &install-release-node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 24
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
+        with:
+          toolchain: stable
+          targets: ${{ fromJSON(inputs.platform).rust_target }}
+      - name: Name the candidate binary
+        run: |
+          echo "BIN=$RUNNER_TEMP/selected/mori" >> "$GITHUB_ENV"
+      - &install-release-linux-dependencies
+        name: Install build dependencies (Linux)
+        if: fromJSON(inputs.platform).goos == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y zlib1g-dev zstd
+      # The macOS SDK ships zlib; the image usually has zstd already.
+      - &install-release-macos-dependencies
+        name: Install build dependencies (macOS)
+        if: fromJSON(inputs.platform).goos == 'darwin'
+        run: command -v zstd || brew install zstd
+      - name: Cache grammar archive
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/jiyuu-mori/grammars
+          key: mori-grammars-${{ hashFiles('mori/grammars.lock.json') }}
+      - name: Fetch grammars
+        run: bun scripts/grammars-fetch.ts
+      # Cargo's build.rs links the libmori-c archive whole. MORI_WITH_UI=1
+      # embeds the graph UI, as scripts/build.sh --with-ui does.
+      # Linux links glibc statically (+crt-static), like the C release's
+      # STATIC=1, so one binary runs on any distro. macOS has no static libc:
+      # the binary links libSystem, libz and libc++ from the OS.
+      - name: Build mori
+        env:
+          MORI_WITH_UI: "1"
+        run: |
+          set -euo pipefail
+          export CFLAGS_EXTRA="-DCBM_VERSION=\"\\\"$VERSION\\\"\""
+          MORI_MAKE_JOBS="$(getconf _NPROCESSORS_ONLN)"
+          export MORI_MAKE_JOBS
+          if [[ "$RUNNER_OS" == Linux ]]; then
+            export RUSTFLAGS="-C target-feature=+crt-static"
+          fi
+          cargo build --release --locked --features c-backend \
+            --target "$RUST_TARGET" --manifest-path jiyuu-mori/Cargo.toml
+          archive_members="$(ar t build/mori-rs/libmori-c.a)"
+          if grep -Fxq index_drivers_reference.o <<< "$archive_members"; then
+            echo "::error::release archive includes the retired C index drivers"
+            exit 1
+          fi
+          mkdir -p "$(dirname "$BIN")"
+          cp "../target/$RUST_TARGET/release/mori" "$BIN.unstripped"
+      - name: Verify retired native implementations before stripping
+        run: |
+          set -euo pipefail
+          archive_members="$(ar t build/mori-rs/libmori-c.a)"
+          for object in fts_writer_reference.o config_text_edit.o pass_complexity.o \
+            pass_similarity.o pass_doclinks.o doc_links_pdf.o; do
+            if grep -Fxq "$object" <<< "$archive_members"; then
+              echo "::error::release archive includes retired object $object"
+              exit 1
+            fi
+          done
+          defined_symbols="$(nm "$BIN.unstripped" | awk 'NF >= 3 && $2 ~ /^[Tt]$/ {sub(/^_/, "", $NF); print $NF}')"
+          # Production frame I/O uses the Rust transfer functions directly.
+          # The header-only wrapper can be dead-stripped.
+          for symbol in mori_fts_write \
+            mori_complexity_buffer mori_complexity_stage mori_similarity_buffer \
+            mori_explicit_override mori_doc_file_links_run mori_pdf_links_resolve \
+            cbm_rust_watcher_poll mori_ipc_send mori_ipc_receive mori_daemon_job_recover; do
+            if ! grep -Fxq "$symbol" <<< "$defined_symbols"; then
+              echo "::error::release executable is missing $symbol"
+              exit 1
+            fi
+          done
+          if ! grep -Eq '^cbm_text_(upsert_managed_block(_limited)?|write_owned_document(_if_unchanged)?|migrate_owned_document(_mode)?|owned_document_status)$' <<< "$defined_symbols"; then
+            echo "::error::release executable is missing the Rust managed-text editor"
+            exit 1
+          fi
+          if grep -Fxq cbm_store_fts_write_reference <<< "$defined_symbols"; then
+            echo "::error::release executable includes the retired C FTS writer"
+            exit 1
+          fi
+          if grep -Eq '^cbm_text_set_.*_hook_for_testing$' <<< "$defined_symbols"; then
+            echo "::error::release executable includes managed-text test hooks"
+            exit 1
+          fi
+          {
+            printf '### Native retirement on %s\n' "$RUST_TARGET"
+            shasum -a 256 "$BIN.unstripped" build/mori-rs/libmori-c.a
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Strip and check static linking (Linux)
+        if: fromJSON(inputs.platform).goos == 'linux'
+        run: |
+          set -euo pipefail
+          strip --strip-all -o "$BIN" "$BIN.unstripped"
+          file "$BIN"
+          # ldd exits 1 on a static binary, so read its message instead.
+          linkage="$(ldd "$BIN" 2>&1 || true)"
+          echo "$linkage"
+          grep -Eq 'not a dynamic executable|statically linked' <<< "$linkage"
+      # Apple's strip rejects --strip-all, and stripping breaks the linker's
+      # ad-hoc signature, which arm64 macOS needs to run the binary at all.
+      # Re-sign ad hoc, as upstream did. There is no Developer ID signature
+      # and no notarization.
+      - name: Strip, sign ad hoc and check linking (macOS)
+        if: fromJSON(inputs.platform).goos == 'darwin'
+        env:
+          ARCH: ${{ fromJSON(inputs.platform).arch }}
+        run: |
+          set -euo pipefail
+          cp "$BIN.unstripped" "$BIN"
+          strip "$BIN"
+          codesign --sign - --force --timestamp=none "$BIN"
+          codesign --verify --strict --verbose=2 "$BIN"
+          file "$BIN"
+          archs="$(lipo -archs "$BIN")"
+          [ "$archs" = "$ARCH" ]
+          otool -l "$BIN" | grep -A4 LC_BUILD_VERSION
+          load_cmds="$(otool -l "$BIN")"
+          printf '%s\n' "$load_cmds" | grep -E 'minos 14\.0$' >/dev/null
+          # Only libraries every Mac has: nothing from Homebrew or elsewhere.
+          libs="$(otool -L "$BIN" | tail -n +2 | awk '{print $1}')"
+          echo "$libs"
+          if grep -Ev '^(/usr/lib/|/System/Library/)' <<< "$libs"; then
+            echo "::error::links a library outside the OS"
+            exit 1
+          fi
+      - name: Smoke-test version, a tiny index and the graph UI
+        run: |
+          set -euo pipefail
+          got="$("$BIN" --version)"
+          if [[ "$got" != "mori $VERSION" ]]; then
+            echo "::error::--version printed '$got'"
+            exit 1
+          fi
+          # The runtime dir must exist and stay short: it holds the CLI
+          # coordination socket, and macOS caps socket paths at 104 bytes,
+          # which its default mktemp dir under /var/folders nearly fills.
+          scratch="$(mktemp -d /tmp/mori.XXXXXX)"
+          repo="$scratch/repo"
+          mkdir -p "$repo" "$scratch/home"
+          mkdir -m 700 "$scratch/run"
+          printf 'def greet(name):\n    return helper(name)\n\n' \
+            > "$repo/app.py"
+          printf 'def helper(name):\n    return "hi " + name\n' \
+            >> "$repo/app.py"
+          export HOME="$scratch/home"
+          export CBM_CACHE_DIR="$scratch/cache"
+          export CBM_RUNTIME_DIR="$scratch/run"
+          CBM_PROFILE=1 "$BIN" cli index_repository --repo-path "$repo" \
+            | tee "$scratch/index.json"
+          project="$(jq -r .project "$scratch/index.json")"
+          test "$(jq -r .status "$scratch/index.json")" = indexed
+          grep -F 'msg=pipeline.full_build_driver implementation=rust' "$CBM_CACHE_DIR"/logs/.worker-log-*
+          grep -F 'msg=pipeline.source_publish implementation=rust' "$CBM_CACHE_DIR"/logs/.worker-log-*
+          "$BIN" cli trace_path --project "$project" --function-name greet \
+            --direction outbound | tee "$scratch/trace"
+          grep -q '\.app\.helper 1$' "$scratch/trace"
+          # The embedded graph UI: a daemon on a free port serves its index.
+          port="$(python3 -c 'import socket; s = socket.socket(); \
+            s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')"
+          CBM_LOG_LEVEL=debug "$BIN" daemon start --port="$port"
+          trap '"$BIN" daemon stop || true' EXIT
+          for _ in $(seq 1 30); do
+            if curl -fsS "http://127.0.0.1:$port/" -o "$scratch/ui.html" \
+              2>/dev/null; then
+              break
+            fi
+            sleep 1
+          done
+          head -c 300 "$scratch/ui.html"; echo
+          grep -qi '<!doctype html>' "$scratch/ui.html"
+          # Exercise the warning callback through the stripped release binary.
+          "$BIN" cli query_graph --project "$project" --format json \
+            --query "MATCH (a {name: 'greet'})-[:CALLS*1..20]->(b) RETURN b.name" \
+            | tee "$scratch/query.json"
+          jq -e '.warning | contains("variable-length hop range clamped")' "$scratch/query.json"
+          grep -F 'msg=query_graph.evaluator backend=rust' "$CBM_CACHE_DIR/logs/cbm-daemon.log"
+      # 0.13.1 had no Intel macOS archive. All targets run the smoke tests
+      # and the separate CLI comparison with the pinned C build.
+      - name: Replay graph fixtures against the published C 0.13.1
+        if: fromJSON(inputs.platform).c_reference_sha256 != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TARGET: ${{ fromJSON(inputs.platform).target }}
+          REFERENCE_SHA256: ${{ fromJSON(inputs.platform).c_reference_sha256 }}
+        run: |
+          set -euo pipefail
+          reference_dir="$(mktemp -d "$RUNNER_TEMP/mori-reference.XXXXXX")"
+          trap 'rm -rf "$reference_dir"' EXIT
+          archive="codebase-memory-mcp-0.13.1-$TARGET.tar.gz"
+          gh release download mori/v0.13.1 --repo "$GITHUB_REPOSITORY" \
+            --pattern "$archive" --dir "$reference_dir"
+          printf '%s  %s\n' "$REFERENCE_SHA256" "$reference_dir/$archive" | shasum -a 256 -c
+          tar -xzf "$reference_dir/$archive" -C "$reference_dir" codebase-memory-mcp
+          reference="$reference_dir/codebase-memory-mcp"
+          test "$("$reference" --version)" = "codebase-memory-mcp 0.13.1"
+          replay="$(mktemp -d /tmp/mori-release-replay.XXXXXX)"
+          python3 parity/parity.py ci --bin-a "$reference" --bin-b "$BIN" \
+            --profile --export-b rust --verify-export \
+            --work "$replay/w" --rt-prefix "$replay/r"
+          grep -E 'msg=pass\.route_nodes\.graphql routes=[1-9][0-9]* .*planner=rust writer=rust' \
+            "$replay"/w/b/cache/logs/.worker-log-*
+          python3 - "$replay/w/b/cache" <<'PY'
+          from pathlib import Path
+          import sqlite3
+          import sys
+
+          [graph] = Path(sys.argv[1]).glob("*-fx-polyglot.db")
+          with sqlite3.connect(graph.as_uri() + "?mode=ro", uri=True) as database:
+              row = database.execute("""
+                  SELECT h.name
+                  FROM edges AS e
+                  JOIN nodes AS h ON h.id = e.source_id
+                  JOIN nodes AS r ON r.id = e.target_id
+                  WHERE e.type = 'HANDLES' AND r.qualified_name = '__graphql__Query.fixtureItem'
+              """).fetchone()
+          if row != ("FixtureItem",):
+              raise SystemExit(f"FixtureItem resolver missing from the graph: {row}")
+          PY
+      - name: Package archive
+        id: package
+        env:
+          TARGET: ${{ fromJSON(inputs.platform).target }}
+          GOOS: ${{ fromJSON(inputs.platform).goos }}
+          GOARCH: ${{ fromJSON(inputs.platform).goarch }}
+        run: |
+          set -euo pipefail
+          asset="$(bun scripts/release.ts asset-name "$VERSION" "$TARGET")"
+          sha="$(shasum -a 256 "$BIN" | cut -d' ' -f1)"
+          scripts/package-release.sh "$GOOS" "$GOARCH" \
+            --selected-binary "$BIN" --expected-sha256 "$sha" \
+            --out-dir "$RUNNER_TEMP/dist" --archive-name "${asset%.tar.gz}" \
+            --binary-name mori
+          tar -tzvf "$RUNNER_TEMP/dist/$asset"
+          # C collation: macOS sort would otherwise put lowercase first.
+          members="$(tar -tzf "$RUNNER_TEMP/dist/$asset" | LC_ALL=C sort \
+            | tr '\n' ' ')"
+          want='LICENSE NOTICE THIRD_PARTY_NOTICES.md mori '
+          if [[ "$members" != "$want" ]]; then
+            echo "::error::unexpected archive members: $members"
+            exit 1
+          fi
+          echo "asset=$asset" >> "$GITHUB_OUTPUT"
+      # Only the .tar.gz ships. package-release.sh also writes an .mcpb
+      # bundle for darwin, which this upload leaves out.
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: mori-build-${{ fromJSON(inputs.platform).target }}
+          path: ${{ runner.temp }}/dist/${{ steps.package.outputs.asset }}
+          if-no-files-found: error
+          overwrite: true
+          retention-days: ${{ inputs.mode == 'daily' && 7 || 0 }}
+
+  build-reference:
+    name: Build C reference
+    runs-on: ${{ fromJSON(inputs.platform).runner }}
+    timeout-minutes: 120
+    defaults:
+      run:
+        working-directory: mori
+    env: *build-environment
+    steps:
+      - *checkout-release-source
+      - *install-release-bun
+      - *install-release-node
+      - *install-release-linux-dependencies
+      - *install-release-macos-dependencies
+      - name: Identify the frozen C release reference
+        id: c-oracle
+        env: &oracle-environment
+          MORI_WITH_UI: "1"
+          MORI_REFERENCE_VERSION: ${{ inputs.version }}
+          TEST_SEAMS: "0"
+        run: |
+          key="$(python3 scripts/c_reference_cache.py key "$RUST_TARGET")"
+          printf 'key=%s\n' "$key" >> "$GITHUB_OUTPUT"
+          printf 'grammars=%s\n' "$(python3 scripts/c_reference_cache.py grammar-pin)" >> "$GITHUB_OUTPUT"
+      - name: Cache the frozen C release reference
+        id: c-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/mori-release-c-reference
+          key: mori-c-reference-${{ steps.c-oracle.outputs.key }}
+      - name: Cache the oracle grammar archive
+        if: steps.c-cache.outputs.cache-hit != 'true'
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/jiyuu-mori/grammars
+          key: mori-grammars-${{ steps.c-oracle.outputs.grammars }}
+      - name: Verify or build the frozen C release reference
+        env: *oracle-environment
+        run: |
+          MORI_MAKE_JOBS="$(getconf _NPROCESSORS_ONLN)"
+          export MORI_MAKE_JOBS
+          python3 scripts/c_reference_cache.py ensure "$RUST_TARGET" "$RUNNER_TEMP/mori-release-c-reference"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: inputs.mode != 'prewarm'
+        with:
+          name: mori-oracle-${{ fromJSON(inputs.platform).target }}
+          path: ${{ runner.temp }}/mori-release-c-reference/
+          compression-level: 1
+          if-no-files-found: error
+          overwrite: true
+          retention-days: ${{ inputs.mode == 'daily' && 7 || 0 }}
+
+  cli-parity:
+    name: CLI parity
+    needs: [build, build-reference]
+    runs-on: ${{ fromJSON(inputs.platform).runner }}
+    defaults:
+      run:
+        working-directory: mori
+    steps:
+      - *checkout-release-source
+      - *install-release-bun
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: mori-build-${{ fromJSON(inputs.platform).target }}
+          path: ${{ runner.temp }}/mori-release-package
+          digest-mismatch: error
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: mori-oracle-${{ fromJSON(inputs.platform).target }}
+          path: ${{ runner.temp }}/mori-release-c-reference
+          digest-mismatch: error
+      - name: CLI parity with codebase-memory-mcp
+        env:
+          VERSION: ${{ inputs.version }}
+          TARGET: ${{ fromJSON(inputs.platform).target }}
+          RUST_TARGET: ${{ fromJSON(inputs.platform).rust_target }}
+        run: |
+          set -euo pipefail
+          asset="$(bun scripts/release.ts asset-name "$VERSION" "$TARGET")"
+          mkdir -p "$RUNNER_TEMP/selected"
+          tar -xzf "$RUNNER_TEMP/mori-release-package/$asset" -C "$RUNNER_TEMP/selected" mori
+          reference="$RUNNER_TEMP/mori-release-c-reference"
+          # GitHub artifacts do not preserve file permissions.
+          chmod +x "$reference/codebase-memory-mcp"
+          python3 scripts/c_reference_cache.py verify-release "$RUST_TARGET" "$VERSION" "$reference"
+          bun scripts/cli-parity.ts --mori "$RUNNER_TEMP/selected/mori" --c "$reference/codebase-memory-mcp"

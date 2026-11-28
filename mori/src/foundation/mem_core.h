@@ -95,7 +95,18 @@ void *cbm_realloc(cbm_mem_class_t cls, void *block, size_t bytes);
 char *cbm_mem_strdup(cbm_mem_class_t cls, const char *s);
 void cbm_free(cbm_mem_class_t cls, void *block);
 
+/* Rust-assembled discovery and manifest results cross into C destructors
+ * that use free(). Preserve that allocator domain, including linker wrappers. */
+void *cbm_result_realloc(void *block, size_t bytes);
+char *cbm_result_strdup(const char *text);
+void cbm_result_free(void *block);
+
 #if defined(CBM_MEM_TEST_API) && CBM_MEM_TEST_API
+/* Test-only, current-thread fault for the next cbm_alloc of this class and size. */
+void cbm_mem_test_fail_alloc_size(cbm_mem_class_t cls, size_t bytes);
+/* Disarm and clear the hook, returning whether the requested fault occurred. */
+bool cbm_mem_test_reset_alloc_failure(void);
+
 /* Test-only, current-thread fault: fail exactly the next cbm_realloc for this
  * class, including realloc(NULL). Other classes and allocation operations are
  * unaffected. Always reset immediately after the operation under test. */

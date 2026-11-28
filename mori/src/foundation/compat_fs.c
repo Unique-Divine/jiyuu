@@ -1258,6 +1258,14 @@ int cbm_exec_no_shell(const char *const *argv) {
 
 #endif /* _WIN32 */
 
+bool cbm_test_impact_cli_write(FILE *stream, const unsigned char *bytes, size_t len, bool newline) {
+    return fwrite(bytes, 1, len, stream) == len && (!newline || fputc('\n', stream) != EOF);
+}
+
+bool cbm_test_impact_cli_close(FILE *stream) {
+    return fclose(stream) == 0;
+}
+
 /* Canonicalize an EXISTING path (collapse `..`, resolve links/junctions):
  * realpath on POSIX; a final path queried from an opened handle on Windows.
  * The previous Windows callers used the ANSI CRT (_access/_fullpath) on UTF-8

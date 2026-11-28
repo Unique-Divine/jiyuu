@@ -2109,8 +2109,8 @@ static void gb_gql_ops_free(cbm_gbuf_t *gb) {
     }
 }
 
-int64_t cbm_gbuf_insert_edge(cbm_gbuf_t *gb, int64_t source_id, int64_t target_id, const char *type,
-                             const char *properties_json) {
+static int64_t gbuf_insert_edge(cbm_gbuf_t *gb, int64_t source_id, int64_t target_id,
+                                const char *type, const char *properties_json, bool strict_payload) {
     if (!gb || !type) {
         return 0;
     }
@@ -2134,7 +2134,11 @@ int64_t cbm_gbuf_insert_edge(cbm_gbuf_t *gb, int64_t source_id, int64_t target_i
             }
         }
         if (replace) {
-            existing->properties_json = (char *)gb_intern(gb, properties_json);
+            const char *replacement = gb_intern(gb, properties_json);
+            if (strict_payload && !replacement) {
+                return 0;
+            }
+            existing->properties_json = (char *)replacement;
         }
         return existing->id;
     }
@@ -2151,6 +2155,10 @@ int64_t cbm_gbuf_insert_edge(cbm_gbuf_t *gb, int64_t source_id, int64_t target_i
     edge->target_id = target_id;
     edge->type = (char *)gb_intern(gb, type);
     edge->properties_json = (char *)gb_intern(gb, properties_json);
+    if (strict_payload && (!edge->type || !edge->properties_json)) {
+        cbm_free(CBM_MEM_CLASS_GBUF_EDGE, edge);
+        return 0;
+    }
 
     /* Publication reads this primary array. Do not register a missing edge
      * in secondary indexes or report success when array growth fails. */
@@ -2168,6 +2176,12 @@ int64_t cbm_gbuf_insert_edge(cbm_gbuf_t *gb, int64_t source_id, int64_t target_i
     register_edge_in_indexes(gb, edge);
 
     return id;
+}
+
+int64_t cbm_gbuf_insert_edge(cbm_gbuf_t *gb, int64_t source_id, int64_t target_id, const char *type,
+                             const char *properties_json) {
+    /* Worker callers rely on keeping a relationship when its payload is unavailable. */
+    return gbuf_insert_edge(gb, source_id, target_id, type, properties_json, false);
 }
 
 int cbm_gbuf_find_edges_by_source_type(const cbm_gbuf_t *gb, int64_t source_id, const char *type,
@@ -2328,18 +2342,31 @@ int cbm_gbuf_delete_edges(cbm_gbuf_t *gb, const cbm_gbuf_edge_t **edges, int n) 
 
 /* ── Merge ───────────────────────────────────────────────────────── */
 
-/* Free remap hash table entries (key = heap string, value = heap int64_t*) */
-static void free_remap_entry(const char *key, void *val, void *ud) {
-    (void)ud;
-    cbm_free(CBM_MEM_CLASS_GBUF_INDEX, (void *)key);
-    cbm_free(CBM_MEM_CLASS_GBUF_INDEX, val);
+typedef int64_t (*gb_merge_node_fn)(cbm_gbuf_t *, const cbm_gbuf_t *,
+                                    const cbm_gbuf_node_t *);
+typedef int64_t (*gb_merge_edge_fn)(cbm_gbuf_t *, int64_t, int64_t, const char *,
+                                    const char *);
+typedef void (*gb_merge_account_fn)(size_t, bool);
+
+extern bool mori_gbuf_source_wins(const cbm_gbuf_node_t *existing, int existing_rank,
+                                 const cbm_gbuf_node_t *source, int source_rank);
+extern int mori_gbuf_merge_rows(cbm_gbuf_t *dst, const cbm_gbuf_t *src,
+                               cbm_gbuf_node_t *const *nodes, int node_count,
+                               cbm_gbuf_edge_t *const *edges, int edge_count,
+                               gb_merge_node_fn merge_node, gb_merge_edge_fn insert_edge,
+                               gb_merge_account_fn account_remap);
+
+static void merge_account_remap(size_t bytes, bool add) {
+    if (add) {
+        cbm_mem_class_add_external(CBM_MEM_CLASS_GBUF_INDEX, bytes);
+    } else {
+        cbm_mem_class_remove_external(CBM_MEM_CLASS_GBUF_INDEX, bytes);
+    }
 }
 
-/* Handle QN collision: update dst node fields (src wins), record remap if IDs differ.
- * label/file_path are re-interned into dst's pool (sn's pointers belong to src). */
-static void merge_update_existing(cbm_gbuf_t *dst, cbm_gbuf_node_t *existing,
-                                  const cbm_gbuf_node_t *sn, const gb_span_vec_t *sn_spans,
-                                  CBMHashTable **remap) {
+/* Apply the winning definition using the destination buffer's allocator and indexes. */
+static bool merge_update_existing(cbm_gbuf_t *dst, cbm_gbuf_node_t *existing,
+                                  const cbm_gbuf_node_t *sn, const gb_span_vec_t *sn_spans) {
     /* Same guard as cbm_gbuf_upsert_node: a per-file "Module" def coming from a
      * worker-local gbuf must not touch the structural directory node ("Project"
      * root or "Folder") that shares its QN in a directory-based-module language
@@ -2348,101 +2375,77 @@ static void merge_update_existing(cbm_gbuf_t *dst, cbm_gbuf_node_t *existing,
      * for that package collides here; unconditional "src wins" relabelled the
      * directory node to Module and set its file_path to whichever worker merged
      * LAST — the nondeterministic USAGE-source misattribution of #787. Keep the
-     * structural node intact; the ID remap below still redirects the worker's
+     * structural node intact; the ID remap still redirects the worker's
      * edges onto the canonical node. */
     bool module_on_container =
         existing->label && sn->label && strcmp(sn->label, "Module") == 0 &&
         (strcmp(existing->label, "Project") == 0 || strcmp(existing->label, "Folder") == 0);
-    if (!module_on_container) {
-        /* Canonical collision winner (determinism) — mirrors
-         * cbm_gbuf_upsert_node exactly. Distinct source entities can share a
-         * QN (C: struct/function/macro with one name); unconditional "src
-         * wins" made the survivor depend on worker merge order, flickering
-         * the node set (and every downstream consumer) run to run. Winner =
-         * smallest file_path, then LARGEST start_line, then largest
-         * name/label — one total order, commutative, scheduling-free; a full
-         * tie is the same entity → refresh from src. A definition beats a
-         * macro ahead of all of these (gb_qn_claim_rank). */
-        int c = gb_qn_claim_rank(existing->label, existing->properties_json) -
-                gb_qn_claim_rank(sn->label, sn->properties_json);
-        if (c == 0) {
-            c = strcmp(sn->file_path ? sn->file_path : "",
-                       existing->file_path ? existing->file_path : "");
-        }
-        if (c == 0) {
-            c = existing->start_line - sn->start_line;
-        }
-        if (c == 0) {
-            c = strcmp(existing->name ? existing->name : "", sn->name ? sn->name : "");
-        }
-        if (c == 0) {
-            c = strcmp(existing->label ? existing->label : "", sn->label ? sn->label : "");
-        }
-        bool sn_wins = c <= 0;
-        gb_def_t src_def = {sn->label, sn->properties_json, sn->file_path, sn->start_line,
-                            sn->end_line};
+    if (module_on_container) {
+        return true;
+    }
+    bool sn_wins = mori_gbuf_source_wins(
+        existing, gb_qn_claim_rank(existing->label, existing->properties_json), sn,
+        gb_qn_claim_rank(sn->label, sn->properties_json));
+    gb_def_t src_def = {sn->label, sn->properties_json, sn->file_path, sn->start_line,
+                        sn->end_line};
+    if (!sn_wins) {
         gb_note_collision(dst, existing, &src_def, sn_spans);
-        const char *properties = gb_swift_merge_node_props(existing, sn->properties_json, sn_wins);
-        if (sn_wins) {
-            /* src's properties; the variant spans both carry are written on
-             * export (cbm_gbuf_settle_variants). */
-            /* Keep the secondary indexes consistent when the surviving
-             * label/name changes (the old code left the node listed under its
-             * original label/name, so find_by_label/name mis-listed it). */
-            const char *new_label = gb_intern(dst, sn->label);
-            bool label_changed =
-                !existing->label || !new_label || strcmp(existing->label, new_label) != 0;
-            bool name_changed =
-                !existing->name || !sn->name || strcmp(existing->name, sn->name) != 0;
-            if (label_changed) {
-                remove_node_from_ptr_array(
-                    cbm_ht_get(dst->nodes_by_label, existing->label ? existing->label : ""),
-                    existing->id);
-            }
-            if (name_changed) {
-                remove_node_from_ptr_array(
-                    cbm_ht_get(dst->nodes_by_name, existing->name ? existing->name : ""),
-                    existing->id);
-            }
-            existing->label = (char *)new_label;
-            cbm_free(CBM_MEM_CLASS_GBUF_STRING, existing->name);
-            existing->name = heap_strdup(sn->name);
-            existing->file_path = (char *)gb_intern(dst, sn->file_path);
-            existing->start_line = sn->start_line;
-            existing->end_line = sn->end_line;
-            if (sn->properties_json) {
-                (void)cbm_gbuf_node_set_properties_json(existing, properties);
-            }
-            if (label_changed) {
-                node_ptr_array_t *by_label = get_or_create_node_array(
-                    dst->nodes_by_label, existing->label ? existing->label : "");
-                node_array_push(by_label, existing);
-            }
-            if (name_changed) {
-                node_ptr_array_t *by_name = get_or_create_node_array(
-                    dst->nodes_by_name, existing->name ? existing->name : "");
-                node_array_push(by_name, existing);
-            }
-        }
+        (void)gb_swift_merge_node_props(existing, sn->properties_json, false);
+        return true;
     }
 
-    if (sn->id != existing->id) {
-        if (!*remap) {
-            *remap = cbm_ht_create(CBM_SZ_32);
-        }
-        char key[CBM_SZ_32];
-        make_id_key(key, sizeof(key), sn->id);
-        int64_t *val = cbm_alloc(CBM_MEM_CLASS_GBUF_INDEX, sizeof(int64_t));
-        *val = existing->id;
-        cbm_ht_set(*remap, cbm_mem_strdup(CBM_MEM_CLASS_GBUF_INDEX, key), val);
+    /* Prepare all required fields before changing the canonical definition. */
+    const char *new_label = gb_intern(dst, sn->label);
+    char *new_name = heap_strdup(sn->name);
+    const char *new_path = gb_intern(dst, sn->file_path);
+    char *new_properties = gb_swift_type_props(sn->properties_json, existing->properties_json);
+    if (!new_properties && sn->properties_json) {
+        new_properties = heap_strdup(sn->properties_json);
     }
+    if (!new_label || !new_name || !new_path || (sn->properties_json && !new_properties)) {
+        cbm_free(CBM_MEM_CLASS_GBUF_STRING, new_name);
+        cbm_free(CBM_MEM_CLASS_GBUF_STRING, new_properties);
+        return false;
+    }
+
+    /* Record both definitions' spans before replacing the winner's fields. */
+    gb_note_collision(dst, existing, &src_def, sn_spans);
+    bool label_changed = !existing->label || strcmp(existing->label, new_label) != 0;
+    bool name_changed = !existing->name || !sn->name || strcmp(existing->name, sn->name) != 0;
+    if (label_changed) {
+        remove_node_from_ptr_array(
+            cbm_ht_get(dst->nodes_by_label, existing->label ? existing->label : ""), existing->id);
+    }
+    if (name_changed) {
+        remove_node_from_ptr_array(
+            cbm_ht_get(dst->nodes_by_name, existing->name ? existing->name : ""), existing->id);
+    }
+    existing->label = (char *)new_label;
+    cbm_free(CBM_MEM_CLASS_GBUF_STRING, existing->name);
+    existing->name = new_name;
+    existing->file_path = (char *)new_path;
+    existing->start_line = sn->start_line;
+    existing->end_line = sn->end_line;
+    if (new_properties) {
+        cbm_free(CBM_MEM_CLASS_GBUF_STRING, existing->properties_json);
+        existing->properties_json = new_properties;
+    }
+    if (label_changed) {
+        node_ptr_array_t *by_label = get_or_create_node_array(dst->nodes_by_label, new_label);
+        node_array_push(by_label, existing);
+    }
+    if (name_changed) {
+        node_ptr_array_t *by_name = get_or_create_node_array(dst->nodes_by_name, new_name);
+        node_array_push(by_name, existing);
+    }
+    return true;
 }
 
 /* Copy a non-colliding src node into dst with its original ID. */
-static void merge_copy_new_node(cbm_gbuf_t *dst, const cbm_gbuf_node_t *sn) {
+static cbm_gbuf_node_t *merge_copy_new_node(cbm_gbuf_t *dst, const cbm_gbuf_node_t *sn) {
     cbm_gbuf_node_t *node = cbm_calloc(CBM_MEM_CLASS_GBUF_NODE, sizeof(cbm_gbuf_node_t));
     if (!node) {
-        return;
+        return NULL;
     }
 
     node->id = sn->id;
@@ -2454,86 +2457,68 @@ static void merge_copy_new_node(cbm_gbuf_t *dst, const cbm_gbuf_node_t *sn) {
     node->end_line = sn->end_line;
     node->properties_json = heap_strdup(sn->properties_json);
 
+    if (!node->label || !node->name || !node->qualified_name || !node->file_path ||
+        !node->properties_json) {
+        goto unowned;
+    }
+    int before = dst->nodes.count;
     cbm_da_push(&dst->nodes, node);
+    if (dst->nodes.count == before) {
+        goto unowned;
+    }
     register_node_in_indexes(dst, node);
+    if (cbm_gbuf_find_by_qn(dst, node->qualified_name) != node ||
+        (!dst->by_id_off && cbm_gbuf_find_by_id(dst, node->id) != node)) {
+        return NULL; /* The destination array now owns the node. */
+    }
 
     if (node->id >= dst->next_id) {
         dst->next_id = node->id + SKIP_ONE;
     }
+    return node;
+
+unowned:
+    free_node_strings(node);
+    cbm_free(CBM_MEM_CLASS_GBUF_NODE, node);
+    return NULL;
 }
 
-/* Remap edge IDs using the collision remap table and insert into dst. */
-static void merge_remap_edges(cbm_gbuf_t *dst, cbm_gbuf_t *src, CBMHashTable *remap) {
-    for (int i = 0; i < src->edges.count; i++) {
-        cbm_gbuf_edge_t *se = src->edges.items[i];
-
-        int64_t new_src = se->source_id;
-        int64_t new_tgt = se->target_id;
-
-        if (remap) {
-            char key[CBM_SZ_32];
-            make_id_key(key, sizeof(key), se->source_id);
-            int64_t *remapped = cbm_ht_get(remap, key);
-            if (remapped) {
-                new_src = *remapped;
-            }
-
-            make_id_key(key, sizeof(key), se->target_id);
-            remapped = cbm_ht_get(remap, key);
-            if (remapped) {
-                new_tgt = *remapped;
-            }
-        }
-
-        cbm_gbuf_insert_edge(dst, new_src, new_tgt, se->type, se->properties_json);
+static int64_t merge_node(cbm_gbuf_t *dst, const cbm_gbuf_t *src, const cbm_gbuf_node_t *node) {
+    const char *qn = node->qualified_name;
+    if (!qn || !cbm_ht_get(src->node_by_qn, qn)) {
+        return 0;
     }
+
+    const gb_span_vec_t *spans = src->variant_spans ? cbm_ht_get(src->variant_spans, qn) : NULL;
+    cbm_gbuf_node_t *existing = cbm_ht_get(dst->node_by_qn, qn);
+    if (existing) {
+        return merge_update_existing(dst, existing, node, spans) ? existing->id : CBM_NOT_FOUND;
+    }
+
+    cbm_gbuf_node_t *copied = merge_copy_new_node(dst, node);
+    if (!copied) {
+        return CBM_NOT_FOUND;
+    }
+    gb_adopt_spans(dst, copied, spans);
+    return copied->id;
+}
+
+static int64_t merge_insert_edge(cbm_gbuf_t *dst, int64_t source_id, int64_t target_id,
+                                 const char *type, const char *properties_json) {
+    /* A destination write can abort the merge and discard staging. */
+    return gbuf_insert_edge(dst, source_id, target_id, type, properties_json, true);
 }
 
 int cbm_gbuf_merge(cbm_gbuf_t *dst, cbm_gbuf_t *src) {
     if (!dst || !src) {
         return CBM_NOT_FOUND;
     }
-    if (src->nodes.count == 0 && src->edges.count == 0) {
+    if (dst == src) {
         return 0;
     }
-
-    /* ID remap for QN-colliding nodes: "src_id" → (int64_t*) dst_id.
-     * Only populated when a src node's QN already exists in dst. */
-    CBMHashTable *remap = NULL;
-
-    for (int i = 0; i < src->nodes.count; i++) {
-        cbm_gbuf_node_t *sn = src->nodes.items[i];
-        if (!sn->qualified_name) {
-            continue;
-        }
-
-        /* Skip nodes deleted from QN index */
-        if (!cbm_ht_get(src->node_by_qn, sn->qualified_name)) {
-            continue;
-        }
-
-        /* The spans src gathered for this node travel with it; they are
-         * written once, when dst is exported. */
-        const gb_span_vec_t *spans =
-            src->variant_spans ? cbm_ht_get(src->variant_spans, sn->qualified_name) : NULL;
-        cbm_gbuf_node_t *existing = cbm_ht_get(dst->node_by_qn, sn->qualified_name);
-        if (existing) {
-            merge_update_existing(dst, existing, sn, spans, &remap);
-        } else {
-            merge_copy_new_node(dst, sn);
-            gb_adopt_spans(dst, cbm_ht_get(dst->node_by_qn, sn->qualified_name), spans);
-        }
-    }
-
-    /* Merge edges with optional ID remapping */
-    merge_remap_edges(dst, src, remap);
-
-    if (remap) {
-        cbm_ht_foreach(remap, free_remap_entry, NULL);
-        cbm_ht_free(remap);
-    }
-
-    return 0;
+    return mori_gbuf_merge_rows(dst, src, src->nodes.items, src->nodes.count,
+                               src->edges.items, src->edges.count, merge_node,
+                               merge_insert_edge, merge_account_remap);
 }
 
 /* ── Dump / Flush ────────────────────────────────────────────────── */

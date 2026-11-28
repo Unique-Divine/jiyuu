@@ -1,6 +1,6 @@
 # Brief One Deal
 
-Start with [Install and Connect](../references/install.md). Use the
+Start with [Install and Connect](install.md). Use the
 [GraphQL examples](../references/graphql.md) or the configured reader CLI.
 
 1. Resolve the code, wallet, or stable deal ID. Check lookup errors and matched

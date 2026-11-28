@@ -124,9 +124,9 @@ const char *cbm_service_pattern_broker(const char *resolved_qn);
 bool cbm_service_pattern_graphql_operation(const char *doc, const char **op_type, char *name_buf,
                                            size_t name_sz);
 
-/* GraphQL selection signature of a client operation (field-path Routes).
- * Parses the first operation of `doc` (leading fragment definitions skipped)
- * and writes "<type>|<name>|<path>,<path>,..." to out: <type> is "query",
+/* GraphQL selection signature of a client document (field-path Routes).
+ * Writes one "<type>|<name>|<path>,<path>,..." record per operation, separated
+ * by newlines. <type> is "query",
  * "mutation" or "subscription" ("query" for the `{ ... }` shorthand), <name>
  * is empty for an anonymous operation, and each path is a root field
  * (`perp`) or a root field and one field below it (`perp.trades`). Aliases

@@ -2983,6 +2983,55 @@ TEST(swift_manifest_root_targets_respect_nested_package_boundaries) {
     PASS();
 }
 
+TEST(swift_owner_rebuild_keeps_order_and_drops_removed_extensions) {
+    char *root = th_mktempdir("cbm_swift_owner_rebuild");
+    ASSERT_NOT_NULL(root);
+    cbm_registry_t *r = cbm_registry_new();
+    cbm_gbuf_t *graph = cbm_gbuf_new("proj", root);
+    ASSERT_NOT_NULL(r);
+    ASSERT_NOT_NULL(graph);
+
+    const char *owner = "proj.Feature.Service";
+    const char *first = "proj.First.Service";
+    const char *second = "proj.Second.Service";
+    const char *first_run = "proj.First.Service.run()";
+    const char *second_run = "proj.Second.Service.run()";
+    cbm_registry_add(r, "Service", owner, "Class", false);
+    ASSERT_GT(cbm_gbuf_upsert_node(graph, "Class", "Service", first, "Sources/App/First.swift", 1,
+                                   2, "{\"swift_extension\":\"Service\"}"), 0);
+    ASSERT_GT(cbm_gbuf_upsert_node(graph, "Class", "Service", owner, "Sources/App/Feature.swift", 1,
+                                   2, "{\"swift_type_path\":\"Service\"}"), 0);
+    ASSERT_GT(cbm_gbuf_upsert_node(graph, "Class", "Service", second, "Sources/App/Second.swift", 1,
+                                   2, "{\"swift_extension\":\"Service\"}"), 0);
+
+    cbm_registry_add(r, "run", second_run, "Method", false);
+    cbm_registry_add(r, "run", first_run, "Method", false);
+    cbm_registry_set_swift_signature(r, second_run, 0, 0, "()");
+    cbm_registry_set_swift_signature(r, first_run, 0, 0, "()");
+    const char **canonical = NULL;
+    int count = 0;
+    cbm_registry_find_by_name(r, "run", &canonical, &count);
+    ASSERT_EQ(count, 2);
+
+    CBMCall call = {.callee_name = "Service.run"};
+    const char *out[2] = {0};
+    cbm_registry_build_swift_owners(r, graph, root, NULL, 0);
+    ASSERT_EQ(cbm_registry_swift_candidates_in_file(r, &call, NULL, graph, "proj.Feature", NULL,
+                                                    0, out, 2), 2);
+    ASSERT_TRUE(out[0] == canonical[1]);
+    ASSERT_TRUE(out[1] == canonical[0]);
+
+    ASSERT_GT(cbm_gbuf_delete_by_file(graph, "Sources/App/First.swift"), 0);
+    cbm_registry_build_swift_owners(r, graph, root, NULL, 0);
+    ASSERT_EQ(cbm_registry_swift_candidates_in_file(r, &call, NULL, graph, "proj.Feature", NULL,
+                                                    0, out, 2), 1);
+    ASSERT_TRUE(out[0] == canonical[0]);
+    cbm_registry_free(r);
+    cbm_gbuf_free(graph);
+    ASSERT_EQ(th_rmtree(root), 0);
+    PASS();
+}
+
 TEST(swift_receiver_resolution_is_independent_of_registration_order) {
     const char *alpha = "proj.alpha.Service.work(flag:Bool)";
     const char *beta = "proj.beta.Service.work(flag:Bool)";
@@ -3646,6 +3695,7 @@ SUITE(registry) {
     RUN_TEST(resolve_import_map_alias_with_suffix_hits_method);
     RUN_TEST(swift_receiver_resolution_is_independent_of_registration_order);
     RUN_TEST(swift_manifest_root_targets_respect_nested_package_boundaries);
+    RUN_TEST(swift_owner_rebuild_keeps_order_and_drops_removed_extensions);
     RUN_TEST(swift_overload_labels_defaults_and_trailing_closure);
     RUN_TEST(swift_multiple_trailing_closures_match_labels);
     RUN_TEST(swift_repeated_labels_skip_default_before_next_trailing_label);

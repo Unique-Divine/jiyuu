@@ -2,6 +2,7 @@
  * index_supervisor.c — see index_supervisor.h.
  */
 #include "index_supervisor.h"
+#include "index_supervision_abi.h"
 
 #include "daemon/runtime.h"
 #include "foundation/compat.h"
@@ -94,27 +95,17 @@ size_t cbm_index_worker_memory_budget_bytes(void) {
 
 /* ── Publication fence (see index_supervisor.h) ───────────────────── */
 
-typedef enum {
-    INDEX_PUBLICATION_CLAIMED = 0, /* this caller created the fence file */
-    INDEX_PUBLICATION_TAKEN,       /* the other side created it first */
-    INDEX_PUBLICATION_CLAIM_ERROR, /* neither could be established */
-} index_publication_claim_t;
-
-/* Exclusive creation is the single atomic decision both processes race for:
- * "x" is O_CREAT|O_EXCL on POSIX and CREATE_NEW on Windows, so exactly one
- * creator succeeds and the other gets EEXIST. A deletion-based claim would
- * be ambiguous on Windows, where a delete-pending file reports access denied. */
-static index_publication_claim_t index_publication_claim(const char *fence_file) {
-    if (!fence_file || !fence_file[0]) {
-        return INDEX_PUBLICATION_CLAIM_ERROR;
-    }
+/* Both processes use the same exclusive-create operation. Keep native path
+ * encoding and Windows CREATE_NEW error mapping in cbm_fopen. */
+static int worker_fence_create_exclusive(const char *path, int *error_out) {
     errno = 0;
-    FILE *claim = cbm_fopen(fence_file, "wbx");
+    FILE *claim = cbm_fopen(path, "wbx");
     if (claim) {
         (void)fclose(claim);
-        return INDEX_PUBLICATION_CLAIMED;
+        return MORI_FENCE_CREATED;
     }
-    return errno == EEXIST ? INDEX_PUBLICATION_TAKEN : INDEX_PUBLICATION_CLAIM_ERROR;
+    *error_out = errno;
+    return errno == EEXIST ? MORI_FENCE_EXISTS : MORI_FENCE_ERROR;
 }
 
 static char g_worker_publish_fence[CBM_SZ_4K] = {0};
@@ -134,19 +125,22 @@ const char *cbm_index_worker_publish_fence(void) {
 }
 
 bool cbm_index_worker_claim_publication(void) {
-    if (!g_worker_publish_fence[0] || g_worker_publication_claimed) {
+    const char *path = cbm_index_worker_publish_fence();
+    switch (mori_index_worker_publication(g_worker_publication_claimed, path,
+                                          worker_fence_create_exclusive)) {
+    case MORI_PUBLICATION_ALLOWED:
         return true;
-    }
-    index_publication_claim_t claim = index_publication_claim(g_worker_publish_fence);
-    if (claim == INDEX_PUBLICATION_CLAIMED) {
+    case MORI_PUBLICATION_CLAIMED:
         g_worker_publication_claimed = true;
-        cbm_log_info("index.worker.publication_claimed", "fence", g_worker_publish_fence);
+        cbm_log_info("index.worker.publication_claimed", "fence", path);
         return true;
+    case MORI_PUBLICATION_REFUSED_LIMIT:
+        cbm_log_warn("index.worker.publication_refused", "reason", "resource_limit", "fence", path);
+        return false;
+    default:
+        cbm_log_warn("index.worker.publication_refused", "reason", "claim_failed", "fence", path);
+        return false;
     }
-    cbm_log_warn("index.worker.publication_refused", "reason",
-                 claim == INDEX_PUBLICATION_TAKEN ? "resource_limit" : "claim_failed", "fence",
-                 g_worker_publish_fence);
-    return false;
 }
 
 /* Worker log startup header — see index_supervisor.h. */
@@ -419,18 +413,11 @@ static int worker_quiet_timeout_ms(void) {
     return DEFAULT_QUIET_TIMEOUT_MS;
 }
 
-typedef enum {
-    WORKER_RESPONSE_READ_OK = 0,
-    WORKER_RESPONSE_READ_ERROR,
-    WORKER_RESPONSE_READ_TOO_LARGE,
-    WORKER_RESPONSE_READ_EMPTY, /* the pre-created file was never written (#1300) */
-} worker_response_read_status_t;
-
 /* Read at most one daemon-application payload. The worker is already reaped,
  * but the byte count remains an explicit allocation/read boundary even if an
  * escaped process still has the response file open. */
-static char *slurp_worker_response(const char *path, worker_response_read_status_t *status_out) {
-    *status_out = WORKER_RESPONSE_READ_ERROR;
+static char *slurp_worker_response(const char *path, int *status_out) {
+    *status_out = MORI_WORKER_RESPONSE_MISSING;
     FILE *f = cbm_fopen(path, "rb");
     if (!f) {
         return NULL;
@@ -445,7 +432,7 @@ static char *slurp_worker_response(const char *path, worker_response_read_status
         return NULL;
     }
     if ((uint64_t)n > (uint64_t)CBM_DAEMON_RUNTIME_APPLICATION_PAYLOAD_MAX) {
-        *status_out = WORKER_RESPONSE_READ_TOO_LARGE;
+        *status_out = MORI_WORKER_RESPONSE_TOO_LARGE;
         (void)fclose(f);
         return NULL;
     }
@@ -453,7 +440,6 @@ static char *slurp_worker_response(const char *path, worker_response_read_status
         /* The supervisor creates the response file before spawning, so an
          * empty file is a worker that never wrote its result. Reading it as
          * "" made that a successful run with an empty response (#1300). */
-        *status_out = WORKER_RESPONSE_READ_EMPTY;
         (void)fclose(f);
         return NULL;
     }
@@ -474,7 +460,7 @@ static char *slurp_worker_response(const char *path, worker_response_read_status
         return NULL;
     }
     buf[rd] = '\0';
-    *status_out = WORKER_RESPONSE_READ_OK;
+    *status_out = MORI_WORKER_RESPONSE_OK;
     return buf;
 }
 
@@ -549,21 +535,6 @@ enum {
     INDEX_WORKER_RSS_PROBE_INTERVAL_MS = 250,
 };
 
-typedef enum {
-    INDEX_WORKER_TERMINATION_NONE = 0,
-    INDEX_WORKER_TERMINATION_CANCEL_PENDING,
-    INDEX_WORKER_TERMINATION_CANCEL,
-    INDEX_WORKER_TERMINATION_RESOURCE,
-} index_worker_termination_reason_t;
-
-/* Who owns the publication fence of one attempt. Only the polling owner thread
- * reads or writes it. */
-typedef enum {
-    INDEX_WORKER_PUBLICATION_OPEN = 0, /* unclaimed, or no fence at all */
-    INDEX_WORKER_PUBLICATION_SUPERVISOR,
-    INDEX_WORKER_PUBLICATION_WORKER,
-} index_worker_publication_owner_t;
-
 #ifdef CBM_ENABLE_TEST_SEAMS
 static cbm_index_supervisor_clock_fn g_resource_clock;
 static cbm_index_supervisor_rss_fn g_resource_rss;
@@ -621,12 +592,17 @@ struct cbm_index_worker_handle {
      * (both removed at terminal). Empty when no worker limit is enabled. */
     char publish_fence_reserve[INDEX_WORKER_PATH_CAP];
     char publish_fence_path[INDEX_WORKER_PATH_CAP];
-    index_worker_publication_owner_t publication_owner;
+    mori_index_supervision_t *supervision;
     bool publication_claim_error_logged;
-    atomic_int termination_reason;
     atomic_bool terminal;
     cbm_index_worker_result_t result;
 };
+
+static void worker_handle_free(cbm_index_worker_handle_t *handle) {
+    mori_index_supervision_free(handle->supervision);
+    free(handle->result.response);
+    free(handle);
+}
 
 #ifdef CBM_ENABLE_TEST_SEAMS
 const char *cbm_index_worker_publish_fence_path_for_testing(
@@ -807,20 +783,18 @@ static bool worker_unique_file(char *out, size_t out_size, const char *kind) {
     return true;
 }
 
-static bool worker_result_succeeded(const cbm_index_worker_result_t *result) {
-    return result && result->outcome == CBM_PROC_CLEAN && !result->cancellation_requested &&
-           result->resource_violation.resource == CBM_INDEX_RESOURCE_NONE &&
-           !result->resource_probe_failed && result->tree_quiesced && !result->supervision_failed;
+static bool worker_cancel_process(void *context) {
+    return cbm_subprocess_request_cancel(context);
 }
 
-static void worker_terminal_log(cbm_index_worker_handle_t *handle) {
+static void worker_terminal_log(cbm_index_worker_handle_t *handle, int disposition) {
     char signal_text[16];
     char exit_text[16];
     (void)snprintf(signal_text, sizeof(signal_text), "%d", handle->result.term_signal);
     (void)snprintf(exit_text, sizeof(exit_text), "%d", handle->result.exit_code);
     cbm_log_info("index.supervisor.reap", "outcome", cbm_proc_outcome_str(handle->result.outcome),
                  "exit_code", exit_text, "signal", signal_text);
-    if (!worker_result_succeeded(&handle->result) &&
+    if (disposition != MORI_TERMINAL_CLEAN && disposition != MORI_TERMINAL_RESPONSE_MISSING &&
         handle->process_result.job_memory_limit_bytes > 0) {
         char limit_text[CBM_SZ_32];
         char peak_text[CBM_SZ_32];
@@ -835,34 +809,44 @@ static void worker_terminal_log(cbm_index_worker_handle_t *handle) {
                      "peak_job_memory_bytes",
                      handle->process_result.job_memory_available ? peak_text : "unavailable");
     }
-    if (handle->result.response_rejected) {
+    switch (disposition) {
+    case MORI_TERMINAL_RESPONSE_REJECTED:
         cbm_log_error("index.supervisor.response_rejected", "reason", "payload_too_large", "log",
                       handle->log_path);
-    } else if (handle->result.supervision_failed || !handle->result.tree_quiesced) {
+        break;
+    case MORI_TERMINAL_CONTAINMENT_FAILED:
         cbm_log_error("index.supervisor.containment_failed", "outcome",
                       cbm_proc_outcome_str(handle->result.outcome), "log", handle->log_path);
-    } else if (handle->result.resource_probe_failed) {
+        break;
+    case MORI_TERMINAL_RESOURCE_PROBE_FAILED:
         cbm_log_error("index.supervisor.resource_probe_failed", "resource", "rss_bytes", "log",
                       handle->log_path);
-    } else if (handle->result.resource_violation.resource != CBM_INDEX_RESOURCE_NONE) {
+        break;
+    case MORI_TERMINAL_RESOURCE_LIMIT:
         cbm_log_warn("index.supervisor.resource_limit", "resource",
                      cbm_index_resource_name(handle->result.resource_violation.resource), "log",
                      handle->log_path);
-    } else if (handle->result.cancellation_requested) {
+        break;
+    case MORI_TERMINAL_CANCELLED:
         cbm_log_warn("index.supervisor.worker_cancelled", "outcome",
                      cbm_proc_outcome_str(handle->result.outcome), "log", handle->log_path);
-    } else if (handle->result.response_missing) {
-        /* #1300: keep and name the log — it is the only record of the run. */
+        break;
+    case MORI_TERMINAL_RESPONSE_MISSING:
         cbm_log_error("index.supervisor.no_response", "exit_code", exit_text, "last_phase",
                       handle->result.last_phase, "log", handle->log_path);
-    } else if (handle->result.outcome == CBM_PROC_CLEAN && !cbm_profile_active) {
-        (void)cbm_unlink(handle->log_path);
-    } else if (handle->result.outcome == CBM_PROC_CLEAN) {
-        cbm_log_info("index.supervisor.profile_log", "log", handle->log_path);
-    } else {
+        break;
+    case MORI_TERMINAL_CLEAN:
+        if (cbm_profile_active) {
+            cbm_log_info("index.supervisor.profile_log", "log", handle->log_path);
+        } else {
+            (void)cbm_unlink(handle->log_path);
+        }
+        break;
+    case MORI_TERMINAL_WORKER_FAILED:
         cbm_log_warn("index.supervisor.worker_failed", "outcome",
                      cbm_proc_outcome_str(handle->result.outcome), "exit_code", exit_text, "log",
                      handle->log_path);
+        break;
     }
 }
 
@@ -886,29 +870,24 @@ size_t cbm_index_worker_job_memory_limit(size_t memory_budget_bytes) {
     return memory_budget_bytes > SIZE_MAX - headroom ? SIZE_MAX : memory_budget_bytes + headroom;
 }
 
-/* Claim the publication fence before stopping the worker for a resource limit
- * (see index_supervisor.h). True when the termination may proceed. */
-static bool worker_claim_publication_for_limit(cbm_index_worker_handle_t *handle,
-                                               cbm_index_resource_t resource, uint64_t observed,
-                                               uint64_t limit, bool probe_failed) {
-    if (!handle->publish_fence_path[0] ||
-        handle->publication_owner == INDEX_WORKER_PUBLICATION_SUPERVISOR) {
-        return true;
-    }
-    if (handle->publication_owner == INDEX_WORKER_PUBLICATION_WORKER) {
-        return false;
-    }
-    index_publication_claim_t claim = index_publication_claim(handle->publish_fence_path);
-    if (claim == INDEX_PUBLICATION_CLAIMED) {
-        handle->publication_owner = INDEX_WORKER_PUBLICATION_SUPERVISOR;
-        return true;
-    }
-    if (claim == INDEX_PUBLICATION_TAKEN) {
-        /* The worker committed to publishing before the limit was observed.
-         * Stopping it now could leave a new generation serving behind a report
-         * that the previous index was preserved, so this attempt is no longer
-         * limited; the crossing is recorded here instead. */
-        handle->publication_owner = INDEX_WORKER_PUBLICATION_WORKER;
+static const char *worker_fence_path(const cbm_index_worker_handle_t *handle) {
+    return handle->publish_fence_path[0] ? handle->publish_fence_path : NULL;
+}
+
+static void worker_request_resource_termination(cbm_index_worker_handle_t *handle,
+                                                cbm_index_resource_t resource, uint64_t observed,
+                                                uint64_t limit, bool probe_failed) {
+    int error = 0;
+    int action = mori_index_supervision_limit(handle->supervision, worker_fence_path(handle),
+                                              worker_fence_create_exclusive, &error,
+                                              worker_cancel_process, handle->process);
+    switch (action) {
+    case MORI_LIMIT_ACCEPTED:
+        handle->result.resource_violation = (cbm_index_resource_violation_t){
+            .resource = resource, .observed = observed, .limit = limit};
+        handle->result.resource_probe_failed = probe_failed;
+        break;
+    case MORI_LIMIT_AFTER_PUBLICATION: {
         char observed_text[CBM_SZ_32];
         char limit_text[CBM_SZ_32];
         (void)snprintf(observed_text, sizeof(observed_text), "%llu", (unsigned long long)observed);
@@ -917,51 +896,22 @@ static bool worker_claim_publication_for_limit(cbm_index_worker_handle_t *handle
                      cbm_index_resource_name(resource), "observed",
                      probe_failed ? "unmeasured" : observed_text, "limit", limit_text, "action",
                      "not_enforced", "log", handle->log_path);
-        return false;
+        break;
     }
-    /* Neither side holds the fence and it could not be created. Terminating
-     * now could race a later successful claim by the worker, so the decision
-     * is retried on the next poll instead. */
-    if (!handle->publication_claim_error_logged) {
-        handle->publication_claim_error_logged = true;
-        char errno_text[CBM_SZ_32];
-        (void)snprintf(errno_text, sizeof(errno_text), "%d", errno);
-        cbm_log_error("index.supervisor.publication_claim_failed", "errno", errno_text, "action",
-                      "retry_next_poll", "log", handle->log_path);
-    }
-    return false;
-}
-
-static void worker_request_resource_termination(cbm_index_worker_handle_t *handle,
-                                                cbm_index_resource_t resource, uint64_t observed,
-                                                uint64_t limit, bool probe_failed) {
-    if (!worker_claim_publication_for_limit(handle, resource, observed, limit, probe_failed)) {
-        return;
-    }
-    int expected = INDEX_WORKER_TERMINATION_NONE;
-    if (!atomic_compare_exchange_strong_explicit(&handle->termination_reason, &expected,
-                                                 INDEX_WORKER_TERMINATION_RESOURCE,
-                                                 memory_order_acq_rel, memory_order_acquire)) {
-        return;
-    }
-    handle->result.resource_violation = (cbm_index_resource_violation_t){
-        .resource = resource, .observed = observed, .limit = limit};
-    handle->result.resource_probe_failed = probe_failed;
-    if (!cbm_subprocess_request_cancel(handle->process)) {
-        handle->result.resource_violation = (cbm_index_resource_violation_t){0};
-        handle->result.resource_probe_failed = false;
-        expected = INDEX_WORKER_TERMINATION_RESOURCE;
-        (void)atomic_compare_exchange_strong_explicit(&handle->termination_reason, &expected,
-                                                      INDEX_WORKER_TERMINATION_NONE,
-                                                      memory_order_acq_rel, memory_order_acquire);
+    case MORI_LIMIT_FENCE_ERROR:
+        if (!handle->publication_claim_error_logged) {
+            handle->publication_claim_error_logged = true;
+            char errno_text[CBM_SZ_32];
+            (void)snprintf(errno_text, sizeof(errno_text), "%d", error);
+            cbm_log_error("index.supervisor.publication_claim_failed", "errno", errno_text,
+                          "action", "retry_next_poll", "log", handle->log_path);
+        }
+        break;
     }
 }
 
 static bool worker_check_resource_limits(cbm_index_worker_handle_t *handle) {
-    /* A worker that committed to publishing is no longer resource-limited. */
-    if (handle->publication_owner == INDEX_WORKER_PUBLICATION_WORKER ||
-        atomic_load_explicit(&handle->termination_reason, memory_order_acquire) !=
-            INDEX_WORKER_TERMINATION_NONE ||
+    if (!mori_index_supervision_checks_limits(handle->supervision) ||
         cbm_subprocess_termination_pending(handle->process) ||
         !cbm_subprocess_supervision_active(handle->process)) {
         return false;
@@ -1059,29 +1009,6 @@ static const char *worker_artifacts_create(cbm_index_worker_handle_t *handle) {
     return NULL;
 }
 
-/* Settle who held the fence once the attempt is terminal. Claiming an unowned
- * fence now also bars any later claim, so a stray member of an unquiesced tree
- * can never publish after this report. */
-static bool worker_publication_committed_at_terminal(cbm_index_worker_handle_t *handle) {
-    if (!handle->publish_fence_path[0] ||
-        handle->publication_owner == INDEX_WORKER_PUBLICATION_SUPERVISOR) {
-        return false;
-    }
-    if (handle->publication_owner == INDEX_WORKER_PUBLICATION_WORKER) {
-        return true;
-    }
-    index_publication_claim_t claim = index_publication_claim(handle->publish_fence_path);
-    if (claim == INDEX_PUBLICATION_CLAIMED) {
-        handle->publication_owner = INDEX_WORKER_PUBLICATION_SUPERVISOR;
-        return false;
-    }
-    if (claim == INDEX_PUBLICATION_TAKEN) {
-        handle->publication_owner = INDEX_WORKER_PUBLICATION_WORKER;
-    }
-    /* Taken: the worker committed. Unreadable: preservation cannot be proven. */
-    return true;
-}
-
 static int worker_start_internal(const char *args_json, size_t memory_budget_bytes,
                                  const cbm_index_resource_policy_t *resource_policy,
                                  bool single_thread, const char *marker_file,
@@ -1123,7 +1050,11 @@ static int worker_start_internal(const char *args_json, size_t memory_budget_byt
     if (resource_policy) {
         handle->resource_policy = *resource_policy;
     }
-    atomic_init(&handle->termination_reason, INDEX_WORKER_TERMINATION_NONE);
+    handle->supervision = mori_index_supervision_new();
+    if (!handle->supervision) {
+        worker_handle_free(handle);
+        return -1;
+    }
     atomic_init(&handle->terminal, false);
     handle->log_callback = log_callback;
     handle->log_context = log_context;
@@ -1137,7 +1068,7 @@ static int worker_start_internal(const char *args_json, size_t memory_budget_byt
                       "errno", error_text);
         (void)cbm_unlink(handle->response_path);
         (void)cbm_unlink(handle->log_path);
-        free(handle);
+        worker_handle_free(handle);
         return -1;
     }
 
@@ -1191,7 +1122,7 @@ static int worker_start_internal(const char *args_json, size_t memory_budget_byt
         (void)cbm_unlink(handle->response_path);
         (void)cbm_unlink(handle->log_path);
         worker_publish_fence_remove(handle);
-        free(handle);
+        worker_handle_free(handle);
         cbm_log_error("index.supervisor.spawn_failed", "action", "fail_closed");
         return -1;
     }
@@ -1290,44 +1221,43 @@ cbm_index_worker_poll_t cbm_index_worker_poll(cbm_index_worker_handle_t *handle,
     handle->result.outcome = process_result->outcome;
     handle->result.exit_code = process_result->exit_code;
     handle->result.term_signal = process_result->term_signal;
-    int termination_reason =
-        atomic_load_explicit(&handle->termination_reason, memory_order_acquire);
-    handle->result.cancellation_requested =
-        termination_reason == INDEX_WORKER_TERMINATION_CANCEL ||
-        (termination_reason == INDEX_WORKER_TERMINATION_CANCEL_PENDING &&
-         process_result->cancellation_requested);
     handle->result.forced = process_result->forced;
     handle->result.tree_quiesced = process_result->tree_quiesced;
     handle->result.supervision_failed = process_result->supervision_failed;
-    handle->result.publication_committed = worker_publication_committed_at_terminal(handle);
-    if (handle->result.tree_quiesced) {
-        /* An unquiesced tree keeps the fence as it is: removing a claim the
-         * supervisor holds would let a surviving member publish later. */
+    mori_index_terminal_facts_t facts = {
+        .clean = process_result->outcome == CBM_PROC_CLEAN,
+        .cancellation_requested = process_result->cancellation_requested,
+        .tree_quiesced = process_result->tree_quiesced,
+        .supervision_failed = process_result->supervision_failed,
+        .resource_violation = handle->result.resource_violation.resource != CBM_INDEX_RESOURCE_NONE,
+        .resource_probe_failed = handle->result.resource_probe_failed,
+    };
+    mori_index_terminal_decision_t decision = mori_index_supervision_terminal(
+        handle->supervision, worker_fence_path(handle), worker_fence_create_exclusive, facts);
+    handle->result.cancellation_requested = decision.cancellation_requested;
+    handle->result.publication_committed = decision.publication_committed;
+    if (decision.remove_fence) {
         worker_publish_fence_remove(handle);
     }
-    if (worker_result_succeeded(&handle->result)) {
-        worker_response_read_status_t response_status;
+    int disposition = decision.disposition;
+    if (disposition == MORI_TERMINAL_CLEAN) {
+        int response_status;
         handle->result.response = slurp_worker_response(handle->response_path, &response_status);
-        if (response_status == WORKER_RESPONSE_READ_TOO_LARGE) {
-            /* A clean exit with an out-of-contract response is a contained
-             * worker failure, not a fallback to in-process indexing. */
-            handle->result.response_rejected = true;
-            handle->result.outcome = CBM_PROC_EXIT_NONZERO;
-            handle->result.exit_code = -1;
-        } else if (!handle->result.response) {
-            /* #1300: a clean exit that wrote no response. The outcome stays
-             * CLEAN (the disposition is FALLBACK: an explicit error, no
-             * in-process fallback and no recovery re-run of a worker that did
-             * not crash); the log and the last phase it reached are kept. */
-            handle->result.response_missing = true;
-            worker_log_last_phase(handle->log_path, handle->result.last_phase,
-                                  sizeof(handle->result.last_phase));
-            (void)snprintf(handle->result.worker_log, sizeof(handle->result.worker_log), "%s",
-                           handle->log_path);
-        }
+        disposition = mori_index_supervision_response_disposition(response_status);
+    }
+    if (disposition == MORI_TERMINAL_RESPONSE_REJECTED) {
+        handle->result.response_rejected = true;
+        handle->result.outcome = CBM_PROC_EXIT_NONZERO;
+        handle->result.exit_code = -1;
+    } else if (disposition == MORI_TERMINAL_RESPONSE_MISSING) {
+        handle->result.response_missing = true;
+        worker_log_last_phase(handle->log_path, handle->result.last_phase,
+                              sizeof(handle->result.last_phase));
+        (void)snprintf(handle->result.worker_log, sizeof(handle->result.worker_log), "%s",
+                       handle->log_path);
     }
     (void)cbm_unlink(handle->response_path);
-    worker_terminal_log(handle);
+    worker_terminal_log(handle, disposition);
     atomic_store_explicit(&handle->terminal, true, memory_order_release);
     *result_out = &handle->result;
     return CBM_INDEX_WORKER_POLL_TERMINAL;
@@ -1337,33 +1267,8 @@ bool cbm_index_worker_request_cancel(cbm_index_worker_handle_t *handle) {
     if (!handle || atomic_load_explicit(&handle->terminal, memory_order_acquire)) {
         return false;
     }
-    int expected = INDEX_WORKER_TERMINATION_NONE;
-    bool claimed = atomic_compare_exchange_strong_explicit(
-        &handle->termination_reason, &expected, INDEX_WORKER_TERMINATION_CANCEL_PENDING,
-        memory_order_acq_rel, memory_order_acquire);
-    if (!claimed) {
-        if (expected == INDEX_WORKER_TERMINATION_CANCEL) {
-            return true;
-        }
-        if (expected != INDEX_WORKER_TERMINATION_CANCEL_PENDING) {
-            return false;
-        }
-        bool accepted = cbm_subprocess_request_cancel(handle->process);
-        if (accepted) {
-            expected = INDEX_WORKER_TERMINATION_CANCEL_PENDING;
-            (void)atomic_compare_exchange_strong_explicit(
-                &handle->termination_reason, &expected, INDEX_WORKER_TERMINATION_CANCEL,
-                memory_order_acq_rel, memory_order_acquire);
-        }
-        return accepted;
-    }
-    bool accepted = cbm_subprocess_request_cancel(handle->process);
-    expected = INDEX_WORKER_TERMINATION_CANCEL_PENDING;
-    (void)atomic_compare_exchange_strong_explicit(&handle->termination_reason, &expected,
-                                                  accepted ? INDEX_WORKER_TERMINATION_CANCEL
-                                                           : INDEX_WORKER_TERMINATION_NONE,
-                                                  memory_order_acq_rel, memory_order_acquire);
-    return accepted;
+    return mori_index_supervision_cancel(handle->supervision, worker_cancel_process,
+                                         handle->process);
 }
 
 const char *cbm_index_worker_response_path(const cbm_index_worker_handle_t *handle) {
@@ -1383,9 +1288,7 @@ void cbm_index_worker_destroy(cbm_index_worker_handle_t *handle) {
         return;
     }
     cbm_subprocess_destroy(handle->process);
-    free(handle->result.response);
-    handle->result.response = NULL;
-    free(handle);
+    worker_handle_free(handle);
 }
 
 static int worker_spawn_internal(const char *args_json,

@@ -50,7 +50,7 @@ src/foundation/yaml.c	10
 src/git/git_context.c	18
 src/main.c	32
 src/mcp/compact_out.c	39
-src/mcp/index_supervisor.c	8
+src/mcp/index_supervisor.c	6
 src/mcp/mcp.c	765
 src/pipeline/artifact.c	38
 src/pipeline/fqn.c	23
@@ -69,7 +69,6 @@ src/pipeline/pass_infrascan.c	2
 src/pipeline/pass_k8s.c	6
 src/pipeline/pass_lsp_cross.c	49
 src/pipeline/pass_parallel.c	31
-src/pipeline/pass_pkgmap.c	80
 src/pipeline/pass_semantic.c	3
 src/pipeline/pass_tests.c	3
 src/pipeline/pass_usages.c	4
@@ -82,6 +81,5 @@ src/pipeline/worker_pool.c	2
 src/store/store.c	354
 src/ui/config.c	12
 src/ui/http_server.c	31
-src/ui/httpd.c	21
 src/ui/layout3d.c	61
 src/watcher/watcher.c	33

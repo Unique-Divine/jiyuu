@@ -1,6 +1,6 @@
 /*
  * test_doc_mentions_jvm.c — doc-comment references of Java and Kotlin
- * (internal/cbm/doclink_jvm.c, src/pipeline/doc_links_jvm.c).
+ * (internal/cbm/doclink_jvm.c, src/pipeline/jvm_doc_links/).
  *
  * Extraction is tested on source text (tokens, scope blobs, hostile input);
  * resolution through the pipeline on fixture repositories, read back from
@@ -2638,6 +2638,9 @@ TEST(doc_mentions_jvm_scope_delta_rules) {
          "package n;\nimport acme.other.Base;\nimport acme.util.Tool;\n" JT_DJ_TYPES, global, NULL},
         {"java supertype's import removed", java, JT_DJ_BASE,
          "package n;\nimport acme.util.Tool;\n" JT_DJ_TYPES, global, NULL},
+        {"java member removed with unrelated import added", java, JT_DJ_BASE,
+         "package n;\nimport acme.local.Base;\nimport acme.more.Thing;\nimport acme.util.Tool;\n"
+         JT_DJ_OPEN JT_DJ_RUN_STR JT_DJ_SIZE JT_DJ_CLOSE, local, "run"},
         {"java on-demand import added", java, JT_DJ_BASE,
          JT_DJ_HEAD "import acme.more.*;\n" JT_DJ_TYPES, global, NULL},
         {"java static on-demand import added", java, JT_DJ_BASE,
@@ -2724,6 +2727,10 @@ TEST(doc_mentions_jvm_scope_delta_rules) {
         {"kotlin receiver's import changed", kotlin,
          "package n\n\nimport acme.local.Recv\n\nfun Recv.ext() {}\n",
          "package n\n\nimport acme.other.Recv\n\nfun Recv.ext() {}\n", global, NULL},
+        {"kotlin qualified receiver's alias changed", kotlin,
+         "package n\n\nimport acme.local.Outer as Receiver\n\nfun Receiver.Nested.ext() {}\n",
+         "package n\n\nimport acme.other.Outer as Receiver\n\nfun Receiver.Nested.ext() {}\n",
+         global, NULL},
         {"kotlin overload removed", kotlin, JT_DK_BASE,
          JT_DK_HEAD JT_DK_OPEN JT_DK_RUN_STR JT_DK_SIZE JT_DK_CLOSE, local, "run"},
         {"kotlin property removed", kotlin, JT_DK_BASE,

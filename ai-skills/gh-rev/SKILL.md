@@ -28,15 +28,15 @@ Read [references/cli.md](references/cli.md) for CLI discovery, installation,
 command purposes, and target selection. Then read the task reference:
 
 - "Review my current branch with gh-rev; it is not a PR yet." Read
-  [references/review-local-branch.md](references/review-local-branch.md).
+  [workflows/review-local-branch.md](workflows/review-local-branch.md).
 - "Review the published PR for this branch" or "Review PR #1153." Read
-  [references/review-pull-request.md](references/review-pull-request.md).
+  [workflows/review-pull-request.md](workflows/review-pull-request.md).
 - "Are there unresolved reviews?", "What feedback remains?", or "Resolve this
   finding after verification." Read
-  [references/work-revisions.md](references/work-revisions.md).
+  [workflows/work-revisions.md](workflows/work-revisions.md).
 - "Implement the submitted reviews," "Address the review feedback," or
   "Automatically fix clear findings while implementing this slice." Read
-  [references/implement-review-feedback.md](references/implement-review-feedback.md).
+  [workflows/implement-review-feedback.md](workflows/implement-review-feedback.md).
 - For another independent review pass, use the applicable local-branch or PR
   reference. A new pass receives a new revision; addressing an existing pass
   does not.

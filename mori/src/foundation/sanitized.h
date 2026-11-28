@@ -34,6 +34,8 @@
 #ifndef CBM_SANITIZED_H
 #define CBM_SANITIZED_H
 
+#include <stddef.h>
+
 /* Define __has_feature away where it does not exist. `defined(__has_feature) &&
  * __has_feature(...)` is NOT a substitute: && does not spare a preprocessor
  * that lacks the builtin from parsing the call, and there `__has_feature(x)`
@@ -56,5 +58,17 @@
 #else
 #define CBM_SANITIZED 0
 #endif
+
+/* Annotate complete output buffers from uninstrumented Rust only after a
+ * successful call. MemorySanitizer cannot see the writes across that ABI. */
+#if __has_feature(memory_sanitizer)
+#include <sanitizer/msan_interface.h>
+#define CBM_MSAN_WRITTEN(address, size) __msan_unpoison((address), (size))
+#else
+#define CBM_MSAN_WRITTEN(address, size) ((void)0)
+#endif
+
+/* C ABI used by Rust to annotate its initialized output before returning it. */
+void cbm_ffi_mark_written(const void *address, size_t size);
 
 #endif /* CBM_SANITIZED_H */

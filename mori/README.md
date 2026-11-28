@@ -15,9 +15,40 @@ Indexing and queries run on your machine. They need no hosted service, API
 key, or language runtime, and the parser grammars are compiled into the
 binary.
 
+[Install Mori](#install) · [Open the Graph UI](#graph-ui)
+
+## See Mori in Action
+
+Explore the source tree in the **Architecture** workspace. This recording
+opens `src/foundation` and shows the source of `arena.c` beside the map.
+
 <p align="center">
-  <img src="docs/images/lens-overview.gif" alt="Graph UI architecture walkthrough: open src/foundation, select arena.c and read its source beside the map" width="1000">
+  <img src="docs/images/lens-overview.gif" alt="The Architecture workspace opens src/foundation and displays arena.c beside the folder map." width="1000">
 </p>
+
+<details>
+<summary>Watch Galaxy Follow a Call Path</summary>
+
+The **Galaxy** workspace follows the call path from function
+`cbm_arena_alloc` through `arena_grow` to `cbm_alloc`.
+[Galaxy screenshot](docs/images/lens-galaxy.jpg)
+
+<p align="center">
+  <img src="docs/images/lens-galaxy.gif" alt="Galaxy expands cbm_arena_alloc and follows calls through arena_grow to cbm_alloc." width="1000">
+</p>
+
+</details>
+
+The **Explore** workspace shows the source for `limits.c` beside its file
+impact summary and direct dependencies.
+
+<p align="center">
+  <img src="docs/images/lens-explore.jpg" alt="Explore shows the source for limits.c beside its file impact summary and dependencies." width="1000">
+</p>
+
+See [Graph UI](#graph-ui) for more architecture views and
+[Local Chat](#local-chat) for a caller and callee demo. These captures use
+the upstream CBM Lens UI and public source. [Capture notes](docs/images/README.md)
 
 - [What Mori Answers](#what-mori-answers)
 - [Install](#install)
@@ -435,38 +466,85 @@ mori config set auto_index_limit 50000   # skip repos with more files
 
 ### Existing-Generation Routing
 
-Set `MORI_IMPL_INDEX_ROUTE=rust` when starting the daemon, or use a fresh
-`CBM_RUNTIME_DIR` so the worker inherits the setting. Rust selects the
-existing-generation route for an ordinary reindex. An exact live match
+In the linked `mori` executable, Rust selects the existing-generation
+route for an ordinary reindex by default. An exact live match
 ends the run without a copy. After C loads the staged manifest, Rust
 selects no-op, closure repair, full rebuild, or fatal failure. The
 `pipeline.index_route` worker log records the Rust decision. Use
 `CBM_PROFILE=1` to keep worker logs.
 
-C is the default. It owns the proofs, executes the selected route, and
-handles pass scheduling and publication. `MORI_IMPL_INDEX_MANIFEST`
-selects the exact manifest comparison independently.
+Set `MORI_IMPL_INDEX_ROUTE=c` before starting the daemon to use the C
+selector. C owns the proofs and executes the selected route with either
+selector. Both routes compare the semantic manifest in Rust.
 
 ### Full-Build Scheduling
 
-Set `MORI_IMPL_FULL_BUILD_DRIVER=rust` when starting the daemon to opt in
-to Rust scheduling of full builds. The `pipeline.full_build_driver` worker
-log records the selection. Rust schedules the top-level passes and chooses
+The index pipeline calls Rust to schedule full-build passes. It chooses
 parallel extraction when discovery supplies more than 50 files and the
-effective worker count exceeds one. Frozen builds use one worker.
-
-C owns the passes, extraction and resolution, and the final publication
-transaction. The full-build selector also works with
-`MORI_IMPL_GRAPH_WRITER=rust` when the linked build supports that writer.
+effective worker count exceeds one. Frozen builds use one worker. The
+`pipeline.full_build_driver` worker log records the scheduling call.
 
 ### Source Publication
 
-Set `MORI_IMPL_SOURCE_PUBLISH=rust` when starting the daemon to opt in to
-Rust decisions after a staged source index. The `pipeline.source_publish`
-worker log records the selection and the staged result. Rust orders the
-checks through the publication lease. C owns the stage, file operations,
-and the destination prepare, rename, and rollback transaction. C remains
-the default.
+Full rebuilds and closure repairs share the Rust stage driver. It orders
+metadata writes, integrity checks, sealing, and the private stage rename
+and rollback. The `pipeline.stage_publish` log identifies a full dump
+or a patched stage. An exact live no-op skips those steps.
+
+Closure repair rebuilds full-text search from the live nodes in the staged
+graph. The first closure repair or full rebuild after upgrading clears stale
+search postings left by earlier versions.
+
+The outer Rust publication driver orders checks through the publication
+lease. C owns the open store and file operations. The
+`pipeline.source_publish` log records the staged result. Candidate native
+tests call the same Rust entry points as the linked `mori` executable.
+The standalone C comparator comes from the frozen reference commit.
+
+### Index Worker Recovery
+
+The linked `mori` daemon uses Rust to enforce the worker retry budget and
+decide when to attempt a partial index after a contained worker failure.
+C still executes each attempt under the daemon's existing job reservation.
+The debug log event `daemon.index.recovery_driver` identifies the driver.
+The native candidate test runner calls the same Rust driver. The pinned
+C comparison build retains its own retry loop.
+
+### Named Watch Reconciliation
+
+The linked daemon uses Rust to reconcile named watch snapshots. It validates
+the full snapshot before applying it and rolls back additions if registration
+fails. Set `MORI_IMPL_NAMED_WATCH=c` at startup to use the C reconciler.
+The debug log event `daemon.named_watch.reconcile` identifies the backend.
+
+### Provider Repair Recovery
+
+On a permanent daemon, `MORI_PROVIDER_REPAIR=1` enables automatic provider
+repair. The linked daemon schedules recovery in Rust. Set
+`MORI_IMPL_REPAIR_RECOVERY=c` at startup to use the C scheduler.
+The log event `cross_repo.recovery_driver` identifies the backend.
+
+### GraphQL SDL Extraction
+
+Set `MORI_IMPL_GRAPHQL_EXTRACT=rust` when starting the daemon to select Rust
+for GraphQL schema field spans, operation roots, and parser input escape masking.
+Both paths use the same Tree-sitter parser and the original source bytes
+for field metadata. The worker log records both callbacks at debug level.
+
+### Markdown Section Extraction
+
+Rust reads ATX and Setext headings from the existing Tree-sitter tree. It
+assigns section identities, collects each section's body, and selects which
+section owns each document reference. C scans reference syntax, extracts
+diagram labels, and writes definitions and references to the result arena.
+The worker debug log records `extract.markdown_sections`.
+
+### Python Import Extraction
+
+Set `MORI_IMPL_PYTHON_IMPORTS=rust` when starting the daemon to read Python
+import statements through Rust. The worker debug event
+`extract.python_imports` identifies the backend. C emits the arena rows,
+applies the annotation-only import rules, and resolves names across files.
 
 ### Sharing a Graph With a Team
 
@@ -620,18 +698,8 @@ Bookmark a view with `?project=<name>&workspace=<workspace>`:
 | `coverage` | Indexed, partially parsed, skipped, and excluded paths, with freshness. |
 | `system` | Daemon activity, indexes, and logs, filterable by project, severity, or text. |
 
-**Galaxy.** The recording follows the outgoing relationships of
-`cbm_arena_alloc` one layer further, switches to the hierarchy, and shows
-the two-hop call path to `cbm_alloc`. Edge pulses show direction, not live
-execution. [Still image](docs/images/lens-galaxy.jpg).
-
-<p align="center">
-  <img src="docs/images/lens-galaxy.gif" alt="Galaxy view: expand cbm_arena_alloc, switch to the hierarchy and follow its call path through arena_grow to cbm_alloc" width="1000">
-</p>
-
-**Explore.** Source in Monaco with the graph alongside.
-
-<p align="center"><img src="docs/images/lens-explore.jpg" alt="Explore: limits.c in the source reader beside its file impact summary and direct graph dependencies" width="1000"></p>
+In **Galaxy**, edge pulses show the direction of indexed relationships.
+See the [Galaxy and Explore demos](#see-mori-in-action).
 
 **Repos.** The Repos workspace reads every project index in the cache
 directory through two read-only endpoints, `GET /api/xrepo/summary` and
@@ -683,8 +751,6 @@ tools, and the small default model words things loosely.
 
 <p align="center"><img src="docs/images/lens-chat.gif" alt="Local chat: callers and callees of arena_grow answered directly from the indexed graph" width="1000"></p>
 
-The recordings show the UI on upstream's own source in October 2026;
-[docs/images/README.md](docs/images/README.md) records each capture.
 For logs, frontend development, and the experimental agent-activity view,
 see [graph-ui/README.md](graph-ui/README.md).
 
@@ -1147,9 +1213,13 @@ event of `${CBM_CACHE_DIR}/logs/cbm-daemon.log`.
 
 ## Source Layout
 
+Rust and C share the subsystem directories under `src/` and
+`internal/cbm/`. The `jiyuu-mori` crate points to `src/lib.rs` and
+`src/main.rs`.
+
 ```text
 src/
-  main.c              Entry point: MCP stdio server, CLI, config
+  main.c, main.rs     Process entry points
   daemon/             Per-account session coordination, IPC, shared jobs and watchers
   mcp/                MCP server: tools, JSON-RPC 2.0, auto-index
   cli/                CLI commands and agent installer code from the import
@@ -1163,7 +1233,7 @@ src/
   foundation/         Platform layer: threads, filesystem, logging, memory
 graph-ui/             Graph UI: React, Monaco, and three.js
 internal/cbm/         Tree-sitter grammars (fetched at build time) and the extraction engine
-jiyuu-mori/           Rust crate jiyuu-mori and its mori binary
+jiyuu-mori/           Cargo manifest, native-link build script, and Rust integration tests
 ```
 
 Terms used in Mori's code and design docs are in [LEXICON.md](LEXICON.md).
@@ -1303,7 +1373,7 @@ four targets, each on a native runner, with the graph UI embedded (as
 `--version`, a tiny index and the UI index page from `mori daemon start
 --port=N`, runs the CLI parity check
 ([scripts/cli-parity.ts](scripts/cli-parity.ts)) against
-`codebase-memory-mcp` from the same commit, and packages the binary with
+`codebase-memory-mcp`, and packages the binary with
 [scripts/package-release.sh](scripts/package-release.sh) as
 `mori-<version>-<target>.tar.gz`:
 
@@ -1322,14 +1392,16 @@ licenses). There is no installer; users install from the release assets as
 signing and Gatekeeper behavior are covered under
 [Download a Release](#download-a-release).
 
+The workflow builds `codebase-memory-mcp` from C source pinned in
+[the release workflow](../.github/workflows/mori-release.yml) on all four
+targets. It uses the candidate version string for the `--version` comparison.
+
 On Linux x64, Linux arm64, and macOS arm64, the workflow also replays graph
 fixtures against the published C 0.13.1 binary. It checks the downloaded
 reference archive against a pinned SHA-256 digest and compares the
 candidate's Rust graph export with its SQL export. The GraphQL fixture
 requires the candidate's Rust planner and writer to emit a Route to its
-gqlgen resolver. Intel macOS runs the
-same-commit CLI comparison and smoke tests. C 0.13.1 has no Intel macOS
-archive.
+gqlgen resolver. C 0.13.1 has no Intel macOS archive.
 
 The release job attests build provenance for the archives and
 `checksums.txt`, then creates a draft release with `checksums.txt` and
@@ -1343,12 +1415,10 @@ gh release edit mori/v0.14.0 --draft=false --latest=false
 Rerunning the workflow refills a draft but never changes a published
 release.
 
-To build without releasing, run the workflow by hand on any branch; the
-`dry_run` input defaults to true and uploads the archives and checksums as
-workflow artifacts. [scripts/release.ts](scripts/release.ts) holds the tag
-check, asset names, checksums and the draft step; test it with
-`bun test scripts/release.test.ts`. Run the parity check locally with
-`just --justfile jiyuu-mori/justfile parity`.
+A workflow dry run on a branch uploads Linux x64, Linux arm64, and Apple
+Silicon packages and their checksums in artifact `mori-preview-<version>-<sha>`.
+A dry run on a `mori/v*` tag checks and packages all four release targets,
+including Intel macOS.
 
 ## Credits
 

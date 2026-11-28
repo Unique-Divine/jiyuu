@@ -757,6 +757,7 @@ enum {
     NUM_HYPERPLANES = 64,
     SEM_LSH_BANDS = 16,
     SEM_LSH_ROWS = 4,
+    SEM_LSH_VALUES = 1 << SEM_LSH_ROWS,
     SEM_BUCKET_COUNT = 65536,
     SEM_BUCKET_MASK = 65535,
     SEM_BUCKET_CAP_INIT = 16,
@@ -805,91 +806,38 @@ static void sig_build_worker(int worker_id, void *ctx_ptr) {
 /* ── Parallel Phase 6: Score candidates + collect edges ──────────── */
 
 typedef struct {
+    int *items;
+    int count;
+    int cap;
+} sem_bucket_t;
+
+/* Read-only copies of the buckets indexed by band and un-hashed band value. */
+typedef sem_bucket_t sem_candidate_bands_t[SEM_LSH_BANDS][SEM_LSH_VALUES];
+
+typedef struct {
     cbm_sem_func_t *funcs;
     uint64_t *signatures;
-    int *edge_counts; /* budget applied sequentially in phase6b (determinism) */
     cbm_sem_config_t cfg;
     float record_floor; /* kept from here up; under the threshold: signals dump only */
     int func_count;
 
-    /* LSH buckets (read-only during scoring) */
-    struct {
-        int *items;
-        int count;
-        int cap;
-    } **band_buckets;
+    const sem_candidate_bands_t *candidate_bands;
 
     /* Per-worker edge buffer */
     deferred_edge_buf_t *worker_bufs;
-    int max_workers;
     _Atomic int next_idx;
 } score_ctx_t;
 
-enum {
-    SCORE_SEEN_CAP = 8192,
-    SCORE_SEEN_MASK = 8191,
-    SCORE_SEEN_EMPTY = -1,
-};
-
-/* The open-addressed `seen` set of one worker, reused for every function it
- * scores: a slot belongs to the current function only when its stamp says so,
- * so starting a function costs nothing where re-filling 8,192 slots cost a
- * 32 KB write per function (90 k on the Go corpus, waste sanitizer
- * 2026-09-17). Same size and probe order: the same candidates, in order. */
+/* Keep the zeroed worker scratch in the semantic memory class. */
+enum { SCORE_SEEN_CAP = 8192 };
 typedef struct {
     int ids[SCORE_SEEN_CAP];
-    int stamp[SCORE_SEEN_CAP];
-    int current; /* function index + 1: unique per function, never 0 */
+    int stamps[SCORE_SEEN_CAP];
 } score_seen_t;
 
-/* Check whether `j` has already been recorded in the `seen` set for this
- * function; insert it if not.  Returns true when the insertion was fresh
- * (caller should add to candidates). */
-static bool score_seen_insert(score_seen_t *seen, int j) {
-    uint32_t slot = (uint32_t)j & SCORE_SEEN_MASK;
-    for (int p = 0; p < SCORE_SEEN_CAP; p++) {
-        uint32_t idx = (slot + (uint32_t)p) & SCORE_SEEN_MASK;
-        if (seen->stamp[idx] != seen->current) {
-            seen->stamp[idx] = seen->current;
-            seen->ids[idx] = j;
-            return true;
-        }
-        if (seen->ids[idx] == j) {
-            return false;
-        }
-    }
-    return false;
-}
-
-/* Collect the unique candidate function indices for node `i` by iterating
- * every LSH band and merging bucket members via `seen[]`.  Returns the
- * populated candidate count. */
-static int score_collect_candidates(score_ctx_t *sc, int i, score_seen_t *seen, int *candidates,
-                                    int cand_cap) {
-    int cand_count = 0;
-    for (int b = 0; b < SEM_LSH_BANDS && cand_count < cand_cap; b++) {
-        int shift = b * SEM_LSH_ROWS;
-        uint32_t band_val = (uint32_t)((sc->signatures[i] >> shift) &
-                                       ((PSE_ONE_ULL << SEM_LSH_ROWS) - PSE_ONE_ULL));
-        uint64_t bh = XXH3_64bits_withSeed(&band_val, sizeof(band_val), (uint64_t)b);
-        uint32_t bucket_idx = (uint32_t)(bh & SEM_BUCKET_MASK);
-        int bcount = sc->band_buckets[b][bucket_idx].count;
-        int *bitems = sc->band_buckets[b][bucket_idx].items;
-        if (bcount > SEM_MAX_CANDIDATES) {
-            continue;
-        }
-        for (int k = 0; k < bcount && cand_count < cand_cap; k++) {
-            int j = bitems[k];
-            if (j <= i) {
-                continue;
-            }
-            if (score_seen_insert(seen, j)) {
-                candidates[cand_count++] = j;
-            }
-        }
-    }
-    return cand_count;
-}
+extern int mori_semantic_collect_candidates(const sem_candidate_bands_t *bands, uint64_t signature,
+                                           int source, score_seen_t *seen,
+                                           int candidates[SEM_MAX_CANDIDATES]);
 
 /* Score one candidate pair (i, j) and push a deferred candidate edge if the
  * score passes the threshold. ADMISSION (the per-node max_edges budget) is
@@ -926,9 +874,9 @@ static void score_worker(int worker_id, void *ctx_ptr) {
         if (i >= sc->func_count) {
             break;
         }
-        seen->current = i + SKIP_ONE;
         int candidates[SEM_MAX_CANDIDATES];
-        int cand_count = score_collect_candidates(sc, i, seen, candidates, SEM_MAX_CANDIDATES);
+        int cand_count = mori_semantic_collect_candidates(sc->candidate_bands, sc->signatures[i], i,
+                                                         seen, candidates);
         for (int c = 0; c < cand_count; c++) {
             score_try_emit(sc, i, candidates[c], c, my_buf);
         }
@@ -974,12 +922,6 @@ static void collect_worker(int worker_id, void *ctx_ptr) {
 }
 
 /* ── Phase helpers (keep cbm_pipeline_pass_semantic_edges complexity low) ── */
-
-typedef struct {
-    int *items;
-    int count;
-    int cap;
-} sem_bucket_t;
 
 /* Canonical node order: by qualified name (unique per node), id tie-break
  * for defensiveness. Gives the semantic pass a stable, content-derived input
@@ -1065,6 +1007,10 @@ static int phase1_scan_functions(cbm_gbuf_t *gbuf, cbm_sem_func_t **out_funcs,
     return func_count;
 }
 
+static uint32_t sem_bucket_index(uint64_t band, uint32_t value) {
+    return (uint32_t)(XXH3_64bits_withSeed(&value, sizeof(value), band) & SEM_BUCKET_MASK);
+}
+
 /* Phase 5c: partition functions into LSH buckets by their signature bands.
  * Sequential because each bucket grows its `items` array via realloc. */
 static void phase5c_build_lsh_buckets(const uint64_t *signatures, int func_count,
@@ -1072,10 +1018,8 @@ static void phase5c_build_lsh_buckets(const uint64_t *signatures, int func_count
     for (int f = 0; f < func_count; f++) {
         for (int b = 0; b < SEM_LSH_BANDS; b++) {
             int shift = b * SEM_LSH_ROWS;
-            uint32_t band_val = (uint32_t)((signatures[f] >> shift) &
-                                           ((PSE_ONE_ULL << SEM_LSH_ROWS) - PSE_ONE_ULL));
-            uint64_t bh = XXH3_64bits_withSeed(&band_val, sizeof(band_val), (uint64_t)b);
-            uint32_t bucket_idx = (uint32_t)(bh & SEM_BUCKET_MASK);
+            uint32_t band_val = (uint32_t)((signatures[f] >> shift) & (SEM_LSH_VALUES - 1));
+            uint32_t bucket_idx = sem_bucket_index((uint64_t)b, band_val);
             sem_bucket_t *bucket = &band_buckets[b][bucket_idx];
             if (bucket->count >= bucket->cap) {
                 int nc =
@@ -1584,20 +1528,25 @@ static void sem_corpus_dump(const cbm_sem_corpus_t *corpus, const char *suffix) 
 }
 
 /* Phase 6a: score candidate pairs in parallel and collect deferred edges. */
-static void phase6a_score_candidates(cbm_sem_func_t *funcs, uint64_t *signatures, int *edge_counts,
-                                     sem_bucket_t **band_buckets, cbm_sem_config_t cfg,
-                                     float record_floor, deferred_edge_buf_t *worker_bufs,
-                                     int func_count, int worker_count) {
+static void phase6a_score_candidates(cbm_sem_func_t *funcs, uint64_t *signatures,
+                                    sem_bucket_t **band_buckets, cbm_sem_config_t cfg,
+                                    float record_floor, deferred_edge_buf_t *worker_bufs,
+                                    int func_count, int worker_count) {
+    /* Resolve all 16 values per band once, using the same hash as phase 5c. */
+    sem_candidate_bands_t candidate_bands;
+    for (int band = 0; band < SEM_LSH_BANDS; band++) {
+        for (uint32_t value = 0; value < SEM_LSH_VALUES; value++) {
+            candidate_bands[band][value] = band_buckets[band][sem_bucket_index((uint64_t)band, value)];
+        }
+    }
     score_ctx_t sc = {
         .funcs = funcs,
         .signatures = signatures,
-        .edge_counts = edge_counts,
         .cfg = cfg,
         .record_floor = record_floor,
         .func_count = func_count,
-        .band_buckets = (void *)band_buckets,
+        .candidate_bands = &candidate_bands,
         .worker_bufs = worker_bufs,
-        .max_workers = worker_count,
     };
     atomic_init(&sc.next_idx, 0);
     cbm_parallel_for_opts_t opts = {.max_workers = worker_count, .force_pthreads = false};
@@ -1681,8 +1630,8 @@ static int run_scoring_phase(cbm_gbuf_t *gbuf, cbm_sem_func_t *funcs, uint64_t *
 
     CBM_PROF_START(t_phase6a);
     sem_state_dump(funcs, func_count);
-    phase6a_score_candidates(funcs, signatures, edge_counts, band_buckets, cfg, record_floor,
-                             worker_bufs, func_count, worker_count);
+    phase6a_score_candidates(funcs, signatures, band_buckets, cfg, record_floor, worker_bufs,
+                             func_count, worker_count);
     CBM_PROF_END_N("semantic_edges", "6a_score_parallel", t_phase6a, func_count);
 
     CBM_PROF_START(t_phase6b);

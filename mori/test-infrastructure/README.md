@@ -15,6 +15,22 @@ build if a venue grows its own harness logic — here or in the workflows.
 | Real Windows (UTM ARM64 VM) | `vm/win.sh <command>` (`win.sh help`) | Same preflight idea (`scripts/ci/clean-test-residue.ps1`), plus CI's protected per-user TEMP root. Wine (`run.sh windows`) is a compile check only — never a substitute for the VM. |
 | macOS | run the canonical scripts natively | `scripts/test.sh`, `scripts/build.sh`, `scripts/smoke-local.sh …` |
 
+## Build inputs
+
+Run `just --justfile mori/justfile grammars` from the Jiyuu workspace before
+starting a container. Compose mounts the workspace so Cargo can resolve its
+manifest, lockfile, and members. The native C test runner links a Rust archive
+built for the C compiler's target. Windows VM provisioning installs the matching
+MSYS2 Rust toolchains and Bun, then fetches the grammars in the VM checkout.
+
+The native ASan, UBSan, TSan, MSan, coverage, and libFuzzer flags instrument the
+C and C++ objects, including the SQLite amalgamation. The Rust archive uses the
+stable compiler and carries none of those instrumentation flags. Native suites
+exercise the Rust calls through the same C ABI as production. Rust unit tests
+cover the migrated implementations separately. The MSan lane measures
+instrumented C code and does not establish that Rust-to-C memory transfers
+are MSan-clean. The native fuzz lane does not collect Rust branch coverage.
+
 ## The ladder (before any push)
 
 1. `scripts/test.sh` — macOS native (or `--suites …` while iterating)

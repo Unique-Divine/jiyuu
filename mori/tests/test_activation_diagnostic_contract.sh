@@ -91,10 +91,11 @@ require(
 
 # 4. And the refusal itself must say which of the two shapes it hit, or the
 #    reader cannot choose between those commands.
-transaction = (root / "src" / "cli" / "activation_transaction.c").read_text(encoding="utf-8")
+transaction = root / "src" / "cli" / "activation_transaction" / "windows.rs"
 require(
-    re.search(r"AceFlags\s*&\s*INHERITED_ACE", transaction) is not None,
-    "src/cli/activation_transaction.c must report whether the refusing ACE was "
+    re.search(r"AceFlags[^\n]*&\s*INHERITED_ACE", transaction.read_text(encoding="utf-8"))
+    is not None,
+    "The activation transaction must report whether the refusing ACE was "
     "inherited, so the printed remedy matches the grant (#1856)",
 )
 

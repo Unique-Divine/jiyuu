@@ -1918,55 +1918,119 @@ static void application_job_try_partial(cbm_daemon_application_job_t *job,
     }
 }
 
+typedef struct {
+    cbm_daemon_application_job_t *job;
+    application_job_execution_t *execution;
+    char marker_path[APPLICATION_PATH_CAP];
+    char quarantine_path[APPLICATION_PATH_CAP];
+    char **previous_suspects;
+    int previous_count;
+    int quarantined;
+    cbm_proc_outcome_t outcome;
+} application_job_recovery_t;
+
+/* Keep these outcomes and operations in sync with Rust job_recovery. */
+enum {
+    APPLICATION_JOB_RECOVERY_STOP = 0,
+    APPLICATION_JOB_RECOVERY_CANCELLED = 1,
+    APPLICATION_JOB_RECOVERY_RETRY = 2,
+};
+
+typedef struct {
+    bool has_response;
+    bool unsafe_terminal;
+    bool quarantined;
+} application_job_recovery_summary_t;
+
+static bool application_job_recovery_cancel_requested(application_job_recovery_t *run) {
+    return application_job_cancel_requested(run->job);
+}
+
+static void application_job_recovery_mark_cancelled(application_job_recovery_t *run) {
+    application_job_execution_cancel(run->execution);
+}
+
+static bool application_job_recovery_clear_marker(application_job_recovery_t *run) {
+    return application_truncate_file(run->marker_path);
+}
+
+static uint8_t application_job_recovery_attempt(application_job_recovery_t *run) {
+    application_attempt_t attempt;
+    application_attempt_status_t status =
+        application_job_run_attempt(run->job, run->marker_path, run->quarantine_path, &attempt);
+    if (status == APPLICATION_ATTEMPT_CANCELLED) {
+        return APPLICATION_JOB_RECOVERY_CANCELLED;
+    }
+    if (status != APPLICATION_ATTEMPT_TERMINAL) {
+        return APPLICATION_JOB_RECOVERY_STOP;
+    }
+    run->outcome = CBM_PROC_SPAWN_FAILED;
+    application_attempt_decision_t decision =
+        application_consume_attempt(run->job, &attempt, run->execution, &run->outcome);
+    return decision == APPLICATION_ATTEMPT_DECISION_RECOVERABLE
+               ? APPLICATION_JOB_RECOVERY_RETRY
+               : APPLICATION_JOB_RECOVERY_STOP;
+}
+
+static bool application_job_recovery_record(application_job_recovery_t *run, int recovery_index) {
+    return application_recovery_record_suspects(
+        run->job, run->marker_path, run->quarantine_path, run->outcome, recovery_index,
+        &run->previous_suspects, &run->previous_count, &run->quarantined, run->execution);
+}
+
+static application_job_recovery_summary_t
+application_job_recovery_finish_attempts(application_job_recovery_t *run) {
+    application_free_suspects(run->previous_suspects, run->previous_count);
+    run->previous_suspects = NULL;
+    run->previous_count = 0;
+    return (application_job_recovery_summary_t){
+        .has_response = run->execution->response != NULL,
+        .unsafe_terminal = run->execution->unsafe_terminal,
+        .quarantined = run->quarantined > 0,
+    };
+}
+
+static void application_job_recovery_try_partial(application_job_recovery_t *run) {
+    application_job_try_partial(run->job, run->quarantine_path, run->quarantined, run->execution);
+}
+
+typedef struct {
+    bool (*cancel_requested)(application_job_recovery_t *run);
+    void (*mark_cancelled)(application_job_recovery_t *run);
+    bool (*clear_marker)(application_job_recovery_t *run);
+    uint8_t (*attempt)(application_job_recovery_t *run);
+    bool (*record_suspects)(application_job_recovery_t *run, int index);
+    application_job_recovery_summary_t (*finish_attempts)(application_job_recovery_t *run);
+    void (*try_partial)(application_job_recovery_t *run);
+} application_job_recovery_ops_t;
+
+void mori_daemon_job_recover(application_job_recovery_t *run,
+                             const application_job_recovery_ops_t *ops, int max_attempts);
+
 static void application_job_recover(cbm_daemon_application_job_t *job,
                                     application_job_execution_t *execution) {
     if (application_job_cancel_requested(job)) {
         application_job_execution_cancel(execution);
         return;
     }
-    char marker_path[APPLICATION_PATH_CAP] = {0};
-    char quarantine_path[APPLICATION_PATH_CAP] = {0};
-    if (!application_recovery_files_create(marker_path, quarantine_path)) {
+    application_job_recovery_t run = {.job = job, .execution = execution};
+    if (!application_recovery_files_create(run.marker_path, run.quarantine_path)) {
         return;
     }
 
-    int quarantined = 0;
-    char **previous_suspects = NULL;
-    int previous_count = 0;
-    int recovery_cap = application_max_restarts();
-    for (int recovery_index = 0; recovery_index < recovery_cap; recovery_index++) {
-        if (application_job_cancel_requested(job)) {
-            application_job_execution_cancel(execution);
-            break;
-        }
-        if (!application_truncate_file(marker_path)) {
-            break;
-        }
-        application_attempt_t attempt;
-        application_attempt_status_t status =
-            application_job_run_attempt(job, marker_path, quarantine_path, &attempt);
-        if (status == APPLICATION_ATTEMPT_CANCELLED) {
-            application_job_execution_cancel(execution);
-            break;
-        }
-        if (status != APPLICATION_ATTEMPT_TERMINAL) {
-            break;
-        }
-        cbm_proc_outcome_t failure_outcome = CBM_PROC_SPAWN_FAILED;
-        application_attempt_decision_t decision =
-            application_consume_attempt(job, &attempt, execution, &failure_outcome);
-        if (decision != APPLICATION_ATTEMPT_DECISION_RECOVERABLE ||
-            !application_recovery_record_suspects(
-                job, marker_path, quarantine_path, failure_outcome, recovery_index,
-                &previous_suspects, &previous_count, &quarantined, execution)) {
-            break;
-        }
-    }
-    application_free_suspects(previous_suspects, previous_count);
-    if (!execution->response && !execution->unsafe_terminal && quarantined > 0) {
-        application_job_try_partial(job, quarantine_path, quarantined, execution);
-    }
-    application_recovery_files_remove(marker_path, quarantine_path);
+    int max_attempts = application_max_restarts();
+    static const application_job_recovery_ops_t ops = {
+        .cancel_requested = application_job_recovery_cancel_requested,
+        .mark_cancelled = application_job_recovery_mark_cancelled,
+        .clear_marker = application_job_recovery_clear_marker,
+        .attempt = application_job_recovery_attempt,
+        .record_suspects = application_job_recovery_record,
+        .finish_attempts = application_job_recovery_finish_attempts,
+        .try_partial = application_job_recovery_try_partial,
+    };
+    cbm_log_debug("daemon.index.recovery_driver", "implementation", "rust");
+    mori_daemon_job_recover(&run, &ops, max_attempts);
+    application_recovery_files_remove(run.marker_path, run.quarantine_path);
 }
 
 /* A capacity/cancellation conflict is resolved by the terminal publication
@@ -2227,23 +2291,35 @@ static yyjson_doc *application_repair_read_meta(cbm_store_t *store, const char *
     return doc;
 }
 
-static const char *application_wildcard_recovery_block(yyjson_doc *observations, bool *missing) {
-    yyjson_obj_iter iter = yyjson_obj_iter_with(yyjson_doc_get_root(observations));
-    yyjson_val *key;
-    while ((key = yyjson_obj_iter_next(&iter)) != NULL) {
-        const char *observed = yyjson_get_str(yyjson_obj_iter_get_val(key));
-        if (!observed) {
-            return "wildcard_unknown_peer";
-        }
-        char current[CBM_GRAPH_COMPARE_GENERATION_SIZE];
-        if (!cbm_cross_repo_read_generation(yyjson_get_str(key), current, sizeof(current))) {
-            *missing = true;
-        } else if (strcmp(observed, current) != 0) {
-            return "wildcard_generation_changed";
-        }
-    }
-    return NULL;
+static const char *application_recovery_next_peer(yyjson_obj_iter *iter, const char **observed) {
+    yyjson_val *key = yyjson_obj_iter_next(iter);
+    *observed = yyjson_get_str(yyjson_obj_iter_get_val(key));
+    return yyjson_get_str(key);
 }
+
+static void application_recovery_skip(const char *project, const char *reason) {
+    cbm_log_info("cross_repo.recovery_skipped", "project", project, "reason", reason);
+}
+
+/* Keep in sync with ProjectOps in job_recovery/provider_repair.rs. */
+typedef struct {
+    yyjson_val *(*target_at)(const yyjson_val *, size_t);
+    yyjson_val *(*lookup)(const yyjson_val *, const char *);
+    const char *(*string)(const yyjson_val *);
+    size_t (*length)(const yyjson_val *);
+    const char *(*next_peer)(yyjson_obj_iter *, const char **);
+    bool (*valid_name)(const char *);
+    bool (*read_generation)(const char *, char *, size_t);
+    bool (*match_saved)(cbm_daemon_application_t *, const char *, const char *, int);
+    bool (*reconcile)(cbm_daemon_application_t *, const char *);
+    void (*skip)(const char *, const char *);
+    size_t max_targets;
+} application_repair_decision_ops_t;
+
+bool mori_daemon_repair_recover(cbm_daemon_application_t *application, const char *project,
+                                const yyjson_val *targets, size_t count, const yyjson_val *peers,
+                                yyjson_obj_iter *iter, bool reverse_pending,
+                                const application_repair_decision_ops_t *ops);
 
 /* Called under the wildcard lease. Snapshot the saved selection and
  * observations, then close the reader before any repair writes. */
@@ -2291,44 +2367,24 @@ static bool application_recover_repair_project(cbm_daemon_application_t *applica
     ok = cbm_store_read_scope_close(scope) == CBM_STORE_OK && ok;
     cbm_store_close(store);
 
-    size_t count = yyjson_arr_size(targets);
-    bool stale = false;
-    bool missing = false;
-    bool wildcard = count == 1 && yyjson_equals_str(yyjson_arr_get(targets, 0), "*");
-    ok = ok && count <= APPLICATION_REPAIR_MAX_TARGETS;
-    for (size_t i = 0; ok && !wildcard && i < count; i++) {
-        yyjson_val *target = yyjson_arr_get(targets, i);
-        const char *name = yyjson_get_str(target);
-        ok = name && strlen(name) == yyjson_get_len(target) && cbm_validate_project_name(name);
-        if (!ok) {
-            break;
-        }
-        if (strcmp(name, project) == 0) {
-            continue;
-        }
-        char current[CBM_GRAPH_COMPARE_GENERATION_SIZE];
-        const char *observed =
-            yyjson_get_str(yyjson_obj_get(yyjson_doc_get_root(observations), name));
-        if (!cbm_cross_repo_read_generation(name, current, sizeof(current))) {
-            missing = true;
-        } else if (!observed || strcmp(observed, current) != 0) {
-            stale = true;
-        }
-    }
-    if (ok && missing) {
-        ok = false;
-    } else if (ok && stale) {
-        ok = application_match_saved_targets(application, "recovery", project, (int)count);
-    } else if (ok && reverse_pending) {
-        const char *reason =
-            wildcard ? application_wildcard_recovery_block(observations, &missing) : NULL;
-        if (reason) {
-            /* Reverse-only reconciliation requires matching generations.
-             * An explicit wildcard relink can refresh the selection. */
-            cbm_log_info("cross_repo.recovery_skipped", "project", project, "reason", reason);
-        } else {
-            ok = !missing && application_reconcile_reverse(application, project);
-        }
+    if (ok) {
+        static const application_repair_decision_ops_t ops = {
+            .target_at = yyjson_arr_get,
+            .lookup = yyjson_obj_get,
+            .string = yyjson_get_str,
+            .length = yyjson_get_len,
+            .next_peer = application_recovery_next_peer,
+            .valid_name = cbm_validate_project_name,
+            .read_generation = cbm_cross_repo_read_generation,
+            .match_saved = application_match_saved_targets,
+            .reconcile = application_reconcile_reverse,
+            .skip = application_recovery_skip,
+            .max_targets = APPLICATION_REPAIR_MAX_TARGETS,
+        };
+        yyjson_val *peers = yyjson_doc_get_root(observations);
+        yyjson_obj_iter iter = yyjson_obj_iter_with(peers);
+        ok = mori_daemon_repair_recover(application, project, targets, yyjson_arr_size(targets),
+                                        peers, &iter, reverse_pending, &ops);
     }
     yyjson_doc_free(observations);
     yyjson_doc_free(selection);
@@ -2383,50 +2439,149 @@ static void application_recover_repair_batch(cbm_daemon_application_t *applicati
     }
 }
 
-static void *application_repair_recovery_thread(void *opaque) {
-    cbm_daemon_application_t *application = opaque;
-    yyjson_mut_doc *projects = NULL;
+typedef struct {
+    cbm_daemon_application_t *application;
+    yyjson_mut_doc *projects;
+} application_recovery_t;
+
+enum {
+    APPLICATION_RECOVERY_STOPPING = 1 << 0,
+    APPLICATION_RECOVERY_REQUESTED = 1 << 1,
+    APPLICATION_RECOVERY_SETTLED = 1 << 2,
+};
+
+static bool application_recovery_stopping(const application_recovery_t *run) {
+    return run->application->stopping;
+}
+
+static bool application_recovery_round(application_recovery_t *run, bool full_scan) {
+    if (full_scan) {
+        yyjson_mut_doc_free(run->projects);
+        run->projects = application_recovery_projects(run->application);
+    }
+    yyjson_mut_val *projects = yyjson_mut_doc_get_root(run->projects);
+    application_recover_repair_batch(run->application, projects);
+    if (full_scan && run->projects && !run->application->stopping) {
+        char pending[CBM_SZ_32];
+        snprintf(pending, sizeof(pending), "%zu", yyjson_mut_arr_size(projects));
+        cbm_log_info("cross_repo.recovery_scan_complete", "pending", pending);
+    }
+    return run->projects != NULL;
+}
+
+static uint64_t application_recovery_retry_deadline(void) {
+    return application_deadline_after(APPLICATION_REPAIR_RECOVERY_RETRY_MS);
+}
+
+/* Keep the mutex held until the driver commits its decision. If it is done,
+ * the next request must see a completed thread and start a new one. */
+static uint8_t application_recovery_begin_check(application_recovery_t *run) {
+    cbm_daemon_application_t *application = run->application;
+    cbm_mutex_lock(&application->mutex);
+    uint8_t flags = 0;
+    if (application->stopping) {
+        flags |= APPLICATION_RECOVERY_STOPPING;
+    }
+    if (application->repair_recovery_requested) {
+        flags |= APPLICATION_RECOVERY_REQUESTED;
+    }
+    if (run->projects && yyjson_mut_arr_size(yyjson_mut_doc_get_root(run->projects)) == 0) {
+        flags |= APPLICATION_RECOVERY_SETTLED;
+    }
+    application->repair_recovery_requested = false;
+    return flags;
+}
+
+static void application_recovery_free_projects(application_recovery_t *run) {
+    yyjson_mut_doc_free(run->projects);
+    run->projects = NULL;
+    cbm_mem_class_flush_thread();
+}
+
+static void application_recovery_end_check(application_recovery_t *run, bool done) {
+    if (done) {
+        application_recovery_free_projects(run);
+        run->application->repair_recovery_done = true;
+    }
+    cbm_mutex_unlock(&run->application->mutex);
+}
+
+static bool application_recovery_wait_tick(uint64_t retry_at) {
+    if (cbm_now_ms() >= retry_at) {
+        return true;
+    }
+    cbm_usleep(APPLICATION_REPAIR_LEASE_RETRY_US);
+    return false;
+}
+
+static void application_recovery_finish(application_recovery_t *run) {
+    application_recovery_free_projects(run);
+    cbm_mutex_lock(&run->application->mutex);
+    run->application->repair_recovery_done = true;
+    cbm_mutex_unlock(&run->application->mutex);
+}
+
+/* Keep in sync with RecoveryOps in the Rust binary. */
+typedef struct {
+    bool (*stopping)(const application_recovery_t *run);
+    bool (*run_batch)(application_recovery_t *run, bool full_scan);
+    uint64_t (*retry_deadline)(void);
+    uint8_t (*begin_check)(application_recovery_t *run);
+    void (*end_check)(application_recovery_t *run, bool done);
+    bool (*wait_tick)(uint64_t retry_at);
+    void (*finish)(application_recovery_t *run);
+} application_recovery_ops_t;
+
+typedef void (*application_recovery_driver_t)(application_recovery_t *run,
+                                              const application_recovery_ops_t *ops);
+
+static application_recovery_driver_t application_external_recovery;
+
+void cbm_daemon_application_set_recovery_driver(application_recovery_driver_t driver);
+void cbm_daemon_application_set_recovery_driver(application_recovery_driver_t driver) {
+    application_external_recovery = driver;
+}
+
+static void application_run_recovery_c(application_recovery_t *run) {
     bool rescan = true;
-    while (!application->stopping) {
-        bool full_scan = rescan || !projects;
-        if (full_scan) {
-            yyjson_mut_doc_free(projects);
-            projects = application_recovery_projects(application);
-        }
-        application_recover_repair_batch(application, yyjson_mut_doc_get_root(projects));
-        if (full_scan && projects && !application->stopping) {
-            char pending[CBM_SZ_32];
-            snprintf(pending, sizeof(pending), "%zu",
-                     yyjson_mut_arr_size(yyjson_mut_doc_get_root(projects)));
-            cbm_log_info("cross_repo.recovery_scan_complete", "pending", pending);
-        }
-        uint64_t retry_at = application_deadline_after(APPLICATION_REPAIR_RECOVERY_RETRY_MS);
+    while (!application_recovery_stopping(run)) {
+        application_recovery_round(run, rescan || !run->projects);
+        uint64_t retry_at = application_recovery_retry_deadline();
         for (;;) {
-            cbm_mutex_lock(&application->mutex);
-            rescan = application->repair_recovery_requested;
-            application->repair_recovery_requested = false;
-            bool done = application->stopping ||
-                        (!rescan && projects &&
-                         yyjson_mut_arr_size(yyjson_mut_doc_get_root(projects)) == 0);
+            uint8_t flags = application_recovery_begin_check(run);
+            rescan = (flags & APPLICATION_RECOVERY_REQUESTED) != 0;
+            bool done = (flags & APPLICATION_RECOVERY_STOPPING) != 0 ||
+                        (!rescan && (flags & APPLICATION_RECOVERY_SETTLED) != 0);
+            application_recovery_end_check(run, done);
             if (done) {
-                yyjson_mut_doc_free(projects);
-                cbm_mem_class_flush_thread();
-                application->repair_recovery_done = true;
-                cbm_mutex_unlock(&application->mutex);
-                return NULL;
+                return;
             }
-            cbm_mutex_unlock(&application->mutex);
-            if (rescan || cbm_now_ms() >= retry_at) {
+            if (rescan || application_recovery_wait_tick(retry_at)) {
                 break;
             }
-            cbm_usleep(APPLICATION_REPAIR_LEASE_RETRY_US);
         }
     }
-    yyjson_mut_doc_free(projects);
-    cbm_mem_class_flush_thread();
-    cbm_mutex_lock(&application->mutex);
-    application->repair_recovery_done = true;
-    cbm_mutex_unlock(&application->mutex);
+    application_recovery_finish(run);
+}
+
+static void *application_repair_recovery_thread(void *opaque) {
+    application_recovery_t run = {.application = opaque};
+    static const application_recovery_ops_t ops = {
+        .stopping = application_recovery_stopping,
+        .run_batch = application_recovery_round,
+        .retry_deadline = application_recovery_retry_deadline,
+        .begin_check = application_recovery_begin_check,
+        .end_check = application_recovery_end_check,
+        .wait_tick = application_recovery_wait_tick,
+        .finish = application_recovery_finish,
+    };
+    cbm_log_info("cross_repo.recovery_driver", "implementation",
+                 application_external_recovery ? "rust" : "c");
+    if (application_external_recovery) {
+        application_external_recovery(&run, &ops);
+    } else {
+        application_run_recovery_c(&run);
+    }
     return NULL;
 }
 
@@ -4421,15 +4576,132 @@ static void application_clear_named_watch_locked(cbm_daemon_application_t *appli
     }
 }
 
+typedef struct {
+    cbm_daemon_application_t *application;
+    cbm_daemon_named_watch_t *entries;
+    size_t count;
+    bool *pending;
+} application_named_watch_run_t;
+
+typedef struct {
+    bool present;
+    bool deferred;
+    cbm_daemon_application_watch_t *added;
+} application_named_watch_stage_t;
+
 static bool application_named_watch_list_contains(const cbm_daemon_named_watch_t *entries,
-                                                  const bool *deferred, size_t count,
-                                                  const char *project) {
+                                                  const application_named_watch_stage_t *stage,
+                                                  size_t count, const char *project) {
     for (size_t i = 0; i < count; i++) {
-        if (!deferred[i] && strcmp(entries[i].project, project) == 0) {
+        if (!stage[i].deferred && strcmp(entries[i].project, project) == 0) {
             return true;
         }
     }
     return false;
+}
+
+static bool application_named_watch_check(application_named_watch_run_t *run, size_t at,
+                                          bool *present, bool *was_pending) {
+    *was_pending = run->entries[at].pending;
+    return application_named_watch_valid(run->application, run->entries, at, present);
+}
+
+static bool application_named_watch_add(application_named_watch_run_t *run, size_t at,
+                                        application_named_watch_stage_t *entry) {
+    cbm_daemon_application_t *application = run->application;
+    const cbm_daemon_named_watch_t *requested = &run->entries[at];
+    cbm_daemon_application_watch_t *watch =
+        application_find_watch_locked(application, requested->project);
+    if (watch && watch->named) {
+        return true;
+    }
+    if (!entry->present && !watch) {
+        entry->deferred = true;
+        return true;
+    }
+    if (watch) {
+        if (!cbm_watcher_set_named(application->watcher, watch->project, true)) {
+            return false;
+        }
+        watch->named = true;
+    } else {
+        watch = application_create_watch_locked(application, requested->project, requested->root,
+                                                NULL, true);
+        if (!watch) {
+            return false;
+        }
+    }
+    entry->added = watch;
+    return true;
+}
+
+static void application_named_watch_undo(application_named_watch_run_t *run,
+                                         cbm_daemon_application_watch_t *added) {
+    application_clear_named_watch_locked(run->application, added);
+}
+
+static void application_named_watch_commit(application_named_watch_run_t *run,
+                                           const application_named_watch_stage_t *stage) {
+    cbm_daemon_application_t *application = run->application;
+    for (cbm_daemon_application_watch_t *watch = application->watches; watch;) {
+        cbm_daemon_application_watch_t *next = watch->next;
+        if (!application_named_watch_list_contains(run->entries, stage, run->count, watch->project)) {
+            application_clear_named_watch_locked(application, watch);
+        }
+        watch = next;
+    }
+    for (size_t i = 0; i < run->count; i++) {
+        run->entries[i].pending = stage[i].deferred;
+        if (run->pending && stage[i].deferred) {
+            *run->pending = true;
+        }
+    }
+}
+
+/* Keep in sync with NamedWatchStage and NamedWatchOps in the Rust binary. */
+typedef struct {
+    bool (*check)(application_named_watch_run_t *run, size_t at, bool *present, bool *was_pending);
+    bool (*add)(application_named_watch_run_t *run, size_t at, application_named_watch_stage_t *entry);
+    void (*undo)(application_named_watch_run_t *run, cbm_daemon_application_watch_t *added);
+    void (*commit)(application_named_watch_run_t *run, const application_named_watch_stage_t *stage);
+} application_named_watch_ops_t;
+
+typedef bool (*application_named_watch_driver_t)(application_named_watch_run_t *run,
+                                                 const application_named_watch_ops_t *ops,
+                                                 application_named_watch_stage_t *stage,
+                                                 size_t count);
+
+static application_named_watch_driver_t application_external_named_watch;
+
+void cbm_daemon_application_set_named_watch_driver(application_named_watch_driver_t driver);
+void cbm_daemon_application_set_named_watch_driver(application_named_watch_driver_t driver) {
+    application_external_named_watch = driver;
+}
+
+static bool application_run_named_watch_c(application_named_watch_run_t *run,
+                                          application_named_watch_stage_t *stage) {
+    for (size_t i = 0; i < run->count; i++) {
+        bool was_pending;
+        if (!application_named_watch_check(run, i, &stage[i].present, &was_pending)) {
+            if (!was_pending) {
+                return false;
+            }
+            stage[i].deferred = true;
+        }
+    }
+    for (size_t i = 0; i < run->count; i++) {
+        if (!stage[i].deferred && !application_named_watch_add(run, i, &stage[i])) {
+            while (i) {
+                cbm_daemon_application_watch_t *added = stage[--i].added;
+                if (added) {
+                    application_named_watch_undo(run, added);
+                }
+            }
+            return false;
+        }
+    }
+    application_named_watch_commit(run, stage);
+    return true;
 }
 
 bool cbm_daemon_application_reconcile_named_watches(cbm_daemon_application_t *application,
@@ -4451,67 +4723,24 @@ bool cbm_daemon_application_reconcile_named_watches(cbm_daemon_application_t *ap
         cbm_mutex_unlock(&application->mutex);
         return count == 0;
     }
-    bool present[CBM_DAEMON_NAMED_WATCH_LIMIT];
-    bool deferred[CBM_DAEMON_NAMED_WATCH_LIMIT] = {0};
-    for (size_t i = 0; i < count; i++) {
-        if (!application_named_watch_valid(application, entries, i, &present[i])) {
-            if (!entries[i].pending) {
-                cbm_mutex_unlock(&application->mutex);
-                return false;
-            }
-            deferred[i] = true;
-        }
-    }
 
-    cbm_daemon_application_watch_t *added[CBM_DAEMON_NAMED_WATCH_LIMIT];
-    size_t added_count = 0;
-    for (size_t i = 0; i < count; i++) {
-        if (deferred[i]) {
-            continue;
-        }
-        cbm_daemon_application_watch_t *watch =
-            application_find_watch_locked(application, entries[i].project);
-        if (watch && watch->named) {
-            continue;
-        }
-        if (!present[i] && !watch) {
-            deferred[i] = true;
-            continue;
-        }
-        if (watch) {
-            if (cbm_watcher_set_named(application->watcher, watch->project, true)) {
-                watch->named = true;
-            } else {
-                watch = NULL;
-            }
-        } else {
-            watch = application_create_watch_locked(application, entries[i].project,
-                                                    entries[i].root, NULL, true);
-        }
-        if (!watch) {
-            while (added_count) {
-                application_clear_named_watch_locked(application, added[--added_count]);
-            }
-            cbm_mutex_unlock(&application->mutex);
-            return false;
-        }
-        added[added_count++] = watch;
-    }
-    for (cbm_daemon_application_watch_t *watch = application->watches; watch;) {
-        cbm_daemon_application_watch_t *next = watch->next;
-        if (!application_named_watch_list_contains(entries, deferred, count, watch->project)) {
-            application_clear_named_watch_locked(application, watch);
-        }
-        watch = next;
-    }
-    for (size_t i = 0; i < count; i++) {
-        entries[i].pending = deferred[i];
-        if (pending && deferred[i]) {
-            *pending = true;
-        }
-    }
+    application_named_watch_run_t run = {
+        .application = application, .entries = entries, .count = count, .pending = pending,
+    };
+    application_named_watch_stage_t stage[CBM_DAEMON_NAMED_WATCH_LIMIT] = {0};
+    static const application_named_watch_ops_t ops = {
+        .check = application_named_watch_check,
+        .add = application_named_watch_add,
+        .undo = application_named_watch_undo,
+        .commit = application_named_watch_commit,
+    };
+    cbm_log_debug("daemon.named_watch.reconcile", "implementation",
+                  application_external_named_watch ? "rust" : "c");
+    bool accepted = application_external_named_watch
+                        ? application_external_named_watch(&run, &ops, stage, count)
+                        : application_run_named_watch_c(&run, stage);
     cbm_mutex_unlock(&application->mutex);
-    return true;
+    return accepted;
 }
 
 bool cbm_daemon_application_named_watches_match(cbm_daemon_application_t *application,

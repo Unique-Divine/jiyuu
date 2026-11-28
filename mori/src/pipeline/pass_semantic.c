@@ -820,246 +820,42 @@ const char *cbm_semantic_base_edge_type(const cbm_gbuf_node_t *base_node) {
                : "INHERITS";
 }
 
-/* ── Explicit OVERRIDE: nearest declaring ancestor (#1278) ──────────
- *
- * A method overrides the same-named method of its NEAREST ancestor that
- * declares one, not only of its direct base: `Leaf(Intermediate(Processor))`
- * with an Intermediate that redeclares nothing still binds
- * Leaf.process -> Processor.process.
- *
- * The walk is level-synchronous over explicit IMPLEMENTS/INHERITS edges:
- * level 1 is every direct base, level k+1 every not-yet-visited base of
- * level k. A method is bound to every declaring ancestor on the FIRST level
- * that has one and is not looked up further, so the edge set does not depend
- * on edge or node order (a diamond's two equally near declarations both
- * bind; its shared root binds once, via insert-edge dedup). Direct bases are
- * level 1, so every edge the direct-base-only matcher made is still made.
- * A visited set makes every ancestor enter the walk at most once: cycles and
- * self-loops in a malformed hierarchy terminate, and the level count can
- * never exceed the node count (the check below is only that invariant). */
+/* The Rust pass computes edges from a snapshot of the hierarchy. */
+typedef void (*override_base_fn)(void *, int64_t, int64_t);
+typedef void (*override_method_fn)(void *, int64_t, int64_t, const char *);
 
-typedef struct {
-    int64_t *ids;
-    int count;
-    int cap;
-} ovr_id_list_t;
+extern int mori_explicit_override(cbm_gbuf_t *graph, int max_levels);
 
-static bool ovr_ids_push(ovr_id_list_t *list, int64_t id) {
-    if (list->count == list->cap) {
-        int cap = list->cap ? list->cap * 2 : 16;
-        int64_t *grown =
-            cbm_realloc(CBM_MEM_CLASS_SEMANTIC, list->ids, (size_t)cap * sizeof(int64_t));
-        if (!grown) {
-            return false;
-        }
-        list->ids = grown;
-        list->cap = cap;
-    }
-    list->ids[list->count++] = id;
-    return true;
-}
-
-static int ovr_cmp_id(const void *a, const void *b) {
-    int64_t x = *(const int64_t *)a;
-    int64_t y = *(const int64_t *)b;
-    return (x > y) - (x < y);
-}
-
-/* Sort + unique in place. */
-static void ovr_ids_normalize(ovr_id_list_t *list) {
-    if (list->count < 2) {
-        return;
-    }
-    qsort(list->ids, (size_t)list->count, sizeof(int64_t), ovr_cmp_id);
-    int w = 1;
-    for (int r = 1; r < list->count; r++) {
-        if (list->ids[r] != list->ids[w - 1]) {
-            list->ids[w++] = list->ids[r];
-        }
-    }
-    list->count = w;
-}
-
-static bool ovr_ids_has(const ovr_id_list_t *sorted, int64_t id) {
-    return sorted->count > 0 &&
-           bsearch(&id, sorted->ids, (size_t)sorted->count, sizeof(int64_t), ovr_cmp_id) != NULL;
-}
-
-static const char *const ovr_base_edge_types[] = {"IMPLEMENTS", "INHERITS"};
-enum { OVR_BASE_EDGE_TYPE_COUNT = 2 };
-
-/* Append every explicit base of `node` to `out`. */
-static bool ovr_push_bases(const cbm_gbuf_t *gb, int64_t node, ovr_id_list_t *out) {
-    for (int t = 0; t < OVR_BASE_EDGE_TYPE_COUNT; t++) {
+void cbm_override_read_bases(const cbm_gbuf_t *graph, void *data, override_base_fn read) {
+    static const char *const types[] = {"IMPLEMENTS", "INHERITS"};
+    for (size_t type = 0; type < sizeof(types) / sizeof(types[0]); type++) {
         const cbm_gbuf_edge_t **edges = NULL;
-        int n = 0;
-        cbm_gbuf_find_edges_by_source_type(gb, node, ovr_base_edge_types[t], &edges, &n);
-        for (int e = 0; e < n; e++) {
-            if (!ovr_ids_push(out, edges[e]->target_id)) {
-                return false;
-            }
+        int count = 0;
+        cbm_gbuf_find_edges_by_type(graph, types[type], &edges, &count);
+        for (int i = 0; i < count; i++) {
+            read(data, edges[i]->source_id, edges[i]->target_id);
         }
     }
-    return true;
 }
 
-/* Bind each still-unbound method of the class to the same-named methods of
- * one ancestor. Marks nothing: a level's bindings are committed by the caller
- * after the whole level ran, so equally near declarations all bind. */
-static int ovr_match_ancestor(cbm_gbuf_t *gb, const cbm_gbuf_edge_t **cls_dm, int cls_dm_count,
-                              const bool *bound, bool *bound_now, int64_t ancestor) {
-    const cbm_gbuf_edge_t **base_dm = NULL;
-    int base_dm_count = 0;
-    cbm_gbuf_find_edges_by_source_type(gb, ancestor, "DEFINES_METHOD", &base_dm, &base_dm_count);
-    int created = 0;
-    for (int c = 0; c < cls_dm_count; c++) {
-        if (bound[c]) {
-            continue;
-        }
-        const cbm_gbuf_node_t *cm = cbm_gbuf_find_by_id(gb, cls_dm[c]->target_id);
-        if (!cm || !cm->name) {
-            continue;
-        }
-        for (int b = 0; b < base_dm_count; b++) {
-            const cbm_gbuf_node_t *bm = cbm_gbuf_find_by_id(gb, base_dm[b]->target_id);
-            if (bm && bm->name && cm->id != bm->id && strcmp(cm->name, bm->name) == 0) {
-                cbm_gbuf_insert_edge(gb, cm->id, bm->id, "OVERRIDE", "{}");
-                bound_now[c] = true;
-                created++;
-                break;
-            }
+bool cbm_override_read_methods(const cbm_gbuf_t *graph, int64_t owner, void *data,
+                               override_method_fn read) {
+    const cbm_gbuf_edge_t **edges = NULL;
+    int count = 0;
+    cbm_gbuf_find_edges_by_source_type(graph, owner, "DEFINES_METHOD", &edges, &count);
+    for (int i = 0; i < count; i++) {
+        const cbm_gbuf_node_t *method = cbm_gbuf_find_by_id(graph, edges[i]->target_id);
+        if (method && method->name) {
+            read(data, owner, method->id, method->name);
         }
     }
-    return created;
-}
-
-typedef struct {
-    ovr_id_list_t visited; /* sorted */
-    ovr_id_list_t level;
-    ovr_id_list_t next;
-    bool *bound;
-    bool *bound_now;
-    int flags_cap;
-} ovr_walk_t;
-
-static void ovr_walk_free(ovr_walk_t *w) {
-    cbm_free(CBM_MEM_CLASS_SEMANTIC, w->visited.ids);
-    cbm_free(CBM_MEM_CLASS_SEMANTIC, w->level.ids);
-    cbm_free(CBM_MEM_CLASS_SEMANTIC, w->next.ids);
-    cbm_free(CBM_MEM_CLASS_SEMANTIC, w->bound);
-    cbm_free(CBM_MEM_CLASS_SEMANTIC, w->bound_now);
-}
-
-static bool ovr_walk_reserve_flags(ovr_walk_t *w, int n) {
-    if (n <= w->flags_cap) {
-        return true;
-    }
-    bool *b = cbm_realloc(CBM_MEM_CLASS_SEMANTIC, w->bound, (size_t)n * sizeof(bool));
-    if (!b) {
-        return false;
-    }
-    w->bound = b;
-    bool *bn = cbm_realloc(CBM_MEM_CLASS_SEMANTIC, w->bound_now, (size_t)n * sizeof(bool));
-    if (!bn) {
-        return false;
-    }
-    w->bound_now = bn;
-    w->flags_cap = n;
-    return true;
-}
-
-/* Drop from `next` every id already visited, then add the rest to visited. */
-static bool ovr_walk_advance(ovr_walk_t *w) {
-    ovr_ids_normalize(&w->next);
-    w->level.count = 0;
-    for (int i = 0; i < w->next.count; i++) {
-        int64_t id = w->next.ids[i];
-        if (!ovr_ids_has(&w->visited, id) && !ovr_ids_push(&w->level, id)) {
-            return false;
-        }
-    }
-    for (int i = 0; i < w->level.count; i++) {
-        if (!ovr_ids_push(&w->visited, w->level.ids[i])) {
-            return false;
-        }
-    }
-    ovr_ids_normalize(&w->visited);
-    w->next.count = 0;
-    return true;
-}
-
-/* All OVERRIDE edges of one class: walk its ancestors level by level until
- * every method is bound or the ancestors run out. */
-static int ovr_class_overrides(cbm_gbuf_t *gb, int64_t cls_id, ovr_walk_t *w) {
-    const cbm_gbuf_edge_t **cls_dm = NULL;
-    int cls_dm_count = 0;
-    cbm_gbuf_find_edges_by_source_type(gb, cls_id, "DEFINES_METHOD", &cls_dm, &cls_dm_count);
-    if (cls_dm_count == 0 || !ovr_walk_reserve_flags(w, cls_dm_count)) {
-        return 0;
-    }
-    memset(w->bound, 0, (size_t)cls_dm_count * sizeof(bool));
-    memset(w->bound_now, 0, (size_t)cls_dm_count * sizeof(bool));
-    w->visited.count = 0;
-    w->next.count = 0;
-    if (!ovr_ids_push(&w->visited, cls_id) || !ovr_push_bases(gb, cls_id, &w->next) ||
-        !ovr_walk_advance(w)) {
-        return 0;
-    }
-    int created = 0;
-    int unbound = cls_dm_count;
-    const int max_levels = cbm_gbuf_node_count(gb); /* invariant, never reached */
-    for (int depth = 0; w->level.count > 0 && unbound > 0 && depth < max_levels; depth++) {
-        for (int i = 0; i < w->level.count; i++) {
-            created += ovr_match_ancestor(gb, cls_dm, cls_dm_count, w->bound, w->bound_now,
-                                          w->level.ids[i]);
-            if (!ovr_push_bases(gb, w->level.ids[i], &w->next)) {
-                return created;
-            }
-        }
-        for (int c = 0; c < cls_dm_count; c++) {
-            if (w->bound_now[c] && !w->bound[c]) {
-                w->bound[c] = true;
-                unbound--;
-            }
-        }
-        if (!ovr_walk_advance(w)) {
-            return created;
-        }
-    }
-    return created;
+    /* Go's implicit interface pass already emits its OVERRIDE edges. */
+    const cbm_gbuf_node_t *type = cbm_gbuf_find_by_id(graph, owner);
+    return type && !(type->file_path && fp_ends_with(type->file_path, ".go"));
 }
 
 int cbm_pipeline_override_explicit(cbm_pipeline_ctx_t *ctx) {
-    if (!ctx || !ctx->gbuf) {
-        return 0;
-    }
-    /* Every class with at least one explicit base, once, in id order. */
-    ovr_id_list_t classes = {0};
-    for (int t = 0; t < OVR_BASE_EDGE_TYPE_COUNT; t++) {
-        const cbm_gbuf_edge_t **edges = NULL;
-        int edge_count = 0;
-        cbm_gbuf_find_edges_by_type(ctx->gbuf, ovr_base_edge_types[t], &edges, &edge_count);
-        for (int e = 0; e < edge_count; e++) {
-            if (!ovr_ids_push(&classes, edges[e]->source_id)) {
-                cbm_free(CBM_MEM_CLASS_SEMANTIC, classes.ids);
-                return 0;
-            }
-        }
-    }
-    ovr_ids_normalize(&classes);
-
-    int created = 0;
-    ovr_walk_t walk = {0};
-    for (int i = 0; i < classes.count; i++) {
-        const cbm_gbuf_node_t *cls = cbm_gbuf_find_by_id(ctx->gbuf, classes.ids[i]);
-        /* Go's implicit satisfaction already emits OVERRIDE with interface
-         * semantics; running both would double-cover .go sources. */
-        if (!cls || (cls->file_path && fp_ends_with(cls->file_path, ".go"))) {
-            continue;
-        }
-        created += ovr_class_overrides(ctx->gbuf, cls->id, &walk);
-    }
-    ovr_walk_free(&walk);
-    cbm_free(CBM_MEM_CLASS_SEMANTIC, classes.ids);
-    return created;
+    return ctx && ctx->gbuf
+               ? mori_explicit_override(ctx->gbuf, cbm_gbuf_node_count(ctx->gbuf))
+               : 0;
 }

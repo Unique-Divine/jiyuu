@@ -241,7 +241,7 @@ else
 fi
 
 # Network calls are not allowed in vendored code. The graph-UI HTTP server is
-# first-party (src/ui/httpd.c) and audited separately by security-ui.sh.
+# first-party Rust code audited separately by security-ui.sh.
 NETWORK_FUNCS='[^a-z_]connect\(|[^a-z_]socket\(|[^a-z_]sendto\(|[^a-z_]bind\('
 VENDORED_NETWORK="$(grep -rn -E "$NETWORK_FUNCS" "$VENDORED_ROOT/" --include='*.c' --include='*.h' 2>/dev/null \
     | grep -v '^\s*//' | grep -v '^\s*\*' | grep -v '#define' | grep -v 'typedef' \

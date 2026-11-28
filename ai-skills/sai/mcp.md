@@ -27,6 +27,10 @@ sai mcp uninstall codex
 - `--scope project` writes the project's shared config (Claude Code
   `.mcp.json`, Cursor `.cursor/mcp.json`) instead of the user's. Codex is
   user only.
+- When doctor or an update reports a stale Claude Code launcher, use the
+  exact repair command it prints. For example, `sai mcp install --client
+  claude --scope user --repair-existing sai` edits the existing user entry
+  in place. Keep the name and scope from the report.
 - From a checkout, give the server command after `--`:
   `sai mcp install claude -- uv run --directory /path/to/open-sai sai mcp serve`.
 - The client must restart or reconnect to load a change. Cursor may also ask
@@ -43,37 +47,52 @@ about the server. Call `mcp_info`.
 ## Tools
 
 Call `mcp_info` first. It reports the version, endpoints, the active account,
-and `trading`, which says whether trades can submit. `restartNeeded` is true
+and `trading`, which reports the active account's session readiness. `restartNeeded` is true
 when sai was updated and this server still runs the old code; ask the person
 to restart the client. `logs.dir` is where sai logs every tool call, and `sai
 logs tail --surface mcp` in a terminal reads them ([cli.md](cli.md#logs)).
 
 | Tool | Use |
 | --- | --- |
-| `mcp_info` | Version, endpoints, active account, and whether trading is available |
+| `mcp_info` | Version, endpoints, and the active account's session readiness |
 | `auth_status`, `auth_list` | The active account, and every connected account |
 | `auth_use` | Switch the active account. Also switches it for the CLI. |
 | `market_list`, `market_prices` | Markets and current indexed prices |
+| `account_overview` | Sai funds, position risk, pending and queued orders, local trade blockers, and session expiry |
 | `account_positions`, `account_balances`, `account_history` | Reads for one account |
 | `intent_local`, `intent_status` | Locally recorded intents, and Keeper's record of them |
+| `intent_wait` | Wait for an existing intent key and return its receipt |
+| `logs_intent` | Read local events for one intent and optionally query Keeper |
 | `preview_open`, `preview_close`, `preview_partial_close`, `preview_tpsl`, `preview_leverage`, `preview_margin` | What a trade would do. Submits nothing. |
 | `trade_open`, `trade_close`, `trade_partial_close`, `trade_tpsl`, `trade_leverage`, `trade_margin` | Submit the previewed trade |
 
-Account reads take an optional `addr`. Without one they read the active
-account and report `addrSource` as `session`. Say so to the person, and pass
-`addr` to read any other account.
+Account reads take an optional `addr`. Pass a public address to read that
+account without a session. With no address, the tools use the active account
+and report `addrSource` as `session`.
+
+Use `account_overview` for a portfolio check. Report any failed section
+that matters to the user's question. Check `sourceAgeSeconds` even when
+`fetchedAt` is recent.
 
 ## Sign-In
 
 The server lists every tool whether or not anyone is signed in. Each
 `trade_*` call checks the session of the account it acts as.
 
-| `mcp_info.trading.reason` | A `trade_*` call returns | Meaning |
-| --- | --- | --- |
-| `signed-in` | the trade result | Trades can submit. |
-| `signed-out` | `SIGNED_OUT` | No account is connected. |
-| `expired` | `SESSION_EXPIRED` | The session ran out. |
-| `other-endpoint` | `SESSION_UNAVAILABLE` | The session belongs to another Keeper endpoint, or its file is unreadable. |
+If `mcp_info.session.expiryWarning` is present, tell the person when the
+session expires. To renew, use the same Keeper endpoint. The v0.1.2
+`renewalCommand` can include explanatory text after the command.
+
+| `mcp_info.trading.reason` | What It Means for the Active Account |
+| --- | --- |
+| `signed-in` | The session is valid for this Keeper endpoint. |
+| `signed-out` | There is no active account, or Sai could not load its session. |
+| `expired` | The session ran out. |
+| `other-endpoint` | The session belongs to another Keeper endpoint. |
+
+Use the requested trade's `code` to diagnose its session. It can return
+`SIGNED_OUT`, `SESSION_EXPIRED`, or `SESSION_UNAVAILABLE` even when
+`mcp_info` reports `signed-in` for a different account.
 
 A refused call submits nothing. Ask the person to run `sai auth import`, or
 `sai auth login NAME` with their Foundry keystore name, in their own
@@ -87,10 +106,15 @@ for the token and never returns it.
    every preview and trade. Without `addr` a tool acts on whichever account
    is active at that moment, and another terminal or client can switch it.
 2. Show the person the preview, the `addr` it names, and the network from
-   `mcp_info`. For a market open, also give the worst-case fill described
-   below. Wait for explicit confirmation.
+   `mcp_info`. Give the fees, liquidation price, and worst-case fill from
+   `estimates` where available. Wait for explicit confirmation.
 3. Call the `trade_*` tool with the same arguments, the same `addr`, and the
    preview's digest.
+
+A signed-out `preview_open` without `addr` can return `addr: null` and a
+`previewDigest`. Use it for estimates only. The digest changes when the
+preview names a connected account. After sign-in, preview again with that
+account's `addr` before asking for confirmation.
 
 Outputs use camelCase and inputs use snake_case:
 
@@ -108,15 +132,20 @@ the one the person confirmed. The digest covers:
 
 - Every trade: the account and the intent the arguments produce.
 - `trade_open` for a market order: also the confirmed `reference_price`.
-- `trade_margin`: also the whole margin quote computed from the position. If
-  the position changed, the quote changes and the digest no longer matches.
-- `trade_partial_close`: the collateral reduction computed from the position.
-  It does not cover the position's leverage. If leverage changes after the
-  preview and the same reduction is still valid, the digest matches and the
-  trade submits. The server also reads the position twice during the live
-  call and refuses when collateral or leverage differ between those two
-  reads, which catches a change during the call, not one since the preview.
-  Preview again right before submitting when the position may have changed.
+- `trade_margin` also binds the full margin quote, including starting
+  collateral, stored leverage, and the inputs that determine effective
+  leverage. If `quote.marginChangeIsEstimate` is true, say that after-hours
+  guard fees can change the amount.
+- `trade_partial_close` also binds the close percentage, starting collateral
+  and leverage, and the contract inputs used to quote the requested slice,
+  including the applicable after-hours cap and collateral/USD oracle price.
+  Show the quoted notional and say whether `quote.closedNotionalIsEstimate`
+  is true. If the collateral oracle price is unavailable, the partial-close
+  estimate cannot be submitted. Preview again when Sai can verify the price
+  and ask the person to confirm the updated quote.
+
+The `estimates` object is informational. The price sources, time fields,
+and fee exclusions are in [Reading the Estimates](trading-safety.md#reading-the-estimates).
 
 ### Market Opens: Quote Check and Fill Bound
 
@@ -141,21 +170,34 @@ reference `R`, choose a slippage with `R × (1 + s)² ≤ C`, so
 `s ≤ 0.498%`: 0.49% gives a worst case of 60,589.44, and 0.5% allows
 60,601.50. For a short with a floor `F`, use `s ≤ 1 − sqrt(F / R)`.
 
-A limit order's `price` is a trigger, not a cap. The contract applies the
-slippage after the trigger check, so its worst fill is `trigger × (1 + s)`
-for a long and `trigger × (1 − s)` for a short. A stop order has no advance
-fill bound: the slippage applies to the oracle price when the stop triggers,
-which can sit well past the stop price after a gap.
+Limit and stop order prices are triggers. Perp applies the slippage around
+the stored trigger after checking that the order can fill. The worst fill is
+`trigger × (1 + s)` for a long and `trigger × (1 − s)` for a short.
+A stop can miss its fill when a gap takes the price outside that bound.
 [trading-safety.md](trading-safety.md) rule 3 has the full rule.
 
-On `PREVIEW_MISMATCH` or `PRICE_MOVED` nothing was submitted. The result
-holds a fresh preview. Show it, get confirmation again, and retry with the
-new `preview_digest` and `reference_price`.
+On `PREVIEW_MISMATCH` or `PRICE_MOVED`, nothing was submitted. Use the
+replacement `preview` only if Sai can verify the quote. For a partial
+close, check that `quote.collateralPriceUsd` has a value. A USDC estimate
+can still have a digest when that field is `null`.
+
+If the replacement is missing or lacks a verifiable quote, wait until Sai
+can verify the quote and call the matching `preview_*` tool again. Ask for
+confirmation only when the preview shows a verifiable quote, including the
+collateral price for a partial close. Discard the old digest and submit with
+the new `preview_digest` and, for a market open, the new `reference_price`.
 
 To cancel a pending order, pass `cancel_order=true` to `preview_close` and
-`trade_close`. Without it the tools close a position.
+`trade_close`. Both check that the order is pending. If it fills after the
+submit-time check, Perp can close the filled position at market.
 
 Call `auth_use` only when the person asks to switch accounts.
+
+After a trade returns its key, call `intent_wait` with that `key` and the
+trade's `addr`. The `timeout` argument is in seconds and caps at 10.
+On `OUTCOME_UNKNOWN`,
+call it again with the same key and address. A receipt gives the request
+transaction hash and the execution block when Keeper has that evidence.
 
 [trading-safety.md](trading-safety.md) covers what to do after a trade is
 accepted, times out, or returns `OUTCOME_UNKNOWN` or `RECENT_OPEN_PENDING`.

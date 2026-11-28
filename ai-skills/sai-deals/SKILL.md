@@ -11,7 +11,7 @@ deal, and cite the evidence behind each conclusion.
 
 | Task | Read |
 | --- | --- |
-| Install the skill or reader CLI and load a credential | [Install and Connect](references/install.md) |
+| Install the skill or reader CLI and load a credential | [Install and Connect](workflows/install.md) |
 | Read directly from the API | [Deal Desk GraphQL](references/graphql.md) |
 | Explain what happened on a deal | [Brief One Deal](workflows/deal-review.md) |
 | Interpret evidence or check a saved measurement against Keeper | [Evidence](references/evidence.md) |

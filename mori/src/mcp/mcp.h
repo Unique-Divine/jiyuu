@@ -275,9 +275,6 @@ typedef void (*cbm_mcp_read_override_free_fn)(char *payload);
 void cbm_mcp_set_read_override(cbm_mcp_read_override_fn handle,
                                cbm_mcp_read_override_free_fn release);
 
-typedef int (*cbm_mcp_method_selector_fn)(const char *method);
-void cbm_mcp_set_method_selector(cbm_mcp_method_selector_fn select);
-
 /* Decode validated parameters for tools/call. The callback can return
  * false to use the C decoder. C frees the returned name and arguments. */
 typedef bool (*cbm_mcp_tool_call_decoder_fn)(const char *params_json, char **name_out,
@@ -294,11 +291,11 @@ typedef struct {
 } cbm_mcp_cypher_cell_t;
 
 /* These callbacks copy borrowed cells into the native response owner.
- * The evaluator emits the header and engine truncation flag before the rows. */
+ * The header carries engine truncation and any warning before the rows. */
 typedef struct {
     void *context;
     bool (*begin)(void *context, const cbm_mcp_cypher_cell_t *columns, size_t column_count,
-                  size_t row_capacity, bool truncated);
+                  size_t row_capacity, bool truncated, cbm_mcp_cypher_cell_t warning);
     bool (*row)(void *context, const cbm_mcp_cypher_cell_t *cells);
     void (*storage_error)(void *context, cbm_mcp_cypher_cell_t detail);
 } cbm_mcp_cypher_sink_t;
@@ -312,9 +309,10 @@ enum {
     CBM_MCP_CYPHER_ERROR,
 };
 
+/* budget_status reports OK, DEADLINE, or CANCELLED for the active request. */
 typedef int (*cbm_mcp_cypher_evaluator_fn)(struct sqlite3 *db, const char *query,
-                                           const char *project, bool (*cancelled)(void *),
-                                           void *cancel_context, const cbm_mcp_cypher_sink_t *sink);
+                                           const char *project, int (*budget_status)(void *),
+                                           void *budget_context, const cbm_mcp_cypher_sink_t *sink);
 void cbm_mcp_set_cypher_evaluator(cbm_mcp_cypher_evaluator_fn evaluate);
 
 typedef struct {
@@ -427,28 +425,6 @@ typedef struct {
     bool populated;
 } cbm_mcp_project_record_t;
 
-typedef struct {
-    int limit;
-    int offset;
-    int start;
-    int end;
-} cbm_mcp_project_page_t;
-
-/* Register before request threads start. The callback sorts the borrowed records
- * in place and clamps limit/offset before returning the half-open page bounds.
- * The array may be NULL when count is zero. C owns all records and strings. */
-typedef void (*cbm_mcp_project_page_builder_fn)(cbm_mcp_project_record_t *records, int count,
-                                                cbm_mcp_project_page_t *page);
-void cbm_mcp_set_project_page_builder(cbm_mcp_project_page_builder_fn builder);
-
-/* The renderer borrows the selected page and returns an owned payload. */
-typedef char *(*cbm_mcp_project_list_renderer_fn)(const cbm_mcp_project_record_t *page_records,
-                                                  int total, const cbm_mcp_project_page_t *page,
-                                                  bool metadata_only, bool include_stats,
-                                                  bool wants_json);
-void cbm_mcp_set_project_list_renderer(cbm_mcp_project_list_renderer_fn renderer,
-                                        cbm_mcp_read_override_free_fn release);
-
 /* Diagnostic JSON is an ordered object produced by native collectors. Strings
  * and the report are borrowed for the render call. */
 typedef struct {
@@ -521,10 +497,12 @@ typedef struct {
     bool clipped;
 } cbm_mcp_snippet_window_t;
 
-typedef cbm_mcp_snippet_window_t (*cbm_mcp_snippet_window_planner_fn)(
-    const cbm_mcp_snippet_window_request_t *request);
-/* Register before request threads start. */
-void cbm_mcp_set_snippet_window_planner(cbm_mcp_snippet_window_planner_fn planner);
+cbm_mcp_snippet_window_t mori_snippet_plan(const cbm_mcp_snippet_window_request_t *request);
+/* The source functions return NULL or a UTF-8 string owned by Rust. */
+char *mori_snippet_captured_source(const cbm_mcp_snippet_window_t *window, bool source_drift,
+                                  const uint8_t *bytes, size_t len);
+char *mori_snippet_source_text(const char *source);
+void mori_snippet_free_source(char *source);
 
 typedef bool (*cbm_mcp_ingest_trace_normalizer_fn)(const char *const *hops, size_t hop_count,
                                                    int64_t *count);

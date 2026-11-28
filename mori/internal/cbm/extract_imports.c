@@ -4,7 +4,9 @@
 #include "lang_specs.h"      // CBMLangSpec, CBMEmbeddedLangSpec, cbm_lang_spec, cbm_ts_language
 #include "tree_sitter/api.h" // TSNode, ts_node_*
 #include "foundation/constants.h"
+#include "foundation/log.h"
 #include "foundation/compat.h" /* CBM_TLS */
+#include "foundation/log.h"
 #include "extract_node_stack.h"
 #include <stdint.h> // uint32_t
 #include <limits.h>
@@ -138,6 +140,34 @@ static const char *python_join_from_import(CBMArena *a, const char *module, cons
 // --- Go imports ---
 // import_declaration -> import_spec_list -> import_spec -> (name, path)
 
+typedef void (*CBMGoImportSink)(void *context, const char *path, size_t path_len,
+                                const char *name, size_t name_len);
+typedef void (*CBMGoImportExtractor)(TSNode root, const char *source, size_t source_len,
+                                     void *context, CBMGoImportSink sink);
+
+static CBMGoImportExtractor go_import_extractor;
+
+void cbm_go_set_import_extractor(CBMGoImportExtractor extractor);
+void cbm_go_set_import_extractor(CBMGoImportExtractor extractor) {
+    go_import_extractor = extractor;
+}
+
+/* The extractor lends both byte slices for this call. Store them in the
+ * result arena, which outlives the borrowed Tree-sitter tree and source. */
+static void store_go_import(void *context, const char *path, size_t path_len,
+                            const char *name, size_t name_len) {
+    CBMExtractCtx *ctx = context;
+    const char *module_path = cbm_arena_strndup(ctx->arena, path, path_len);
+    if (!module_path) {
+        return;
+    }
+    CBMImport import = {
+        .local_name = cbm_arena_strndup(ctx->arena, name, name_len),
+        .module_path = module_path,
+    };
+    cbm_imports_push(&ctx->result->imports, ctx->arena, import);
+}
+
 // Parse a single Go import_spec node.
 static void parse_go_import_spec(CBMExtractCtx *ctx, TSNode spec) {
     CBMArena *a = ctx->arena;
@@ -172,6 +202,13 @@ static void parse_go_import_spec(CBMExtractCtx *ctx, TSNode spec) {
 }
 
 static void parse_go_imports(CBMExtractCtx *ctx) {
+    if (go_import_extractor && ctx->source && ctx->source_len >= 0) {
+        go_import_extractor(ctx->root, ctx->source, (size_t)ctx->source_len, ctx,
+                            store_go_import);
+        cbm_log_debug("extract.go_imports", "implementation", "rust");
+        return;
+    }
+
     TSTreeCursor cursor = ts_tree_cursor_new(ctx->root);
     if (!ts_tree_cursor_goto_first_child(&cursor)) {
         ts_tree_cursor_delete(&cursor);
@@ -349,14 +386,73 @@ static bool py_is_type_checking_condition(CBMExtractCtx *ctx, TSNode cond) {
     return text && strcmp(text, "TYPE_CHECKING") == 0;
 }
 
+typedef struct {
+    const char *data;
+    size_t len;
+} python_import_bytes_t;
+
+typedef struct {
+    python_import_bytes_t local;
+    python_import_bytes_t prefix;
+    python_import_bytes_t member;
+    bool needs_dot;
+} python_import_row_t;
+
+typedef void (*python_import_emit_t)(void *context, const python_import_row_t *row);
+typedef void (*python_import_extractor_t)(TSNode node, const char *source, size_t source_len,
+                                           python_import_emit_t emit, void *context);
+
+static python_import_extractor_t python_import_extractor;
+
+void cbm_python_set_import_extractor(python_import_extractor_t extractor);
+void cbm_python_set_import_extractor(python_import_extractor_t extractor) {
+    python_import_extractor = extractor;
+}
+
+/* The Rust callback lends these bytes only during emission. The result stores
+ * arena-owned C strings, just as the native extractor does. */
+static void python_emit_import_row(void *context, const python_import_row_t *row) {
+    CBMExtractCtx *ctx = context;
+    CBMArena *arena = ctx->arena;
+    char *module_path = NULL;
+    if (row->prefix.len == 0 && !row->needs_dot) {
+        module_path = cbm_arena_strndup(arena, row->member.data, row->member.len);
+    } else {
+        size_t separator = row->needs_dot ? 1U : 0U;
+        size_t total = row->prefix.len + separator + row->member.len;
+        module_path = cbm_arena_alloc(arena, total + SKIP_ONE);
+        if (module_path) {
+            memcpy(module_path, row->prefix.data, row->prefix.len);
+            if (row->needs_dot) {
+                module_path[row->prefix.len] = '.';
+            }
+            memcpy(module_path + row->prefix.len + separator, row->member.data, row->member.len);
+            module_path[total] = '\0';
+        }
+    }
+    const char *local = row->prefix.len == 0 && !row->needs_dot &&
+                                row->local.data == row->member.data &&
+                                row->local.len == row->member.len
+                            ? module_path
+                            : cbm_arena_strndup(arena, row->local.data, row->local.len);
+    cbm_imports_push(&ctx->result->imports, arena,
+                     (CBMImport){.local_name = local, .module_path = module_path});
+}
+
 /* One import statement; `type_only` flags every import it records. */
 static void process_py_import_node(CBMExtractCtx *ctx, TSNode node, bool type_only) {
     const char *kind = ts_node_type(node);
     int before = ctx->result->imports.count;
-    if (strcmp(kind, "import_statement") == 0) {
+    bool direct = strcmp(kind, "import_statement") == 0;
+    bool from = strcmp(kind, "import_from_statement") == 0 ||
+                strcmp(kind, "future_import_statement") == 0;
+    if (python_import_extractor && (direct || from) && ctx->source && ctx->source_len > 0) {
+        python_import_extractor(node, ctx->source, (size_t)ctx->source_len,
+                                python_emit_import_row, ctx);
+        cbm_log_debug("extract.python_imports", "implementation", "rust");
+    } else if (direct) {
         process_py_import_stmt(ctx, node);
-    } else if (strcmp(kind, "import_from_statement") == 0 ||
-               strcmp(kind, "future_import_statement") == 0) {
+    } else if (from) {
         // `from __future__ import annotations` is a distinct node type in
         // tree-sitter-python but has the same shape (module + name list).
         process_py_import_from(ctx, node);
@@ -1749,6 +1845,58 @@ static bool process_es_import_statement(CBMExtractCtx *ctx, TSNode node) {
     return true;
 }
 
+/* The sink receives nodes borrowed from the live tree. C keeps ownership
+ * of import rows and their strings. */
+typedef bool (*ts_static_import_emit_t)(void *, TSNode, const TSNode *, const TSNode *, bool);
+typedef bool (*ts_static_import_extractor_t)(TSNode, void *, ts_static_import_emit_t);
+static ts_static_import_extractor_t ts_static_import_extractor;
+
+void cbm_ts_set_static_import_extractor(ts_static_import_extractor_t extract);
+void cbm_ts_set_static_import_extractor(ts_static_import_extractor_t extract) {
+    ts_static_import_extractor = extract;
+}
+
+typedef struct {
+    CBMExtractCtx *ctx;
+    const char *path;
+} TSStaticImportOutput;
+
+static bool emit_ts_static_import(void *context, TSNode source, const TSNode *local,
+                                  const TSNode *member, bool is_default) {
+    TSStaticImportOutput *output = context;
+    CBMExtractCtx *ctx = output->ctx;
+    CBMArena *arena = ctx->arena;
+    if (!output->path) {
+        output->path = strip_quotes(arena, cbm_node_text(arena, source, ctx->source));
+        /* The source is shared by every binding. Decline before writing any
+         * row so the statement can fall back to native extraction. */
+        if (!output->path || !output->path[0]) {
+            return false;
+        }
+    }
+    const char *exported = member ? cbm_node_text(arena, *member, ctx->source) : NULL;
+    const char *name = local    ? cbm_node_text(arena, *local, ctx->source)
+                       : member ? exported
+                                : path_last(arena, output->path);
+    CBMImport import = {.local_name = name,
+                        .module_path = output->path,
+                        .member = exported,
+                        .is_default = is_default,
+                        .local_name_synthesized = !local && !member};
+    cbm_imports_push(&ctx->result->imports, arena, import);
+    return true;
+}
+
+static bool process_ts_static_import(CBMExtractCtx *ctx, TSNode node) {
+    TSStaticImportOutput output = {.ctx = ctx};
+    if (!ts_static_import_extractor(node, &output, emit_ts_static_import)) {
+        return false;
+    }
+    cbm_log_debug("extract.ts_static_import", "implementation", "rust", "file",
+                  ctx->rel_path ? ctx->rel_path : "");
+    return true;
+}
+
 /* The identifier a require call is bound to when no declarator holds the call
  * itself: a lazy assignment `winston = require('winston')`, or a declarator
  * over one member `const dns = require('dns').promises`. NULL otherwise. */
@@ -1847,7 +1995,7 @@ static bool process_commonjs_require(CBMExtractCtx *ctx, TSNode call) {
     return true;
 }
 
-static void walk_es_imports(CBMExtractCtx *ctx, TSNode root) {
+static void walk_es_imports(CBMExtractCtx *ctx, TSNode root, bool rust_static) {
     TSNodeStack stack;
     ts_nstack_init(&stack, ctx, CBM_SZ_512);
     ts_nstack_push(&stack, root);
@@ -1858,7 +2006,8 @@ static void walk_es_imports(CBMExtractCtx *ctx, TSNode root) {
         bool push_children = true;
 
         if (strcmp(kind, "import_statement") == 0) {
-            if (process_es_import_statement(ctx, node)) {
+            if ((rust_static && process_ts_static_import(ctx, node)) ||
+                process_es_import_statement(ctx, node)) {
                 push_children = false;
             }
         } else if (strcmp(kind, "export_statement") == 0) {
@@ -1891,7 +2040,8 @@ static void walk_es_imports(CBMExtractCtx *ctx, TSNode root) {
 }
 
 static void parse_es_imports(CBMExtractCtx *ctx) {
-    walk_es_imports(ctx, ctx->root);
+    bool typescript = ctx->language == CBM_LANG_TYPESCRIPT || ctx->language == CBM_LANG_TSX;
+    walk_es_imports(ctx, ctx->root, typescript && ts_static_import_extractor != NULL);
 }
 
 // --- Java imports ---
@@ -2059,7 +2209,34 @@ static void rust_import_walk(CBMExtractCtx *ctx, TSNode node, const char *prefix
     rust_import_push(ctx, full, NULL);
 }
 
+/* Rust emits temporary path bytes and C materializes the original import
+ * records, including local-name inference and duplicate suppression. */
+typedef void (*rust_use_emit_t)(void *, const char *, size_t, const char *, size_t);
+typedef bool (*rust_use_extractor_t)(TSNode, const char *, size_t, void *, rust_use_emit_t);
+static rust_use_extractor_t rust_use_extractor;
+
+void cbm_rust_set_use_extractor(rust_use_extractor_t extract);
+void cbm_rust_set_use_extractor(rust_use_extractor_t extract) {
+    rust_use_extractor = extract;
+}
+
+static void emit_rust_use_import(void *context, const char *path, size_t path_len,
+                                 const char *alias, size_t alias_len) {
+    CBMExtractCtx *ctx = context;
+    const char *module = cbm_arena_strndup(ctx->arena, path, path_len);
+    const char *local = alias_len > 0 ? cbm_arena_strndup(ctx->arena, alias, alias_len) : NULL;
+    rust_import_push(ctx, module, local);
+}
+
 static void parse_rust_imports(CBMExtractCtx *ctx) {
+    if (rust_use_extractor && ctx->source && ctx->source_len > 0 && !ts_node_is_null(ctx->root)) {
+        if (rust_use_extractor(ctx->root, ctx->source, (size_t)ctx->source_len, ctx,
+                               emit_rust_use_import)) {
+            cbm_log_debug("extract.rust_imports", "implementation", "rust", "file",
+                          ctx->rel_path ? ctx->rel_path : "");
+        }
+        return;
+    }
     TSTreeCursor cursor = ts_tree_cursor_new(ctx->root);
     if (!ts_tree_cursor_goto_first_child(&cursor)) {
         ts_tree_cursor_delete(&cursor);
@@ -3105,7 +3282,7 @@ static void parse_one_embedded_block(CBMExtractCtx *ctx, const CBMEmbeddedBlock 
         .return_type_table = ctx->return_type_table,
     };
     cbm_extract_definitions_without_module(&sub_ctx);
-    walk_es_imports(&sub_ctx, sub_ctx.root);
+    walk_es_imports(&sub_ctx, sub_ctx.root, false);
     cbm_extract_unified(&sub_ctx);
 
     ts_tree_delete(tree);

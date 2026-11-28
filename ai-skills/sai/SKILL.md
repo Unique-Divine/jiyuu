@@ -46,7 +46,7 @@ uv tool install git+https://github.com/SaiDotFun/open-sai
 To try it without installing:
 
 ```bash
-uvx --from git+https://github.com/SaiDotFun/open-sai sai --json market prices
+uvx --from https://github.com/SaiDotFun/open-sai/releases/download/sai-cli/v0.1.2/sai_cli-0.1.2-py3-none-any.whl sai --json market prices
 ```
 
 The package is `sai-cli`. `uv tool install sai` installs an unrelated PyPI
@@ -65,7 +65,7 @@ package.
 | Sai Keeper GraphQL: indexed trades, LP history, prices, referrals, subscriptions | [references/graphql.md](references/graphql.md) |
 | DexPal REST: public stats, markets, yield, health checks | [references/rest.md](references/rest.md) |
 | Referral code ownership, redemptions, testnet balance and credit checks | [references/referrals.md](references/referrals.md) |
-| Why contract state, GraphQL, and REST disagree | [references/reconciliation.md](references/reconciliation.md) |
+| Why contract state, GraphQL, and REST disagree | [workflows/reconciliation.md](workflows/reconciliation.md) |
 
 Read [trading-safety.md](trading-safety.md) before the first trade of a
 session, even when the person asks for one quick order.

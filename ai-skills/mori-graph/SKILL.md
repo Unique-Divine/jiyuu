@@ -19,16 +19,16 @@ operation links to the gqlgen resolver that answers it). The MCP server key
 is `mori-graph`, so the tools are `mcp__mori-graph__search_graph` and so on.
 Use the `mori` executable from the published archive. Mori 0.13.1 uses
 `codebase-memory-mcp` for rollback. Read
-[setup.md](references/setup.md) to install, register, and index;
+[setup.md](workflows/setup.md) to install, register, and index;
 [graphql.md](references/graphql.md) for API questions across repos;
-[tool-source.md](references/tool-source.md) to work on Mori itself.
+[tool-source.md](workflows/tool-source.md) to work on Mori itself.
 
 ## Start of a Task
 
 1. `list_projects`: pick the project whose `root_path` contains the working
    directory and pass its `name` as `project`, never a folder name.
 2. `index_status` for that project. A stale or missing index answers wrong;
-   reindex first (see [setup.md](references/setup.md)).
+   reindex first (see [setup.md](workflows/setup.md)).
 3. Choose an evidence tier (below), then query.
 
 ## Which Tool
@@ -38,6 +38,7 @@ Use the `mori` executable from the published archive. Mori 0.13.1 uses
 | Who calls X? | `trace_path(direction="inbound")` |
 | What does X call? | `trace_path(direction="outbound")` |
 | Find a symbol | `search_graph(name_pattern=".*Name.*")`, then `get_code_snippet` |
+| Find the lexicon term that documents a symbol | `query_graph` on `MENTIONS` from `Section` to the symbol. See [Graph Links](../lexicon-domain-lang/workflows/graph.md). |
 | Exact text | `search_code` |
 | Calls between services or repos | `query_graph` with Cypher on `HTTP_CALLS`, `GRAPHQL_CALLS`, `CROSS_*` |
 | Effect of local changes | `detect_changes()` |
@@ -86,5 +87,5 @@ must not claim graph results it didn't get.
 ## Upgrades
 
 Install and upgrade through mise and the `mori/v*` releases. Follow the
-client and hook migration instructions in [setup.md](references/setup.md)
+client and hook migration instructions in [setup.md](workflows/setup.md)
 when the executable name changes.

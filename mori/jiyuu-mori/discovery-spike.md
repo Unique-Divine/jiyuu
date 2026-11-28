@@ -1,78 +1,63 @@
 # Rust Directory Walk
 
-On Unix, a linked `mori` build can use `MORI_IMPL_DISCOVERY=rust` for the
-ordinary pipeline walk. Set it when starting the daemon or use a fresh
-`CBM_RUNTIME_DIR` so the index worker inherits it. Both initial discovery and
-rediscovery at a stored depth use the selector. Set `CBM_LOG_LEVEL=debug` and
-`CBM_PROFILE=1` to keep the worker log. Its `pipeline.discovery_backend`
-event records the phase, mode, actual backend, and reason.
+The C entry point `cbm_discover_ex2` calls the Rust function
+`mori_discover_collect`, which owns the full result until native setup and the
+walk succeed. The C entry point `cbm_discover_count_bounded` calls the Rust
+function `mori_discover_count_bounded`, which uses the same walker without
+collecting rows. It returns the count, status, and any resource diagnostic.
+Mori and the candidate C test runners link both paths through the
+`native-engine-abi` feature. The standalone reference build is pinned to
+`8bdd8fc20327fcfea4d920138fef77a3b00ca1ef`.
 
-Rust reads each directory and owns the pending directory stack. It visits
-children in reverse enumeration order after scanning their parent. Native
-code prepares the ignore rules, classifies entries, and builds the result
-arrays, including native mtimes and the ordered ignore sample. C is the
-default and handles bounded admission, discovery with aggregate resource
-limits, fresh semantic-manifest checks, and frozen builds that need a walk.
-A frozen build with its own file list reports `frozen_list` as the backend.
+Rust scans a directory before visiting its children in reverse enumeration
+order. It decides which directories to descend into, applies ignore
+precedence and tracked-path exceptions, and checks the bounded count,
+aggregate file and byte limits, and monotonic deadline. C provides the
+ignore rules and tracked paths and performs native metadata and language
+probes. Rust collects raw path bytes, excluded subtrees, and the capped
+ignore sample. The C destructors free the published arrays. The Windows
+walker uses the existing UTF-8 Win32 enumeration helpers. Path capacity,
+symlink and reparse-point handling, and native mtimes follow the existing
+C metadata probes.
 
-## Independent Prototype Comparison
+Ordinary and frozen semantic manifests use `mori_manifest_build` to own,
+deduplicate, and sort the rows. C supplies the Git and config digests,
+hashes stable file generations, and enumerates repository controls and
+path aliases. Frozen manifest assembly and sorting poll the pipeline
+checkpoint. The manifest destructor continues to free the ABI rows.
 
-The linked test module compares a Rust walk with C function
-`cbm_discover_ex2`. Both use Mori's native language classifier, built-in
-filters, and ignore matcher. The Rust code handles the directory walk,
-ignore precedence, and tracked-path exceptions. The module compiles only in
-Unix test builds with feature `c-backend`.
+Initial discovery, fresh manifest validation, and stored-depth
+rediscovery use the same walker, including when resource limits apply.
+A frozen build with an explicit classified file list uses that list
+for discovery and reconciliation, including when it is empty. A frozen
+build without a list walks the source under its captured language
+configuration.
 
-## Run the Fixtures
+With `CBM_LOG_LEVEL=debug` and `CBM_PROFILE=1`, the worker log records
+the phase and backend in event `pipeline.discovery_backend`. MCP
+auto-index admission records its backend in event
+`discover.admission_backend`.
 
-From the Jiyuu root, install the pinned grammar files and run the linked tests.
+## Fixtures
+
+From the Jiyuu root, with the pinned grammars installed, run the linked
+discovery tests.
 
 ```sh
-just --justfile mori/justfile grammars
 cargo test --locked -p jiyuu-mori --features c-backend --lib discovery_spike
+cargo test --locked -p jiyuu-mori --features c-backend --test discovery_walk
 ```
 
-The fixtures compare full, moderate, and fast discovery. They exercise
-nested `.gitignore` files, `.cbmignore` negation, `info/exclude`, tracked
-files in ignored directories, a size limit, symlinks, shebang detection, and
-unsupported extensions. The enclosing-repository fixture indexes a package
-subdirectory. It checks ancestor rules against their original directories,
-deeper negations, the repository's `info/exclude`, and tracked files.
-The user excludes fixture checks `~/.gitconfig`, the XDG Git config, and
-the XDG `git/ignore` default in order, in an isolated process.
-The Sphinx fixture checks custom reStructuredText suffixes inherited from
-`conf.py`, nested overrides, and the 64 KiB config read limit.
+The library fixtures call the C ABI and exercise raw paths, native mtimes,
+the capped ignore sample, tracked paths, and count and resource refusals.
+The linked integration fixture uses an isolated runtime and cache to check
+initial, fresh, and stored-depth walks under a file limit. The native frozen
+pipeline suite covers an explicit empty list.
 
-## Compare and Measure a Repository
-
-Build once and run the test executable directly so elapsed time and peak RSS
-exclude the build. Use an unchanged checkout for both walks. The commands
-below use GNU `time` on Linux.
-
-```sh
-discovery_test="$(
-  cargo test --release --locked -p jiyuu-mori --features c-backend \
-    --lib --no-run --message-format=json |
-  jq -er 'select(.reason == "compiler-artifact" and .profile.test
-    and .target.name == "jiyuu_mori" and .executable != null) | .executable'
-)"
-export MORI_DISCOVERY_ROOT=/absolute/path/to/repository
-export MORI_DISCOVERY_MODE=full
-"$discovery_test" discovery_spike::corpus --exact --ignored --nocapture
-for backend in c rust; do
-  MORI_DISCOVERY_BACKEND="$backend" /usr/bin/time -v \
-    "$discovery_test" discovery_spike::corpus --exact --ignored --nocapture
-done
-```
-
-Use `moderate` or `fast` to change the discovery mode. Set
-`MORI_DISCOVERY_SHOW_DIFF=1` to print up to ten examples per side in the
-comparison output. The comparison exits unsuccessfully on a difference.
-It checks relative paths, language IDs, sizes, excluded subtrees, and the
-total and retained count of ignored paths. For at most 2,000 ignored paths
-per walk it also compares the ignored paths and reasons. Beyond that cap,
-the native result retains a traversal-order sample.
-
-Set `MORI_DISCOVERY_BACKEND=pipeline-compare` to check the production walk
-against C. This compares the results in order, including absolute paths,
-native mtimes, and the retained ignore sample even when it hits the cap.
+The ignored library test `discovery_spike::corpus` compares the production
+walker with the earlier Rust prototype on a repository selected by
+`MORI_DISCOVERY_ROOT`. Set `MORI_DISCOVERY_MODE` to `full`, `moderate`
+or `fast`. Set `MORI_DISCOVERY_BACKEND` to `production` or `prototype`
+to run one walker. The default `compare` mode checks selected files,
+excluded subtrees, and ignored totals. It checks the complete ignore sample
+when neither walk exceeds the cap.

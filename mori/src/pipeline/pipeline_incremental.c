@@ -35,6 +35,7 @@ enum { INCR_RING_BUF = 4, INCR_RING_MASK = 3, INCR_TS_BUF = 24 };
 #include "foundation/compat_thread.h"
 #include "foundation/limits.h" /* cbm_max_file_bytes */
 #include "foundation/platform.h"
+#include "foundation/sanitized.h"
 #include "foundation/sha256.h"
 #include "result_spill.h"
 
@@ -145,18 +146,35 @@ static const char *incr_mode_name(int mode) {
 
 /* ── Exact semantic manifest ───────────────────────────────────── */
 
+typedef struct mori_manifest mori_manifest_t;
+
+typedef int (*mori_manifest_collect_fn)(void *context, mori_manifest_t *rows);
+extern int mori_manifest_build(void *context, mori_manifest_collect_fn collect,
+                               cbm_pipeline_t *frozen, cbm_file_hash_t **out, int *out_count);
+extern bool mori_manifest_contains(const mori_manifest_t *rows, const char *rel_path);
+extern int mori_manifest_add_digest(mori_manifest_t *rows, const char *project,
+                                    const char *rel_path, const char *sha, int64_t mtime_ns,
+                                    int64_t size);
+
 typedef struct {
-    cbm_file_hash_t *items;
-    int count;
-    int cap;
-    CBMHashTable *seen_paths;
+    mori_manifest_t *rows;
     cbm_pipeline_t *frozen; /* optional cooperative frozen checkpoint */
 } semantic_manifest_builder_t;
 
-static int semantic_manifest_cmp(const void *a, const void *b) {
-    const cbm_file_hash_t *ma = a;
-    const cbm_file_hash_t *mb = b;
-    return strcmp(ma->rel_path, mb->rel_path);
+void cbm_pipeline_mark_semantic_manifest_written(const cbm_file_hash_t *manifest, size_t count) {
+#if __has_feature(memory_sanitizer)
+    for (size_t i = 0; i < count; i++) {
+        const cbm_file_hash_t *row = &manifest[i];
+        CBM_MSAN_WRITTEN(&row->project, sizeof(row->project));
+        CBM_MSAN_WRITTEN(&row->rel_path, sizeof(row->rel_path));
+        CBM_MSAN_WRITTEN(&row->sha256, sizeof(row->sha256));
+        CBM_MSAN_WRITTEN(&row->mtime_ns, sizeof(row->mtime_ns));
+        CBM_MSAN_WRITTEN(&row->size, sizeof(row->size));
+    }
+#else
+    (void)manifest;
+    (void)count;
+#endif
 }
 
 static bool semantic_manifest_is_virtual_path(const char *rel_path) {
@@ -243,63 +261,6 @@ static int semantic_manifest_hash_file(const char *path, char out[CBM_SHA256_HEX
     return semantic_manifest_hash_file_ex(path, out, mtime, size, NULL);
 }
 
-static bool semantic_manifest_reserve(semantic_manifest_builder_t *builder) {
-    if (builder->count != builder->cap)
-        return true;
-    if (builder->cap > INT_MAX / 2)
-        return false;
-    int capacity = builder->cap > 0 ? builder->cap * 2 : CBM_SZ_64;
-    if ((size_t)capacity > SIZE_MAX / sizeof(*builder->items))
-        return false;
-    cbm_file_hash_t *items = realloc(builder->items, (size_t)capacity * sizeof(*items));
-    if (!items)
-        return false;
-    builder->items = items;
-    builder->cap = capacity;
-    return true;
-}
-
-static int semantic_manifest_add_digest(semantic_manifest_builder_t *builder, const char *project,
-                                        const char *rel_path, const char *sha, int64_t mtime_ns,
-                                        int64_t size) {
-    if (!builder || !project || !rel_path || !rel_path[0] || !sha ||
-        strlen(sha) != CBM_SHA256_HEX_LEN || cbm_ht_has(builder->seen_paths, rel_path)) {
-        return CBM_NOT_FOUND;
-    }
-    for (int i = 0; i < CBM_SHA256_HEX_LEN; i++) {
-        if (!((sha[i] >= '0' && sha[i] <= '9') || (sha[i] >= 'a' && sha[i] <= 'f'))) {
-            return CBM_NOT_FOUND;
-        }
-    }
-    if (!semantic_manifest_reserve(builder))
-        return CBM_NOT_FOUND;
-    char *project_copy = strdup(project);
-    char *path_copy = strdup(rel_path);
-    char *sha_copy = strdup(sha);
-    if (!project_copy || !path_copy || !sha_copy) {
-        free(project_copy);
-        free(path_copy);
-        free(sha_copy);
-        return CBM_NOT_FOUND;
-    }
-    uint32_t before_count = cbm_ht_count(builder->seen_paths);
-    cbm_ht_set(builder->seen_paths, path_copy, path_copy);
-    if (cbm_ht_count(builder->seen_paths) != before_count + 1U) {
-        free(project_copy);
-        free(path_copy);
-        free(sha_copy);
-        return CBM_NOT_FOUND;
-    }
-    builder->items[builder->count++] = (cbm_file_hash_t){
-        .project = project_copy,
-        .rel_path = path_copy,
-        .sha256 = sha_copy,
-        .mtime_ns = mtime_ns,
-        .size = size,
-    };
-    return 0;
-}
-
 static int semantic_manifest_add(semantic_manifest_builder_t *builder, const char *project,
                                  const char *rel_path, const char *abs_path) {
     if (cbm_pipeline_frozen_checkpoint(builder->frozen))
@@ -311,7 +272,7 @@ static int semantic_manifest_add(semantic_manifest_builder_t *builder, const cha
     if (semantic_manifest_is_virtual_path(rel_path)) {
         return CBM_NOT_FOUND;
     }
-    if (cbm_ht_has(builder->seen_paths, rel_path)) {
+    if (mori_manifest_contains(builder->rows, rel_path)) {
         return 0;
     }
     char sha[CBM_SHA256_HEX_LEN + 1];
@@ -321,7 +282,7 @@ static int semantic_manifest_add(semantic_manifest_builder_t *builder, const cha
         cbm_log_error("semantic_manifest.err", "path", abs_path);
         return CBM_NOT_FOUND;
     }
-    return semantic_manifest_add_digest(builder, project, rel_path, sha, mtime_ns, size);
+    return mori_manifest_add_digest(builder->rows, project, rel_path, sha, mtime_ns, size);
 }
 
 static void semantic_manifest_git_digest(const cbm_git_context_t *git_ctx,
@@ -506,50 +467,50 @@ static void *manifest_hash_worker(void *arg) {
 
 enum { MANIFEST_PARALLEL_MIN_FILES = 64 };
 
-int cbm_pipeline_build_semantic_manifest(const cbm_pipeline_t *p, const char *project,
-                                         const char *repo_path, const cbm_file_info_t *files,
-                                         int file_count, char **excluded_dirs, int excluded_count,
-                                         const cbm_git_context_t *git_ctx,
-                                         const cbm_userconfig_t *userconfig, cbm_file_hash_t **out,
-                                         int *out_count) {
-    if (!project || !repo_path || !out || !out_count || file_count < 0 ||
-        (file_count > 0 && !files)) {
-        return CBM_NOT_FOUND;
-    }
-    *out = NULL;
-    *out_count = 0;
-    semantic_manifest_builder_t builder = {0};
-    uint64_t reserve = (uint64_t)(file_count > 0 ? file_count : 0) * 2U + CBM_SZ_64;
-    if (reserve > UINT32_MAX) {
-        reserve = UINT32_MAX;
-    }
-    builder.seen_paths = cbm_ht_create((uint32_t)reserve);
-    if (!builder.seen_paths) {
-        return CBM_NOT_FOUND;
-    }
+typedef struct {
+    const cbm_pipeline_t *pipeline;
+    const char *project;
+    const char *repo_path;
+    const cbm_file_info_t *files;
+    int file_count;
+    char **excluded_dirs;
+    int excluded_count;
+    const cbm_git_context_t *git_ctx;
+    const cbm_userconfig_t *userconfig;
+} semantic_manifest_inputs_t;
+
+static int semantic_manifest_collect(void *context, mori_manifest_t *rows) {
+    const semantic_manifest_inputs_t *inputs = context;
+    const char *project = inputs->project;
+    const char *repo_path = inputs->repo_path;
+    const cbm_file_info_t *files = inputs->files;
+    int file_count = inputs->file_count;
+    char **excluded_dirs = inputs->excluded_dirs;
+    int excluded_count = inputs->excluded_count;
+    const cbm_userconfig_t *userconfig = inputs->userconfig;
+    semantic_manifest_builder_t builder = {.rows = rows};
     int rc = 0;
     char git_digest[CBM_SHA256_HEX_LEN + 1];
     char absent_config_digest[CBM_SHA256_HEX_LEN + 1];
-    semantic_manifest_git_digest(git_ctx, git_digest);
+    semantic_manifest_git_digest(inputs->git_ctx, git_digest);
     cbm_sha256_hex("cbm-userconfig-unavailable-v1", strlen("cbm-userconfig-unavailable-v1"),
                    absent_config_digest);
     const char *global_config_digest =
         userconfig ? userconfig->global_source_sha256 : absent_config_digest;
     const char *project_config_digest =
         userconfig ? userconfig->project_source_sha256 : absent_config_digest;
-    rc = semantic_manifest_add_digest(&builder, project, CBM_SEMANTIC_INPUT_GIT_CONTEXT, git_digest,
-                                      0, 0);
+    rc = mori_manifest_add_digest(rows, project, CBM_SEMANTIC_INPUT_GIT_CONTEXT, git_digest, 0, 0);
     if (rc == 0) {
-        rc = semantic_manifest_add_digest(&builder, project, CBM_SEMANTIC_INPUT_GLOBAL_CONFIG,
-                                          global_config_digest, 0, 0);
+        rc = mori_manifest_add_digest(rows, project, CBM_SEMANTIC_INPUT_GLOBAL_CONFIG,
+                                      global_config_digest, 0, 0);
     }
     if (rc == 0) {
-        rc = semantic_manifest_add_digest(&builder, project, CBM_SEMANTIC_INPUT_PROJECT_CONFIG,
-                                          project_config_digest, 0, 0);
+        rc = mori_manifest_add_digest(rows, project, CBM_SEMANTIC_INPUT_PROJECT_CONFIG,
+                                      project_config_digest, 0, 0);
     }
     struct timespec t_hash;
     cbm_clock_gettime(CLOCK_MONOTONIC, &t_hash);
-    int hash_workers = cbm_pipeline_worker_count(p);
+    int hash_workers = cbm_pipeline_worker_count(inputs->pipeline);
     if (rc == 0 && file_count >= MANIFEST_PARALLEL_MIN_FILES && hash_workers > SKIP_ONE) {
         char (*shas)[CBM_SHA256_HEX_LEN + 1] = malloc((size_t)file_count * sizeof(*shas));
         int64_t *mtimes = calloc((size_t)file_count, sizeof(int64_t));
@@ -599,11 +560,11 @@ int cbm_pipeline_build_semantic_manifest(const cbm_pipeline_t *p, const char *pr
                     rc = CBM_NOT_FOUND;
                     break;
                 }
-                if (cbm_ht_has(builder.seen_paths, files[i].rel_path)) {
+                if (mori_manifest_contains(rows, files[i].rel_path)) {
                     continue;
                 }
-                rc = semantic_manifest_add_digest(&builder, project, files[i].rel_path, shas[i],
-                                                  mtimes[i], sizes[i]);
+                rc = mori_manifest_add_digest(rows, project, files[i].rel_path, shas[i], mtimes[i],
+                                              sizes[i]);
             }
         } else {
             for (int i = 0; rc == 0 && i < file_count; i++) {
@@ -646,52 +607,33 @@ int cbm_pipeline_build_semantic_manifest(const cbm_pipeline_t *p, const char *pr
             cbm_path_alias_collection_free(aliases);
         }
     }
-    if (rc != 0) {
-        cbm_ht_free(builder.seen_paths);
-        cbm_pipeline_free_semantic_manifest(builder.items, builder.count);
-        return rc;
-    }
-    cbm_ht_free(builder.seen_paths);
-    qsort(builder.items, (size_t)builder.count, sizeof(*builder.items), semantic_manifest_cmp);
-    *out = builder.items;
-    *out_count = builder.count;
-    return 0;
+    return rc;
 }
 
-bool cbm_pipeline_semantic_manifests_equal(const cbm_file_hash_t *left, int left_count,
-                                           const cbm_file_hash_t *right, int right_count) {
-    if (left_count < 0 || right_count < 0 || left_count != right_count ||
-        (left_count > 0 && (!left || !right))) {
-        return false;
+int cbm_pipeline_build_semantic_manifest(const cbm_pipeline_t *p, const char *project,
+                                         const char *repo_path, const cbm_file_info_t *files,
+                                         int file_count, char **excluded_dirs, int excluded_count,
+                                         const cbm_git_context_t *git_ctx,
+                                         const cbm_userconfig_t *userconfig, cbm_file_hash_t **out,
+                                         int *out_count) {
+    if (!project || !repo_path || !out || !out_count || file_count < 0 ||
+        (file_count > 0 && !files)) {
+        return CBM_NOT_FOUND;
     }
-    uint64_t reserve = (uint64_t)(right_count > 0 ? right_count : 0) * 2U + CBM_SZ_64;
-    if (reserve > UINT32_MAX) {
-        reserve = UINT32_MAX;
-    }
-    CBMHashTable *by_path = cbm_ht_create((uint32_t)reserve);
-    if (!by_path) {
-        return false;
-    }
-    bool equal = true;
-    for (int i = 0; equal && i < right_count; i++) {
-        if (!right[i].rel_path || !right[i].sha256 || cbm_ht_has(by_path, right[i].rel_path)) {
-            equal = false;
-            break;
-        }
-        uint32_t before = cbm_ht_count(by_path);
-        cbm_ht_set(by_path, right[i].rel_path, (void *)right[i].sha256);
-        equal = cbm_ht_count(by_path) == before + 1U;
-    }
-    for (int i = 0; equal && i < left_count; i++) {
-        if (!left[i].rel_path || !left[i].sha256) {
-            equal = false;
-            break;
-        }
-        const char *sha = cbm_ht_get(by_path, left[i].rel_path);
-        equal = sha && strcmp(sha, left[i].sha256) == 0;
-    }
-    cbm_ht_free(by_path);
-    return equal;
+    *out = NULL;
+    *out_count = 0;
+    semantic_manifest_inputs_t inputs = {
+        .pipeline = p,
+        .project = project,
+        .repo_path = repo_path,
+        .files = files,
+        .file_count = file_count,
+        .excluded_dirs = excluded_dirs,
+        .excluded_count = excluded_count,
+        .git_ctx = git_ctx,
+        .userconfig = userconfig,
+    };
+    return mori_manifest_build(&inputs, semantic_manifest_collect, NULL, out, out_count);
 }
 
 /* Frozen manifests use the same rows and source controls, but never ambient
@@ -701,14 +643,14 @@ static int frozen_manifest_seed(semantic_manifest_builder_t *builder, cbm_pipeli
     const cbm_userconfig_t *config = cbm_pipeline_frozen_config(p);
     char git_digest[CBM_SHA256_HEX_LEN + 1];
     semantic_manifest_git_digest(cbm_pipeline_frozen_git(p), git_digest);
-    int rc = semantic_manifest_add_digest(builder, project, CBM_SEMANTIC_INPUT_GIT_CONTEXT,
-                                          git_digest, 0, 0);
+    int rc = mori_manifest_add_digest(builder->rows, project, CBM_SEMANTIC_INPUT_GIT_CONTEXT,
+                                      git_digest, 0, 0);
     if (rc == 0)
-        rc = semantic_manifest_add_digest(builder, project, CBM_SEMANTIC_INPUT_GLOBAL_CONFIG,
-                                          config->global_source_sha256, 0, 0);
+        rc = mori_manifest_add_digest(builder->rows, project, CBM_SEMANTIC_INPUT_GLOBAL_CONFIG,
+                                      config->global_source_sha256, 0, 0);
     if (rc == 0)
-        rc = semantic_manifest_add_digest(builder, project, CBM_SEMANTIC_INPUT_PROJECT_CONFIG,
-                                          config->project_source_sha256, 0, 0);
+        rc = mori_manifest_add_digest(builder->rows, project, CBM_SEMANTIC_INPUT_PROJECT_CONFIG,
+                                      config->project_source_sha256, 0, 0);
     return rc;
 }
 
@@ -735,54 +677,22 @@ static int frozen_manifest_aliases(semantic_manifest_builder_t *builder, cbm_pip
     return rc;
 }
 
-static int frozen_manifest_sift(cbm_pipeline_t *p, cbm_file_hash_t *items, size_t root,
-                                size_t count) {
-    while (root < count / 2) {
-        if (cbm_pipeline_frozen_checkpoint(p))
-            return CBM_NOT_FOUND;
-        size_t child = root * 2 + 1;
-        if (child + 1 < count && semantic_manifest_cmp(&items[child], &items[child + 1]) < 0)
-            child++;
-        if (semantic_manifest_cmp(&items[root], &items[child]) >= 0)
-            break;
-        cbm_file_hash_t saved = items[root];
-        items[root] = items[child];
-        items[child] = saved;
-        root = child;
-    }
-    return 0;
-}
+typedef struct {
+    cbm_pipeline_t *pipeline;
+    const cbm_file_info_t *files;
+    int file_count;
+    char **excluded;
+    int excluded_count;
+} frozen_manifest_inputs_t;
 
-static int frozen_manifest_sort(cbm_pipeline_t *p, cbm_file_hash_t *items, int count) {
-    for (size_t i = (size_t)count / 2; i > 0; i--) {
-        if (frozen_manifest_sift(p, items, i - 1, (size_t)count))
-            return CBM_NOT_FOUND;
-    }
-    for (size_t end = (size_t)count; end > 1; end--) {
-        if (cbm_pipeline_frozen_checkpoint(p))
-            return CBM_NOT_FOUND;
-        cbm_file_hash_t saved = items[0];
-        items[0] = items[end - 1];
-        items[end - 1] = saved;
-        if (frozen_manifest_sift(p, items, 0, end - 1))
-            return CBM_NOT_FOUND;
-    }
-    return cbm_pipeline_frozen_checkpoint(p);
-}
-
-int cbm_pipeline_build_frozen_manifest(cbm_pipeline_t *p, const cbm_file_info_t *files,
-                                       int file_count, char **excluded, int excluded_count,
-                                       cbm_file_hash_t **out, int *out_count) {
-    if (!out || !out_count)
-        return CBM_NOT_FOUND;
-    *out = NULL;
-    *out_count = 0;
-    if (!cbm_pipeline_is_frozen(p) || file_count < 0 || (file_count && !files))
-        return CBM_NOT_FOUND;
-    semantic_manifest_builder_t builder = {.frozen = p};
-    builder.seen_paths = cbm_ht_create(CBM_SZ_64);
-    if (!builder.seen_paths)
-        return CBM_NOT_FOUND;
+static int frozen_manifest_collect(void *context, mori_manifest_t *rows) {
+    const frozen_manifest_inputs_t *inputs = context;
+    cbm_pipeline_t *p = inputs->pipeline;
+    const cbm_file_info_t *files = inputs->files;
+    int file_count = inputs->file_count;
+    char **excluded = inputs->excluded;
+    int excluded_count = inputs->excluded_count;
+    semantic_manifest_builder_t builder = {.rows = rows, .frozen = p};
     int rc = cbm_pipeline_frozen_checkpoint(p);
     if (rc == 0)
         rc = frozen_manifest_seed(&builder, p);
@@ -800,16 +710,26 @@ int cbm_pipeline_build_frozen_manifest(cbm_pipeline_t *p, const cbm_file_info_t 
                                              excluded_count);
     if (rc == 0)
         rc = frozen_manifest_aliases(&builder, p, excluded, excluded_count);
-    if (rc == 0)
-        rc = frozen_manifest_sort(p, builder.items, builder.count);
-    cbm_ht_free(builder.seen_paths);
-    if (rc != 0) {
-        cbm_pipeline_free_semantic_manifest(builder.items, builder.count);
-        return rc;
-    }
-    *out = builder.items;
-    *out_count = builder.count;
-    return 0;
+    return rc;
+}
+
+int cbm_pipeline_build_frozen_manifest(cbm_pipeline_t *p, const cbm_file_info_t *files,
+                                       int file_count, char **excluded, int excluded_count,
+                                       cbm_file_hash_t **out, int *out_count) {
+    if (!out || !out_count)
+        return CBM_NOT_FOUND;
+    *out = NULL;
+    *out_count = 0;
+    if (!cbm_pipeline_is_frozen(p) || file_count < 0 || (file_count && !files))
+        return CBM_NOT_FOUND;
+    frozen_manifest_inputs_t inputs = {
+        .pipeline = p,
+        .files = files,
+        .file_count = file_count,
+        .excluded = excluded,
+        .excluded_count = excluded_count,
+    };
+    return mori_manifest_build(&inputs, frozen_manifest_collect, p, out, out_count);
 }
 
 bool cbm_pipeline_frozen_manifests_equal(cbm_pipeline_t *p, const cbm_file_hash_t *left,
@@ -845,10 +765,12 @@ static int frozen_fresh_manifest(cbm_pipeline_t *p, cbm_file_hash_t **out, int *
     /* With a classified file list the reconciliation re-hashes exactly the
      * listed files: a file added to the source root since is not compared,
      * because it is not indexed either. */
-    int rc = cbm_pipeline_frozen_has_file_list(p)
-                 ? cbm_pipeline_frozen_listed_files(p, &files, &count)
-                 : cbm_discover_ex2(cbm_pipeline_repo_path(p), &opts, &files, &count, &excluded,
-                                    &excluded_count, &ignored, &ignored_count, &ignored_total);
+    const bool listed = cbm_pipeline_frozen_has_file_list(p);
+    cbm_log_debug("pipeline.discovery_backend", "phase", "fresh_manifest", "backend",
+                  listed ? "frozen_list" : "rust");
+    int rc = listed ? cbm_pipeline_frozen_listed_files(p, &files, &count)
+                    : cbm_discover_ex2(cbm_pipeline_repo_path(p), &opts, &files, &count, &excluded,
+                                       &excluded_count, &ignored, &ignored_count, &ignored_total);
     if (rc == 0)
         rc = cbm_pipeline_build_frozen_manifest(p, files, count, excluded, excluded_count, out,
                                                 out_count);
@@ -891,6 +813,7 @@ int cbm_pipeline_build_fresh_semantic_manifest(cbm_pipeline_t *p, const char *pr
                  : CBM_PIPELINE_ABORT_PRESERVE_DB;
     if (rc == 0) {
         cbm_set_user_lang_config(fresh_userconfig);
+        cbm_log_debug("pipeline.discovery_backend", "phase", "fresh_manifest", "backend", "rust");
         rc = cbm_discover_ex2(repo_path, &opts, &fresh_files, &fresh_file_count, &fresh_excluded,
                               &fresh_excluded_count, &fresh_ignored, &fresh_ignored_count,
                               &fresh_ignored_total);
@@ -3258,9 +3181,6 @@ static bool closure_metadata_current(bool metadata_current, const cbm_file_hash_
     return current && old_count == new_count;
 }
 
-/* Decide whether this manifest delta is closure-repairable, and if so build
- * the plan. Returns 1 with *plan filled, or 0 (decline → FULL) with the
- * reason logged. Every early exit declines; nothing here mutates state. */
 /* closure_graphql_decline over the completed closure. On a decline the
  * plan's file list is released. */
 static const char *closure_graphql_decline_plan(cbm_store_t *store, const char *project,
@@ -3284,6 +3204,44 @@ static const char *closure_graphql_decline_plan(cbm_store_t *store, const char *
     return decline;
 }
 
+/* Matches ManifestDelta in closure_plan.rs. Output paths borrow the input rows. */
+typedef struct {
+    const cbm_file_hash_t *stored, *fresh;
+    const char *semantic_input_prefix;
+    char **paths; /* capacity stored_count + fresh_count */
+    int stored_count, fresh_count;
+    int changed_count, deleted_count;
+} closure_manifest_delta_t;
+
+typedef bool (*closure_path_fn)(void *context, const char *path);
+extern const char *mori_closure_classify_manifest(closure_manifest_delta_t *delta, void *context,
+                                                 closure_path_fn discovered,
+                                                 closure_path_fn try_seed_alias);
+
+typedef struct {
+    CBMHashTable *files_by_path;
+    CBMHashTable *closure_set;
+    const cbm_file_info_t *files;
+    int file_count;
+    const cbm_path_alias_collection_t *aliases;
+} closure_manifest_context_t;
+
+static bool closure_manifest_discovered(void *data, const char *path) {
+    const closure_manifest_context_t *context = data;
+    return cbm_ht_get(context->files_by_path, path) != NULL;
+}
+
+static bool closure_manifest_seed_alias(void *data, const char *path) {
+    const closure_manifest_context_t *context = data;
+    if (!closure_is_alias_config(context->aliases, path)) {
+        return false;
+    }
+    closure_seed_governed(context->closure_set, context->files, context->file_count, path);
+    return true;
+}
+
+/* Build a repair plan without mutating the stored generation. Returns 1
+ * on success or 0 with a logged decline and any fatal status in *plan. */
 static int closure_try_plan(cbm_pipeline_t *p, cbm_store_t *store, const char *project,
                             cbm_file_info_t *files, int file_count, const cbm_file_hash_t *stored,
                             int stored_count, const cbm_file_hash_t *fresh, int fresh_count,
@@ -3293,10 +3251,8 @@ static int closure_try_plan(cbm_pipeline_t *p, cbm_store_t *store, const char *p
     cbm_clock_gettime(CLOCK_MONOTONIC, &t);
     const char *decline = NULL;
 
-    /* Index the fresh manifest and discovery list by rel_path. */
-    CBMHashTable *fresh_by_path = cbm_ht_create((size_t)fresh_count * PAIR_LEN + CBM_SZ_64);
+    /* Index the discovery list by rel_path. */
     CBMHashTable *files_by_path = cbm_ht_create((size_t)file_count * PAIR_LEN + CBM_SZ_64);
-    CBMHashTable *stored_by_path = cbm_ht_create((size_t)stored_count * PAIR_LEN + CBM_SZ_64);
     CBMHashTable *closure_set = cbm_ht_create(CBM_SZ_64);
     char **changed_paths = NULL;
     char **dependents = NULL;
@@ -3317,84 +3273,43 @@ static int closure_try_plan(cbm_pipeline_t *p, cbm_store_t *store, const char *p
     /* names a changed or deleted file no longer declares (doc-link rows) */
     CBMHashTable *removed_names = cbm_ht_create(CBM_SZ_64);
     CBMHashTable *row_deps = cbm_ht_create(CBM_SZ_64);
-    if (!fresh_by_path || !files_by_path || !stored_by_path || !closure_set || !removed_names ||
-        !row_deps) {
+    if (!files_by_path || !closure_set || !removed_names || !row_deps) {
         decline = "alloc";
         goto done;
     }
     for (int i = 0; i < file_count; i++) {
         cbm_ht_set(files_by_path, files[i].rel_path, &files[i]);
     }
-    for (int i = 0; i < fresh_count; i++) {
-        cbm_ht_set(fresh_by_path, fresh[i].rel_path, (void *)&fresh[i]);
-    }
-    for (int i = 0; i < stored_count; i++) {
-        cbm_ht_set(stored_by_path, stored[i].rel_path, (void *)&stored[i]);
-    }
-
-    /* Delta classification straight from the semantic manifests (content
-     * hashes, not mtimes). Virtual entries are config/lockfile digests —
-     * their effect on resolution is not file-local, so any delta there
-     * declines. New files decline: yesterday's graph cannot know who would
-     * reference a file that did not exist. */
-    changed_paths = (char **)calloc((size_t)fresh_count + (size_t)stored_count, sizeof(char *));
+    changed_paths = calloc((size_t)fresh_count + (size_t)stored_count, sizeof(*changed_paths));
     if (!changed_paths) {
         decline = "alloc";
         goto done;
     }
     plan_aliases = cbm_load_path_aliases_excluded(cbm_pipeline_repo_path(p), NULL, 0);
-    bool governed_seeded = false;
-    for (int i = 0; i < fresh_count; i++) {
-        const cbm_file_hash_t *old_row = cbm_ht_get(stored_by_path, fresh[i].rel_path);
-        bool synthetic = semantic_manifest_is_virtual_path(fresh[i].rel_path);
-        bool discovered = cbm_ht_get(files_by_path, fresh[i].rel_path) != NULL;
-        bool delta = !old_row || strcmp(old_row->sha256, fresh[i].sha256) != 0;
-        if (!delta) {
-            continue;
-        }
-        if (synthetic) {
-            decline = "semantic_input_changed";
-            goto done;
-        }
-        if (discovered) {
-            if (!old_row) {
-                decline = "new_file";
-                goto done;
-            }
-            changed_paths[n_changed++] = (char *)fresh[i].rel_path;
-            continue;
-        }
-        if (closure_is_alias_config(plan_aliases, fresh[i].rel_path)) {
-            /* Config content (or a new config) re-routes resolution for the
-             * files it governs; their surfaces are untouched, so they join
-             * the closure directly and propagate nowhere. */
-            closure_seed_governed(closure_set, files, file_count, fresh[i].rel_path);
-            governed_seeded = true;
-            continue;
-        }
-        decline = "control_file_changed";
+    closure_manifest_context_t manifest_context = {
+        .files_by_path = files_by_path,
+        .closure_set = closure_set,
+        .files = files,
+        .file_count = file_count,
+        .aliases = plan_aliases,
+    };
+    closure_manifest_delta_t delta = {
+        .stored = stored,
+        .fresh = fresh,
+        .semantic_input_prefix = CBM_SEMANTIC_INPUT_PREFIX,
+        .paths = changed_paths,
+        .stored_count = stored_count,
+        .fresh_count = fresh_count,
+    };
+    decline = mori_closure_classify_manifest(&delta, &manifest_context, closure_manifest_discovered,
+                                            closure_manifest_seed_alias);
+    cbm_log_info("incremental.closure_manifest", "implementation", "rust", "outcome",
+                 decline ? decline : "classified");
+    if (decline) {
         goto done;
     }
-    for (int i = 0; i < stored_count; i++) {
-        if (!cbm_ht_get(fresh_by_path, stored[i].rel_path)) {
-            if (!cbm_ht_get(files_by_path, stored[i].rel_path) &&
-                closure_is_alias_config(plan_aliases, stored[i].rel_path)) {
-                /* Removed alias config: its governed files resolve without
-                 * it now; the config's own manifest row simply disappears. */
-                closure_seed_governed(closure_set, files, file_count, stored[i].rel_path);
-                governed_seeded = true;
-                continue;
-            }
-            /* Gone from the manifest: deleted or newly ignored. Its nodes
-             * will be purged; files with edges into it must re-resolve. */
-            changed_paths[n_changed + n_deleted] = (char *)stored[i].rel_path;
-            n_deleted++;
-        }
-    }
-    if (n_changed == 0 && n_deleted == 0 && !governed_seeded) {
-        decline = "no_file_delta";
-        goto done;
-    }
+    n_changed = delta.changed_count;
+    n_deleted = delta.deleted_count;
     /* A doc-link scope input scopes files other than itself and has no scope
      * blob the surface comparison below could judge. */
     for (int i = 0; i < n_changed + n_deleted; i++) {
@@ -3684,9 +3599,7 @@ done:
     cbm_store_free_dependent_files(dependents, dependent_count);
     cbm_store_free_dependent_files(line_docs, line_doc_count);
     free(changed_paths);
-    cbm_ht_free(fresh_by_path);
     cbm_ht_free(files_by_path);
-    cbm_ht_free(stored_by_path);
     cbm_ht_free(closure_set);
     cbm_ht_free(row_deps); /* keys borrowed from plan->doc_rows */
     surface_name_set_free(removed_names);
@@ -4346,12 +4259,6 @@ static bool incr_doc_links_current(cbm_store_t *store, const char *project) {
     return current;
 }
 
-static cbm_noop_manifest_equal_fn noop_manifest_equal;
-
-void cbm_pipeline_set_noop_manifest_equal(cbm_noop_manifest_equal_fn implementation) {
-    noop_manifest_equal = implementation;
-}
-
 /* The exact no-op test: the stored generation's metadata is current for this
  * mode, its doc-link layer is usable, and its recorded semantic manifest
  * equals the baseline byte for byte. Read-only. The two out flags report the
@@ -4370,13 +4277,9 @@ static bool incr_generation_exact(cbm_pipeline_t *p, cbm_store_t *store, const c
     bool doc_links_current = metadata_current && incr_doc_links_current(store, project);
     bool exact = false;
     if (doc_links_current) {
-        if (noop_manifest_equal) {
-            exact = noop_manifest_equal(stored, stored_count, baseline_manifest, baseline_count);
-            cbm_log_info("incremental.manifest_compare", "implementation", "rust");
-        } else {
-            exact = cbm_pipeline_semantic_manifests_equal(stored, stored_count, baseline_manifest,
-                                                         baseline_count);
-        }
+        exact = cbm_pipeline_semantic_manifests_equal(stored, stored_count, baseline_manifest,
+                                                      baseline_count);
+        cbm_log_info("incremental.manifest_compare", "implementation", "rust");
     }
     cbm_store_coverage_meta_clear(&meta);
     *metadata_current_out = metadata_current;

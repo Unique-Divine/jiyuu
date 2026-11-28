@@ -1,7 +1,5 @@
-//! Runs `mori` and the C `codebase-memory-mcp` from the same build directory
-//! and checks that they behave the same. Needs feature `c-backend` and the
-//! C reference binary (`MORI_C_REFERENCE=1`, set by `just check-linked`), so
-//! a pure-Rust `cargo test` compiles this file to nothing.
+//! Compares the linked `mori` executable with the standalone C reference
+//! selected by `just check-linked`. The suite requires feature `c-backend`.
 #![cfg(feature = "c-backend")]
 
 use std::ffi::OsStr;
@@ -14,17 +12,15 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use rusqlite::{Connection, OpenFlags};
 
+mod support;
+#[path = "support/test_impact.rs"]
+mod test_impact;
+
 const MORI: &str = env!("CARGO_BIN_EXE_mori");
 
 fn c_binary() -> PathBuf {
-    // build.rs sets MORI_C_BUILD_DIR whenever c-backend is on.
-    let bin = Path::new(env!("MORI_C_BUILD_DIR")).join("codebase-memory-mcp");
-    assert!(
-        bin.is_file(),
-        "{} is missing; build with MORI_C_REFERENCE=1 (just check-linked)",
-        bin.display()
-    );
-    bin
+    support::c_reference_bin()
+        .expect("set MORI_C_REFERENCE_BIN or run just check-linked")
 }
 
 /// A short, mode-700 scratch directory: long runtime paths overflow the
@@ -104,22 +100,31 @@ fn assert_same(args: &[&str]) {
 /// `mori --version` names `mori`; the version and everything else match C.
 #[test]
 fn version_matches_c() {
-    let c = run(&c_binary(), "c", &["--version"]);
-    let rs = run(Path::new(MORI), "rs", &["--version"]);
-    assert!(c.status.success() && rs.status.success());
-    let c_out = String::from_utf8_lossy(&c.stdout);
-    let rs_out = String::from_utf8_lossy(&rs.stdout);
-    let version = c_out
-        .strip_prefix("codebase-memory-mcp ")
-        .unwrap_or_else(|| panic!("C --version printed {c_out:?}"));
-    assert_eq!(rs_out, format!("mori {version}"));
-    assert_eq!(c.stderr, rs.stderr);
+    let reference = c_binary();
+    for args in [
+        &["--version"][..],
+        &["--version", "--profile"],
+        &["--profile", "--version", "--help"],
+        &["daemon", "--version", "--help"],
+    ] {
+        let c = run(&reference, "c", args);
+        let rs = run(Path::new(MORI), "rs", args);
+        assert!(c.status.success() && rs.status.success(), "{args:?}");
+        let version = c
+            .stdout
+            .strip_prefix(b"codebase-memory-mcp ")
+            .unwrap_or_else(|| panic!("C {args:?} printed {:?}", c.stdout));
+        assert_eq!(rs.stdout, [b"mori ", version].concat(), "{args:?}");
+        assert_eq!(c.stderr, rs.stderr, "{args:?}");
+    }
 }
 
 #[test]
 fn top_level_command_precedence_matches_c() {
     for args in [
         &["--profile", "--help", "cli"][..],
+        &["--help", "--version"],
+        &["-h", "--profile"],
         &["cli", "--help", "--version"],
         &["cli", "list_projects", "--help"],
         &["daemon", "--help"],
@@ -131,6 +136,121 @@ fn top_level_command_precedence_matches_c() {
         &["--tool-profile=invalid"],
     ] {
         assert_same(args);
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn informational_commands_match_c_when_stdout_fails() {
+    let reference = c_binary();
+    for name in ["--version", "--help"] {
+        let run = |bin: &Path| {
+            let full = fs::OpenOptions::new()
+                .write(true)
+                .open("/dev/full")
+                .unwrap();
+            command_in(bin, &Scratch::new("full-info"))
+                .arg(name)
+                .stdout(full)
+                .output()
+                .unwrap()
+        };
+        let c = run(&reference);
+        let rs = run(Path::new(MORI));
+        assert!(c.status.success() && rs.status.success(), "{name}");
+        assert_eq!(c.stderr, rs.stderr, "{name}");
+    }
+}
+
+#[test]
+fn config_cli_matches_c_with_isolated_settings() {
+    let c = c_binary();
+    let native = Scratch::new("c-config");
+    let rust = Scratch::new("rs-config");
+    for (args, status) in [
+        (&["config"][..], 0),
+        (&["config", "ls"], 0),
+        (&["config", "get", "auto_watch"], 0),
+        (&["config", "set", "auto_watch", "false"], 0),
+        (&["config", "get", "auto_watch"], 0),
+        (&["config", "reset", "auto_watch"], 0),
+        (&["config", "set", "ui_port", "08080"], 0),
+        (&["config", "get", "ui_port"], 0),
+        (&["config", "set", "ui_port", "0"], 1),
+        (&["config", "reset", "ui_port"], 0),
+        (&["config", "set", "index_max_files", "4321"], 0),
+        (&["config", "set", "index_max_files", "broken"], 1),
+        (&["config", "get", "index_max_files"], 0),
+        (&["config", "reset", "index_max_files"], 0),
+        (&["config", "get", "missing"], 1),
+        (&["config", "set", "auto_watch"], 1),
+        (&["config", "list"], 0),
+        (&["config", "unknown"], 1),
+    ] {
+        let run = |bin: &Path, scratch: &Scratch| {
+            command_in(bin, scratch)
+                .env("HOME", &scratch.0)
+                .args(args)
+                .output()
+                .unwrap()
+        };
+        let reference = run(&c, &native);
+        let candidate = run(Path::new(MORI), &rust);
+        assert_eq!(
+            reference.status.code(),
+            Some(status),
+            "{args:?}: {reference:?}"
+        );
+        assert_eq!(
+            candidate.status.code(),
+            Some(status),
+            "{args:?}: {candidate:?}"
+        );
+        assert_eq!(reference.stdout, candidate.stdout, "stdout for {args:?}");
+        assert_eq!(reference.stderr, candidate.stderr, "stderr for {args:?}");
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn config_cli_keeps_operation_status_when_stdout_fails() {
+    let reference = c_binary();
+    // A small result can fail while flushing. A value larger than the C
+    // stdio buffer can fail during the write itself.
+    let long_value = "x".repeat(32 * 1024);
+    for bin in [reference.as_path(), Path::new(MORI)] {
+        let scratch = Scratch::new("full-config");
+        for args in [
+            &["config", "--help"][..],
+            &["config", "get", "auto_watch"],
+            &["config", "set", "ui-lang", &long_value],
+            &["config", "get", "ui-lang"],
+        ] {
+            let full = fs::OpenOptions::new()
+                .write(true)
+                .open("/dev/full")
+                .unwrap();
+            let output = command_in(bin, &scratch)
+                .env("HOME", &scratch.0)
+                .args(args)
+                .stdout(full)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{bin:?}: {output:?}");
+        }
+        let db = Connection::open_with_flags(
+            scratch.0.join("cache/_config.db"),
+            OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        let saved: String = db
+            .query_row(
+                "SELECT value FROM config WHERE key = 'ui-lang'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(saved == long_value, "{bin:?}: config write did not persist");
     }
 }
 
@@ -208,6 +328,48 @@ fn top_level_selection_preserves_non_utf8_argv() {
 #[test]
 fn list_projects_matches_c() {
     assert_same(&["cli", "list_projects"]);
+}
+
+#[test]
+fn cli_and_stdio_route_project_listing_through_rust() {
+    let bin = Path::new(MORI);
+    let scratch = Scratch::new("project-dispatch");
+    let start = command_in(bin, &scratch)
+        .env("CBM_LOG_LEVEL", "debug")
+        .env("CBM_LOG_FORMAT", "text")
+        .args(["daemon", "start"])
+        .output()
+        .unwrap();
+    assert!(start.status.success(), "{start:?}");
+    let cli = run_in(bin, &scratch, &["cli", "--quiet", "list_projects"]);
+    let stdio = run_stdio_in(
+        bin,
+        &scratch,
+        &[],
+        concat!(
+            r#"{"jsonrpc":"2.0","id":"catalog","method":"tools/call","params":{"name":"list_projects","arguments":{"format":"json"}}}"#,
+            "\n"
+        ),
+    );
+    let stop = run_in(bin, &scratch, &["daemon", "stop"]);
+    assert!(stop.status.success(), "{stop:?}");
+    assert!(cli.status.success(), "{cli:?}");
+    assert!(stdio.status.success(), "{stdio:?}");
+
+    let reply: serde_json::Value =
+        serde_json::from_slice(&stdio.stdout).unwrap();
+    assert_eq!(reply["id"], "catalog");
+    assert_eq!(reply["result"]["structuredContent"]["total"], 0);
+    let log =
+        fs::read_to_string(scratch.0.join("cache/logs/cbm-daemon.log")).unwrap();
+    assert_eq!(
+        log.lines()
+            .filter(|line| line
+                .contains("msg=list_projects.dispatch implementation=rust"))
+            .count(),
+        2,
+        "{bin:?}: {log}"
+    );
 }
 
 #[test]
@@ -562,6 +724,7 @@ fn mcp_method_dispatch_matches_c() {
         "{\"jsonrpc\":\"2.0\",\"id\":\"discover\",\"method\":\"server/discover\"}\n",
         "{\"jsonrpc\":\"2.0\",\"id\":\"unknown\",\"method\":\"ping/extra\"}\n",
         "{\"jsonrpc\":\"2.0\",\"id\":\"cancel-request\",\"method\":\"notifications/cancelled\"}\n",
+        "not-json\n",
     );
     let reference = run_stdio(&c_binary(), "c", &[], input);
     let linked = run_stdio(Path::new(MORI), "rs", &[], input);
@@ -570,7 +733,7 @@ fn mcp_method_dispatch_matches_c() {
         .lines()
         .map(|line| serde_json::from_str(line).expect("parse response"))
         .collect();
-    assert_eq!(replies.len(), 7, "{linked}");
+    assert_eq!(replies.len(), 8, "{linked}");
     assert_eq!(replies[0]["id"], "ping");
     assert_eq!(replies[0]["result"], serde_json::json!({}));
     // The C envelope uses -1 for a present null ID. A missing ID is silent.
@@ -582,13 +745,15 @@ fn mcp_method_dispatch_matches_c() {
         serde_json::json!([])
     );
     for (reply, id) in
-        replies[4..]
+        replies[4..7]
             .iter()
             .zip(["discover", "unknown", "cancel-request"])
     {
         assert_eq!(reply["id"], id);
         assert_eq!(reply["error"]["code"], -32601);
     }
+    assert_eq!(replies[7]["id"], 0);
+    assert_eq!(replies[7]["error"]["code"], -32700);
 }
 
 #[test]
@@ -1233,7 +1398,57 @@ fn standalone_ui_sigterm_with_full_stderr_pipe() {
             .unwrap();
             let mut response = String::new();
             conn.read_to_string(&mut response).unwrap();
-            assert!(response.starts_with("HTTP/1.1 200 "));
+            let (headers, body) = response.split_once("\r\n\r\n").unwrap();
+            assert!(headers.starts_with("HTTP/1.1 200 OK\r\n"));
+            assert!(
+                headers
+                    .contains("\r\nContent-Type: text/html; charset=utf-8\r\n")
+            );
+            assert!(
+                headers.contains(&format!(
+                    "\r\nContent-Length: {}\r\n",
+                    body.len()
+                ))
+            );
+            assert!(headers.ends_with("\r\nConnection: close"));
+
+            for (request, expected) in [
+                (
+                    "GET / HTTP/1.1\r\nHost: example.invalid\r\n\r\n".to_owned(),
+                    403,
+                ),
+                (
+                    format!(
+                        "GET / HTTP/1.1\r\nHost: {addr}\r\nOrigin: null\r\n\r\n"
+                    ),
+                    403,
+                ),
+                (
+                    format!(
+                        "POST /rpc HTTP/1.1\r\nHost: {addr}\r\nContent-Length: 1048577\r\n\r\n"
+                    ),
+                    413,
+                ),
+                (
+                    format!(
+                        "POST /api/config HTTP/1.1\r\nHost: {addr}\r\nContent-Type: application/json\r\n\r\n"
+                    ),
+                    404,
+                ),
+            ] {
+                let mut conn =
+                    TcpStream::connect_timeout(&addr, Duration::from_secs(1))
+                        .unwrap();
+                conn.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+                conn.write_all(request.as_bytes()).unwrap();
+                let mut response = String::new();
+                conn.read_to_string(&mut response).unwrap();
+                assert!(
+                    response.starts_with(&format!("HTTP/1.1 {expected} ")),
+                    "{response}"
+                );
+                assert!(!response.contains("Access-Control-Allow-Origin:"));
+            }
         }
 
         // SAFETY: the child owns this PID and is still running.
@@ -1759,7 +1974,20 @@ fn snippet_source_windows_match_c_in_cli_and_forwarded_mcp() {
     let mut source = "class Big:\n    def first(self): return 1\n".to_owned();
     source.push_str(&"    # filler\n".repeat(600));
     source.push_str("    def last(self): return 2\n");
+    source.push_str("\ndef over_budget(): return \"");
+    source.push_str(&"x".repeat(700));
+    source.push_str("\"\n");
+    source.push_str("\ndef escaped(): return \"😀\t\x1b\\\\tail\"\n");
+    source.push_str("\ndef relay(): return escaped()\n");
     fs::write(&file, &source).unwrap();
+
+    for module in ["left", "right"] {
+        fs::write(
+            repo.join(format!("{module}.py")),
+            "def duplicate():\n    return 1\n",
+        )
+        .unwrap();
+    }
 
     let c = c_binary();
     let rust = Path::new(MORI);
@@ -1786,6 +2014,8 @@ fn snippet_source_windows_match_c_in_cli_and_forwarded_mcp() {
     };
     let big = qualified_name("Big");
     let first = qualified_name("first");
+    let over_budget = qualified_name("over_budget");
+    let escaped = qualified_name("escaped");
     drop(graph);
 
     let requests = [
@@ -1803,10 +2033,23 @@ fn snippet_source_windows_match_c_in_cli_and_forwarded_mcp() {
             "qualified_name": first, "start_line": 999,
         }),
         serde_json::json!({"qualified_name": "unknown_symbol"}),
+        serde_json::json!({
+            "qualified_name": over_budget, "max_output_tokens": 200,
+        }),
+        serde_json::json!({"qualified_name": escaped, "include_neighbors": true}),
+        serde_json::json!({"qualified_name": "duplicate"}),
+        serde_json::json!({
+            "qualified_name": escaped, "format": "tree",
+        }),
+        serde_json::json!({
+            "qualified_name": big, "member_limit": 1, "member_offset": 1,
+        }),
     ]
     .map(|mut args| {
         args["project"] = serde_json::json!(project);
-        args["format"] = serde_json::json!("json");
+        if args.get("format").is_none() {
+            args["format"] = serde_json::json!("json");
+        }
         args
     });
     let read = |bin: &Path, args: &serde_json::Value| {
@@ -1848,8 +2091,30 @@ fn snippet_source_windows_match_c_in_cli_and_forwarded_mcp() {
                 .contains("symbol not found")
     );
 
+    let omitted = json(&responses[6]);
+    assert_eq!(omitted["source_omitted"], true);
+    assert_eq!(omitted["source_lines_returned"], 0);
+    assert_eq!(omitted["continuation_requires_higher_budget"], true);
+    let escaped = json(&responses[7]);
+    assert_eq!(escaped["caller_names"], serde_json::json!(["relay"]));
+    let escaped_source = escaped["source"].as_str().unwrap();
+    assert!(escaped_source.contains("😀\t\x1b\\\\tail"));
+    assert!(
+        responses[7]
+            .stdout
+            .windows(6)
+            .any(|part| part == br"\u001B")
+    );
+    let ambiguous = json(&responses[8]);
+    assert_eq!(ambiguous["status"], "ambiguous");
+    assert_eq!(ambiguous["suggestions"].as_array().unwrap().len(), 2);
+    assert!(String::from_utf8_lossy(&responses[9].stdout).contains("source: |"));
+    let outline_page = json(&responses[10]);
+    assert_eq!(outline_page["members_returned"], 1);
+    assert_eq!(outline_page["members"][0]["label"], "Method");
+
     // Repeat a successful request through MCP stdio. The debug marker is
-    // written by the daemon only after the Rust callback returns.
+    // written by the daemon after Rust assembles the response.
     let startup = command_in(rust, &scratch)
         .env("CBM_LOG_LEVEL", "debug")
         .args(["daemon", "start"])
@@ -1890,7 +2155,8 @@ fn snippet_source_windows_match_c_in_cli_and_forwarded_mcp() {
     let log =
         fs::read_to_string(scratch.0.join("cache/logs/cbm-daemon.log")).unwrap();
     assert!(log.lines().any(|line| {
-        line.contains("get_code_snippet.window") && line.contains("backend=rust")
+        line.contains("get_code_snippet.response")
+            && line.contains("backend=rust")
     }));
 
     fs::write(&file, format!("# shifted\n{source}")).unwrap();

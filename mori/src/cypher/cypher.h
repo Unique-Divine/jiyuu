@@ -343,6 +343,29 @@ typedef struct {
     "filter, use a directed MATCH instead of an unbounded OPTIONAL MATCH, or add LIMIT"
 #define CBM_CYPHER_ROW_CEILING_ERROR "result exceeded 100k rows — use narrower filters or add LIMIT"
 
+#define CBM_CYPHER_CANCELLED_ERROR "query_graph cancelled for this request"
+
+typedef struct {
+    uint64_t deadline_ms;
+    bool (*cancelled)(void *);
+    void *cancel_context;
+} cbm_cypher_budget_t;
+
+typedef enum {
+    CBM_CYPHER_BUDGET_ACTIVE,
+    CBM_CYPHER_BUDGET_DEADLINE,
+    CBM_CYPHER_BUDGET_CANCELLED,
+} cbm_cypher_budget_status_t;
+
+/* Start once per request and reuse across evaluator attempts. */
+cbm_cypher_budget_t cbm_cypher_budget_start(bool (*cancelled)(void *), void *context);
+cbm_cypher_budget_status_t cbm_cypher_budget_status(const cbm_cypher_budget_t *budget);
+/* Read the time left without changing the request deadline. */
+uint64_t cbm_cypher_budget_remaining_ms(const cbm_cypher_budget_t *budget);
+int cbm_cypher_execute_with_budget(cbm_store_t *store, const char *query, const char *project,
+                                   int max_rows, cbm_cypher_result_t *out,
+                                   const cbm_cypher_budget_t *budget);
+
 /* Execute a Cypher query against a store.
  * max_rows: limit on output rows; 0 or any value above the 100k ceiling uses
  *   the ceiling.
@@ -365,10 +388,10 @@ void cbm_query_free(cbm_query_t *q);
  * check; a negative value restores the default budget. */
 void cbm_cypher_test_set_deadline_ms(int64_t budget_ms);
 
-#ifdef CBM_ENABLE_TEST_SEAMS
 /* Override only the deadline clock on this thread; NULL restores real time. */
 typedef uint64_t (*cbm_cypher_test_clock_fn)(void);
 void cbm_cypher_test_set_deadline_clock(cbm_cypher_test_clock_fn clock_fn);
+#ifdef CBM_ENABLE_TEST_SEAMS
 /* Start nodes per streamed execution chunk on this thread; 0 restores the
  * default. INT_MAX runs the whole start set as one chunk (a single pass). */
 void cbm_cypher_test_set_stream_chunk(int start_nodes);

@@ -2,6 +2,8 @@
  * ipc.c — Authenticated, owner-scoped local transport for the CBM daemon.
  */
 #include "daemon/ipc.h"
+#include "foundation/sanitized.h"
+#include "daemon/ipc_codec.h"
 #include "daemon/ipc_internal.h"
 
 #include "foundation/compat.h"
@@ -184,18 +186,8 @@ bool cbm_daemon_ipc_listen_failure_detail(cbm_daemon_ipc_listen_failure_t *out) 
 }
 
 static bool instance_key_valid(const char *key) {
-    if (!key) {
-        return false;
-    }
-    for (size_t i = 0; i < 16; i++) {
-        char ch = key[i];
-        bool decimal = ch >= '0' && ch <= '9';
-        bool lower = ch >= 'a' && ch <= 'f';
-        if (!decimal && !lower) {
-            return false;
-        }
-    }
-    return key[16] == '\0';
+    return key && strnlen(key, CBM_DAEMON_KEY_SIZE) == CBM_DAEMON_KEY_SIZE - 1U &&
+           mori_ipc_instance_key_valid((const uint8_t *)key);
 }
 
 static char *string_copy(const char *value) {
@@ -976,71 +968,29 @@ static bool socket_peer_is_current_user(int fd) {
 #endif
 }
 
-static int connection_read_full(cbm_daemon_ipc_connection_t *connection, void *buffer,
-                                size_t length, uint64_t deadline_ms) {
-    if (!connection || atomic_load_explicit(&connection->poisoned, memory_order_acquire)) {
-        return -1;
+static int connection_io_once(cbm_daemon_ipc_connection_t *connection, void *buffer,
+                              size_t length, uint64_t deadline_ms, bool writing) {
+    int ready = poll_until(connection->fd, writing ? POLLOUT : POLLIN, deadline_ms);
+    if (ready != 1) {
+        return ready;
     }
-    size_t offset = 0;
-    while (offset < length) {
-        int ready = poll_until(connection->fd, POLLIN, deadline_ms);
-        if (ready != 1) {
-            /* Framing is fail-stop across platforms.  Even at offset zero a
-             * deadline may race transport progress (notably OVERLAPPED I/O on
-             * Windows), so callers must reconnect instead of reusing a stream
-             * whose next byte boundary is uncertain. */
-            atomic_store_explicit(&connection->poisoned, true, memory_order_release);
-            return ready;
-        }
-        ssize_t received = recv(connection->fd, (uint8_t *)buffer + offset, length - offset, 0);
-        if (received > 0) {
-            offset += (size_t)received;
-            continue;
-        }
-        if (received == 0) {
-            atomic_store_explicit(&connection->poisoned, true, memory_order_release);
-            return -1;
-        }
-        if (errno != EINTR && errno != EAGAIN && errno != EWOULDBLOCK) {
-            atomic_store_explicit(&connection->poisoned, true, memory_order_release);
-            return -1;
-        }
-    }
-    return 1;
-}
-
-static int connection_write_full(cbm_daemon_ipc_connection_t *connection, const void *buffer,
-                                 size_t length, uint64_t deadline_ms) {
-    if (!connection || atomic_load_explicit(&connection->poisoned, memory_order_acquire)) {
-        return -1;
-    }
-    size_t offset = 0;
-    while (offset < length) {
-        int ready = poll_until(connection->fd, POLLOUT, deadline_ms);
-        if (ready != 1) {
-            atomic_store_explicit(&connection->poisoned, true, memory_order_release);
-            return ready;
-        }
+    ssize_t transferred;
+    if (writing) {
 #ifdef MSG_NOSIGNAL
-        ssize_t sent =
-            send(connection->fd, (const uint8_t *)buffer + offset, length - offset, MSG_NOSIGNAL);
+        transferred = send(connection->fd, buffer, length, MSG_NOSIGNAL);
 #else
-        ssize_t sent = send(connection->fd, (const uint8_t *)buffer + offset, length - offset, 0);
+        transferred = send(connection->fd, buffer, length, 0);
 #endif
-        if (sent > 0) {
-            offset += (size_t)sent;
-            continue;
-        }
-        if (sent == 0) {
-            atomic_store_explicit(&connection->poisoned, true, memory_order_release);
-            return -1;
-        }
-        if (errno != EINTR && errno != EAGAIN && errno != EWOULDBLOCK) {
-            atomic_store_explicit(&connection->poisoned, true, memory_order_release);
-            return -1;
-        }
+    } else {
+        transferred = recv(connection->fd, buffer, length, 0);
     }
-    return 1;
+    if (transferred > 0) {
+        return (int)transferred;
+    }
+    if (transferred < 0 && (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK)) {
+        return MORI_IPC_IO_RETRY;
+    }
+    return -1;
 }
 
 cbm_daemon_ipc_endpoint_t *cbm_daemon_ipc_endpoint_new(const char *instance_key,
@@ -2241,31 +2191,6 @@ FILE *cbm_daemon_ipc_private_log_open(const char *directory_path, const char *ba
     return stream;
 }
 
-static void posix_u32_encode(uint8_t out[4], uint32_t value) {
-    out[0] = (uint8_t)(value & 0xffU);
-    out[1] = (uint8_t)((value >> 8U) & 0xffU);
-    out[2] = (uint8_t)((value >> 16U) & 0xffU);
-    out[3] = (uint8_t)((value >> 24U) & 0xffU);
-}
-
-static uint32_t posix_u32_decode(const uint8_t in[4]) {
-    return (uint32_t)in[0] | ((uint32_t)in[1] << 8U) | ((uint32_t)in[2] << 16U) |
-           ((uint32_t)in[3] << 24U);
-}
-
-static void posix_u64_encode(uint8_t out[8], uint64_t value) {
-    for (size_t index = 0; index < 8; index++) {
-        out[index] = (uint8_t)(value >> (index * 8U));
-    }
-}
-
-static uint64_t posix_u64_decode(const uint8_t in[8]) {
-    uint64_t value = 0;
-    for (size_t index = 0; index < 8; index++) {
-        value |= (uint64_t)in[index] << (index * 8U);
-    }
-    return value;
-}
 
 static bool posix_stat_ctime(const struct stat *status, int64_t *seconds_out,
                              uint32_t *nanoseconds_out) {
@@ -2334,64 +2259,50 @@ static bool posix_socket_status_secure_transport(const struct stat *status) {
 static bool posix_socket_record_encode(const uint8_t magic[POSIX_SOCKET_RECORD_MAGIC_SIZE],
                                        const posix_socket_record_t *source,
                                        uint8_t record[POSIX_SOCKET_RECORD_SIZE]) {
-    if (!magic || !source || !record || source->identity.ctime_seconds < 0 ||
-        source->identity.ctime_nanoseconds >= 1000000000U) {
+    if (!magic || !source || !record) {
         return false;
     }
-    size_t anchor_length = strnlen(source->anchor_name, POSIX_SOCKET_ANCHOR_NAME_CAP);
-    uint64_t device = (uint64_t)source->identity.device;
-    uint64_t inode = (uint64_t)source->identity.inode;
-    if ((dev_t)device != source->identity.device || (ino_t)inode != source->identity.inode ||
-        anchor_length == 0 || anchor_length >= POSIX_SOCKET_ANCHOR_NAME_CAP ||
-        strchr(source->anchor_name, '/')) {
+    mori_ipc_socket_identity_t identity = {
+        .device = (uint64_t)source->identity.device,
+        .inode = (uint64_t)source->identity.inode,
+        .ctime_seconds = source->identity.ctime_seconds,
+        .ctime_nanoseconds = source->identity.ctime_nanoseconds,
+    };
+    if ((dev_t)identity.device != source->identity.device ||
+        (ino_t)identity.inode != source->identity.inode) {
         return false;
     }
-    memset(record, 0, POSIX_SOCKET_RECORD_SIZE);
-    memcpy(record, magic, POSIX_SOCKET_RECORD_MAGIC_SIZE);
-    posix_u64_encode(record + POSIX_SOCKET_IDENTITY_DEVICE_OFFSET, device);
-    posix_u64_encode(record + POSIX_SOCKET_IDENTITY_INODE_OFFSET, inode);
-    posix_u64_encode(record + POSIX_SOCKET_IDENTITY_CTIME_SECONDS_OFFSET,
-                     (uint64_t)source->identity.ctime_seconds);
-    posix_u32_encode(record + POSIX_SOCKET_IDENTITY_CTIME_NANOSECONDS_OFFSET,
-                     source->identity.ctime_nanoseconds);
-    memcpy(record + POSIX_SOCKET_ANCHOR_NAME_OFFSET, source->anchor_name, anchor_length + 1U);
+    if (!mori_ipc_socket_record_encode(
+            magic, &identity, (const uint8_t *)source->anchor_name,
+            strnlen(source->anchor_name, POSIX_SOCKET_ANCHOR_NAME_CAP), record)) {
+        return false;
+    }
+    CBM_MSAN_WRITTEN(record, POSIX_SOCKET_RECORD_SIZE);
     return true;
 }
 
 static bool posix_socket_record_decode(const uint8_t record[POSIX_SOCKET_RECORD_SIZE],
                                        const uint8_t magic[POSIX_SOCKET_RECORD_MAGIC_SIZE],
                                        posix_socket_record_t *record_out) {
-    if (!record || !magic || !record_out ||
-        memcmp(record, magic, POSIX_SOCKET_RECORD_MAGIC_SIZE) != 0 ||
-        posix_u32_decode(record + POSIX_SOCKET_IDENTITY_RESERVED_OFFSET) != 0) {
+    if (!record || !magic || !record_out) {
         return false;
     }
-    uint64_t device = posix_u64_decode(record + POSIX_SOCKET_IDENTITY_DEVICE_OFFSET);
-    uint64_t inode = posix_u64_decode(record + POSIX_SOCKET_IDENTITY_INODE_OFFSET);
-    uint64_t seconds = posix_u64_decode(record + POSIX_SOCKET_IDENTITY_CTIME_SECONDS_OFFSET);
-    uint32_t nanoseconds =
-        posix_u32_decode(record + POSIX_SOCKET_IDENTITY_CTIME_NANOSECONDS_OFFSET);
-    if ((dev_t)device != device || (ino_t)inode != inode || seconds > (uint64_t)INT64_MAX ||
-        nanoseconds >= 1000000000U) {
+    mori_ipc_socket_identity_t identity;
+    char anchor[POSIX_SOCKET_ANCHOR_NAME_CAP];
+    if (!mori_ipc_socket_record_decode(magic, record, &identity, anchor)) {
         return false;
     }
-    const uint8_t *anchor = record + POSIX_SOCKET_ANCHOR_NAME_OFFSET;
-    const uint8_t *terminator = memchr(anchor, 0, POSIX_SOCKET_ANCHOR_NAME_CAP);
-    if (!terminator || terminator == anchor || memchr(anchor, '/', (size_t)(terminator - anchor))) {
+    CBM_MSAN_WRITTEN(&identity, sizeof(identity));
+    CBM_MSAN_WRITTEN(anchor, sizeof(anchor));
+    if ((dev_t)identity.device != identity.device || (ino_t)identity.inode != identity.inode) {
         return false;
-    }
-    size_t anchor_length = (size_t)(terminator - anchor);
-    for (size_t index = anchor_length + 1U; index < POSIX_SOCKET_ANCHOR_NAME_CAP; index++) {
-        if (anchor[index] != 0) {
-            return false;
-        }
     }
     memset(record_out, 0, sizeof(*record_out));
-    record_out->identity.device = (dev_t)device;
-    record_out->identity.inode = (ino_t)inode;
-    record_out->identity.ctime_seconds = (int64_t)seconds;
-    record_out->identity.ctime_nanoseconds = nanoseconds;
-    memcpy(record_out->anchor_name, anchor, anchor_length + 1U);
+    record_out->identity.device = (dev_t)identity.device;
+    record_out->identity.inode = (ino_t)identity.inode;
+    record_out->identity.ctime_seconds = identity.ctime_seconds;
+    record_out->identity.ctime_nanoseconds = identity.ctime_nanoseconds;
+    memcpy(record_out->anchor_name, anchor, sizeof(anchor));
     return true;
 }
 
@@ -6986,52 +6897,11 @@ static int win_io_once(cbm_daemon_ipc_connection_t *connection, void *buffer, DW
     return result;
 }
 
-static int connection_read_full(cbm_daemon_ipc_connection_t *connection, void *buffer,
-                                size_t length, uint64_t deadline_ms) {
-    if (!connection || atomic_load_explicit(&connection->poisoned, memory_order_acquire)) {
-        return -1;
-    }
-    size_t offset = 0;
-    while (offset < length) {
-        DWORD chunk = length - offset > MAXDWORD ? MAXDWORD : (DWORD)(length - offset);
-        DWORD transferred = 0;
-        int result = win_io_once(connection, (uint8_t *)buffer + offset, chunk, false, deadline_ms,
-                                 &transferred);
-        if (result != 1) {
-            atomic_store_explicit(&connection->poisoned, true, memory_order_release);
-            return result;
-        }
-        if (transferred == 0) {
-            atomic_store_explicit(&connection->poisoned, true, memory_order_release);
-            return -1;
-        }
-        offset += transferred;
-    }
-    return 1;
-}
-
-static int connection_write_full(cbm_daemon_ipc_connection_t *connection, const void *buffer,
-                                 size_t length, uint64_t deadline_ms) {
-    if (!connection || atomic_load_explicit(&connection->poisoned, memory_order_acquire)) {
-        return -1;
-    }
-    size_t offset = 0;
-    while (offset < length) {
-        DWORD chunk = length - offset > MAXDWORD ? MAXDWORD : (DWORD)(length - offset);
-        DWORD transferred = 0;
-        int result = win_io_once(connection, (void *)((const uint8_t *)buffer + offset), chunk,
-                                 true, deadline_ms, &transferred);
-        if (result != 1) {
-            atomic_store_explicit(&connection->poisoned, true, memory_order_release);
-            return result;
-        }
-        if (transferred == 0) {
-            atomic_store_explicit(&connection->poisoned, true, memory_order_release);
-            return -1;
-        }
-        offset += transferred;
-    }
-    return 1;
+static int connection_io_once(cbm_daemon_ipc_connection_t *connection, void *buffer,
+                              size_t length, uint64_t deadline_ms, bool writing) {
+    DWORD transferred = 0;
+    int result = win_io_once(connection, buffer, (DWORD)length, writing, deadline_ms, &transferred);
+    return result == 1 ? (transferred > 0 ? (int)transferred : -1) : result;
 }
 
 int cbm_daemon_ipc_startup_lock_try_acquire(const cbm_daemon_ipc_endpoint_t *endpoint,
@@ -7350,76 +7220,68 @@ bool cbm_daemon_ipc_local_transition_release(cbm_daemon_ipc_local_transition_t *
            CBM_DAEMON_IPC_RELEASE_COMPLETE;
 }
 
+static void connection_poison(cbm_daemon_ipc_connection_t *connection) {
+    atomic_store_explicit(&connection->poisoned, true, memory_order_release);
+}
+
+static bool connection_is_poisoned(cbm_daemon_ipc_connection_t *connection) {
+    return atomic_load_explicit(&connection->poisoned, memory_order_acquire);
+}
+
+static void connection_mark_written(const void *buffer, size_t length) {
+    (void)buffer;
+    (void)length;
+    CBM_MSAN_WRITTEN(buffer, length);
+}
+
+static const mori_ipc_transfer_ops_t transfer_ops = {
+    .io_once = connection_io_once,
+    .is_poisoned = connection_is_poisoned,
+    .mark_written = connection_mark_written,
+    .poison = connection_poison,
+    .alloc = malloc,
+    .free = free,
+};
+
 bool cbm_daemon_ipc_send_frame(cbm_daemon_ipc_connection_t *connection,
                                cbm_daemon_frame_type_t type, uint16_t flags, const void *payload,
                                uint32_t length) {
-    if (!connection || atomic_load_explicit(&connection->poisoned, memory_order_acquire) ||
-        (length > 0 && !payload)) {
-        return false;
+    return connection &&
+           mori_ipc_send(connection, &transfer_ops, ipc_deadline_after(CBM_DAEMON_IPC_SEND_TIMEOUT_MS),
+                         (int)type, flags, payload, length);
+}
+
+static int ipc_receive(cbm_daemon_ipc_connection_t *connection, uint32_t timeout_ms,
+                       uint32_t max_payload_length, bool after_failed_send,
+                       cbm_daemon_frame_t *frame_out, uint8_t **payload_out) {
+    if (payload_out) {
+        *payload_out = NULL;
     }
-    uint8_t header[CBM_DAEMON_FRAME_HEADER_SIZE];
-    if (!cbm_daemon_frame_header_encode(header, type, flags, length)) {
-        return false;
+    if (!connection || !frame_out || !payload_out ||
+        (!after_failed_send && connection_is_poisoned(connection))) {
+        return -1;
     }
-    uint64_t deadline_ms = ipc_deadline_after(CBM_DAEMON_IPC_SEND_TIMEOUT_MS);
-    if (connection_write_full(connection, header, sizeof(header), deadline_ms) != 1) {
-        return false;
+    if (after_failed_send) {
+        connection_poison(connection);
     }
-    if (length > 0 && connection_write_full(connection, payload, length, deadline_ms) != 1) {
-        /* The peer has already received a complete header and will interpret
-         * subsequent bytes as this payload, so this stream cannot be reused. */
-        atomic_store_explicit(&connection->poisoned, true, memory_order_release);
-        return false;
+    memset(frame_out, 0, sizeof(*frame_out));
+    mori_ipc_received_frame_t frame;
+    int result = mori_ipc_receive(connection, &transfer_ops, ipc_deadline_after(timeout_ms),
+                                  max_payload_length, after_failed_send, &frame);
+    if (result == 1) {
+        CBM_MSAN_WRITTEN(&frame, sizeof(frame));
+        frame_out->type = (cbm_daemon_frame_type_t)frame.kind;
+        frame_out->flags = frame.flags;
+        frame_out->length = frame.length;
+        *payload_out = frame.payload;
     }
-    return true;
+    return result;
 }
 
 int cbm_daemon_ipc_receive_frame_bounded(cbm_daemon_ipc_connection_t *connection,
                                          uint32_t timeout_ms, uint32_t max_payload_length,
                                          cbm_daemon_frame_t *frame_out, uint8_t **payload_out) {
-    if (payload_out) {
-        *payload_out = NULL;
-    }
-    if (!connection || atomic_load_explicit(&connection->poisoned, memory_order_acquire) ||
-        !frame_out || !payload_out) {
-        return -1;
-    }
-    memset(frame_out, 0, sizeof(*frame_out));
-    uint64_t deadline_ms = ipc_deadline_after(timeout_ms);
-    uint8_t header[CBM_DAEMON_FRAME_HEADER_SIZE];
-    int result = connection_read_full(connection, header, sizeof(header), deadline_ms);
-    if (result != 1) {
-        return result;
-    }
-    cbm_daemon_frame_t frame;
-    if (!cbm_daemon_frame_header_decode(header, &frame)) {
-        atomic_store_explicit(&connection->poisoned, true, memory_order_release);
-        return -1;
-    }
-    if (frame.length > max_payload_length) {
-        /* The fixed unauthenticated envelope limit is enforced from the header
-         * before allocating or reading attacker-controlled payload bytes. The
-         * unread stream is necessarily unusable and is closed by its owner. */
-        atomic_store_explicit(&connection->poisoned, true, memory_order_release);
-        return -1;
-    }
-    uint8_t *payload = NULL;
-    if (frame.length > 0) {
-        payload = malloc(frame.length);
-        if (!payload) {
-            atomic_store_explicit(&connection->poisoned, true, memory_order_release);
-            return -1;
-        }
-        result = connection_read_full(connection, payload, frame.length, deadline_ms);
-        if (result != 1) {
-            atomic_store_explicit(&connection->poisoned, true, memory_order_release);
-            free(payload);
-            return result;
-        }
-    }
-    *frame_out = frame;
-    *payload_out = payload;
-    return 1;
+    return ipc_receive(connection, timeout_ms, max_payload_length, false, frame_out, payload_out);
 }
 
 int cbm_daemon_ipc_receive_frame(cbm_daemon_ipc_connection_t *connection, uint32_t timeout_ms,
@@ -7432,16 +7294,5 @@ int cbm_daemon_ipc_receive_frame_after_failed_send(cbm_daemon_ipc_connection_t *
                                                    uint32_t timeout_ms, uint32_t max_payload_length,
                                                    cbm_daemon_frame_t *frame_out,
                                                    uint8_t **payload_out) {
-    if (!connection) {
-        return cbm_daemon_ipc_receive_frame_bounded(NULL, timeout_ms, max_payload_length, frame_out,
-                                                    payload_out);
-    }
-    /* The poison came from the failed send alone (nothing was read yet), and it
-     * guards the OUTBOUND frame boundary; the inbound one is intact. Lift it for
-     * this one receive, then restore it so no later send can reuse the stream. */
-    atomic_store_explicit(&connection->poisoned, false, memory_order_release);
-    int received = cbm_daemon_ipc_receive_frame_bounded(connection, timeout_ms, max_payload_length,
-                                                        frame_out, payload_out);
-    atomic_store_explicit(&connection->poisoned, true, memory_order_release);
-    return received;
+    return ipc_receive(connection, timeout_ms, max_payload_length, true, frame_out, payload_out);
 }

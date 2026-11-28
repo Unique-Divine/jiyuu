@@ -206,10 +206,12 @@ int cbm_discover(const char *repo_path, const cbm_discover_opts_t *opts, cbm_fil
                  int *count);
 
 /* Apply the exact same full discovery/filter policy without retaining a file
- * array. Stops before counting more than max_files and performs no per-file
- * allocation. deadline_ms is an absolute cbm_now_ms() deadline; zero disables
- * it. Returns LIMIT_EXCEEDED when at least max_files + 1 indexable files exist,
- * ERROR on traversal/deadline/allocation failure, or OK with the exact count. */
+ * array. Stops before counting more than max_files. deadline_ms is an
+ * absolute cbm_now_ms() deadline. Zero disables it. Returns LIMIT_EXCEEDED
+ * when the next indexable file would exceed the count or a resource limit,
+ * with *count_out set to the accepted count. Returns ERROR on invalid input,
+ * traversal, deadline, or allocation failure, with *count_out set to -1 if
+ * provided. Returns OK with the exact count. */
 cbm_discover_status_t cbm_discover_count_bounded(const char *repo_path,
                                                  const cbm_discover_opts_t *opts, int max_files,
                                                  uint64_t deadline_ms, int *count_out);
@@ -253,27 +255,83 @@ int cbm_discover_ex2(const char *repo_path, const cbm_discover_opts_t *opts, cbm
                      cbm_ignored_file_t **ignored_out, int *ignored_count_out,
                      int *ignored_total_out);
 
-/* Ordinary discovery can delegate directory iteration and child scheduling.
- * The callback borrows the walk and root for its duration. Prepare each frame
+/* The Rust engine owns directory iteration and child scheduling.
+ * It borrows the walk and root for its duration. Prepare each frame
  * before reading its directory, pass each basename to walk_entry, and free
  * every non-null child it returns. A stopped walk or a false callback result
  * discards partial output through the usual discovery cleanup. */
 typedef struct cbm_discover_walk cbm_discover_walk_t;
 typedef struct cbm_discover_frame cbm_discover_frame_t;
-typedef bool (*cbm_discover_walk_fn)(cbm_discover_walk_t *walk, cbm_discover_frame_t *root);
+bool mori_discover_walk(cbm_discover_walk_t *walk, cbm_discover_frame_t *root);
 
+typedef struct {
+    uint64_t deadline_ms;
+    int max_files; /* -1 for ordinary discovery */
+    cbm_index_limit_u64_t resource_files;
+    cbm_index_limit_u64_t resource_bytes;
+} cbm_discover_walk_limits_t;
+
+/* The callback runs only for selected source files. Manifest discovery lends
+ * a diagnostic for resource refusals. Bounded discovery passes NULL and the
+ * Rust callback retains any refusal in its own state. */
+typedef bool (*cbm_discover_admit_fn)(void *state, int64_t size,
+                                      cbm_index_resource_violation_t *violation);
+
+typedef struct cbm_discover_selection cbm_discover_selection_t;
+
+typedef enum {
+    CBM_DISCOVER_CACHE_TREE,
+    CBM_DISCOVER_HARDCODED_DIR,
+    CBM_DISCOVER_SAFETY_CORE,
+    CBM_DISCOVER_IGNORED_SUFFIX,
+    CBM_DISCOVER_SKIP_FILENAME,
+    CBM_DISCOVER_FAST_PATTERN,
+    CBM_DISCOVER_TRACKED,
+    CBM_DISCOVER_PARENT_IGNORED,
+    CBM_DISCOVER_GIT_IGNORE,
+    CBM_DISCOVER_GLOBAL_IGNORE,
+    CBM_DISCOVER_CBM_IGNORE,
+    CBM_DISCOVER_OVER_SIZE,
+} cbm_discover_check_t;
+
+typedef enum {
+    CBM_DISCOVER_KEEP_ENTRY,
+    CBM_DISCOVER_KEEP_TRACKED_DIR,
+    CBM_DISCOVER_SKIP_DIR,
+    CBM_DISCOVER_SKIP_SUFFIX,
+    CBM_DISCOVER_SKIP_NAME,
+    CBM_DISCOVER_SKIP_PATTERN,
+    CBM_DISCOVER_SKIP_GIT,
+    CBM_DISCOVER_SKIP_CBM,
+    CBM_DISCOVER_SKIP_SIZE,
+} cbm_discover_selection_result_t;
+
+/* Each query returns zero or one, except CBM_IGNORE, whose negative value
+ * means a negation. The selection is borrowed until the selector returns. */
+int cbm_discover_selection_check(const cbm_discover_selection_t *selection,
+                                  cbm_discover_check_t check);
+typedef cbm_discover_selection_result_t (*cbm_discover_select_fn)(
+    const cbm_discover_selection_t *selection, bool is_dir);
+
+typedef struct {
+    cbm_discover_admit_fn admit;
+    cbm_discover_select_fn select;
+} cbm_discover_entry_ops_t;
+
+void cbm_discover_walk_limits(const cbm_discover_walk_t *walk, cbm_discover_walk_limits_t *limits);
 bool cbm_discover_walk_prepare(cbm_discover_walk_t *walk, cbm_discover_frame_t *frame);
 const char *cbm_discover_frame_path(const cbm_discover_frame_t *frame);
 cbm_discover_frame_t *cbm_discover_walk_entry(cbm_discover_walk_t *walk,
-                                              const cbm_discover_frame_t *frame, const char *name);
+                                              const cbm_discover_frame_t *frame, const char *name,
+                                              const cbm_discover_entry_ops_t *ops, void *state);
 void cbm_discover_frame_free(cbm_discover_frame_t *frame);
+/* Failure or refusal recorded by C. The callback polls its own deadline. */
 bool cbm_discover_walk_stopped(cbm_discover_walk_t *walk);
 
-int cbm_discover_ex2_with_walk(const char *repo_path, const cbm_discover_opts_t *opts,
-                               cbm_file_info_t **out, int *count, char ***excluded_out,
-                               int *excluded_count_out, cbm_ignored_file_t **ignored_out,
-                               int *ignored_count_out, int *ignored_total_out,
-                               cbm_discover_walk_fn walker);
+#ifdef _WIN32
+struct cbm_dir;
+const char *cbm_discover_dir_next(struct cbm_dir *dir);
+#endif
 
 /* Free an array of file info results. NULL-safe. */
 void cbm_discover_free(cbm_file_info_t *files, int count);
