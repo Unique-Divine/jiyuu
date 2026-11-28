@@ -88,3 +88,16 @@ python_invocation/main.py	lambda_call	square	Variable	616:625	square(3)	square
 python_invocation/main.py	nested	nested.inner	Function	801:808	inner()	inner
 python_invocation/main.py	nested.inner	other	Function	781:788	other()	other
 python_invocation/main.py	static_call	Box.build	Method	483:494	Box.build()	Box.build
+# Python callable values passed as arguments or bound to a name; the
+# conditional expression stays an unproven usage
+python_callable_values/main.py	conditional	apply	Function	526:561	apply(helper if flag else other, 6)	apply
+python_callable_values/main.py	keyword	apply	Function	409:433	apply(fn=other, value=4)	apply
+python_callable_values/main.py	keyword	other	Function	418:423	other	other	CALL_REFERENCE
+python_callable_values/main.py	partial	helper	Function	370:376	helper	helper	CALL_REFERENCE
+python_callable_values/main.py	passes_function	apply	Function	236:252	apply(helper, 1)	apply
+python_callable_values/main.py	passes_function	helper	Function	242:248	helper	helper	CALL_REFERENCE
+python_callable_values/main.py	passes_method	Box	Class	286:291	Box()	Box
+python_callable_values/main.py	passes_method	Box.method	Method	309:319	box.method	method	CALL_REFERENCE
+python_callable_values/main.py	passes_method	apply	Function	303:323	apply(box.method, 2)	apply
+python_callable_values/main.py	stored	apply	Function	477:489	apply(fn, 5)	apply
+python_callable_values/main.py	stored	helper	Function	459:465	helper	helper	CALL_REFERENCE

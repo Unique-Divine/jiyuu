@@ -48,6 +48,7 @@ struct Call {
     target: String,
     target_label: String,
     callee: String,
+    edge: String,
 }
 
 fn write_fixtures(
@@ -73,6 +74,11 @@ fn write_fixtures(
             write(path);
             continue;
         }
+        // An optional last column names an edge type other than CALLS.
+        let (columns, edge) = match columns[..] {
+            [.., edge] if columns.len() == 8 => (&columns[..7], edge),
+            _ => (&columns[..], "CALLS"),
+        };
         let [path, caller, target, target_label, spans, text, callee] =
             columns[..]
         else {
@@ -127,6 +133,7 @@ fn write_fixtures(
             target,
             target_label: target_label.to_owned(),
             callee: callee.to_owned(),
+            edge: edge.to_owned(),
         };
         assert!(calls.insert(call, lines).is_none(), "duplicate row {row:?}");
     }
@@ -198,11 +205,13 @@ fn assert_calls(
             "SELECT caller.file_path, caller.qualified_name, target.file_path,
                     target.qualified_name, target.label,
                     json_extract(edge.properties, '$.callee'),
-                    json_extract(edge.properties, '$.line')
+                    json_extract(edge.properties, '$.line'), edge.type
              FROM edges AS edge
              JOIN nodes AS caller ON caller.id = edge.source_id
              JOIN nodes AS target ON target.id = edge.target_id
-             WHERE edge.type = 'CALLS'",
+             WHERE edge.type = 'CALLS'
+                OR (edge.type = 'CALL_REFERENCE'
+                    AND caller.file_path LIKE '%.py')",
         )
         .unwrap();
     // Both baselines emit the Perl fixture edges in sequential indexing only.
@@ -223,9 +232,12 @@ fn assert_calls(
                 target: row.get(3).unwrap(),
                 target_label: row.get(4).unwrap(),
                 callee: row.get(5).unwrap(),
+                edge: row.get(7).unwrap(),
             };
-            let line = usize::try_from(row.get::<_, i64>(6).unwrap()).unwrap();
-            if let Some(lines) = expected.get(&call) {
+            // CALL_REFERENCE edges carry no line.
+            let line = row.get::<_, Option<i64>>(6).unwrap();
+            let line = line.map(|line| usize::try_from(line).unwrap());
+            if let (Some(line), Some(lines)) = (line, expected.get(&call)) {
                 assert!(
                     lines.contains(&line),
                     "{call:?}: line {line}, expected {lines:?}"
