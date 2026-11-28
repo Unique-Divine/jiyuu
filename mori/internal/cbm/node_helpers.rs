@@ -230,3 +230,7 @@ pub unsafe extern "C" fn cbm_is_test_file(
     // SAFETY: The caller provides a valid C string when the pointer is non-null.
     is_test_file(unsafe { CStr::from_ptr(path) }.to_bytes(), language)
 }
+
+#[cfg(all(test, feature = "c-backend"))]
+#[path = "node_helpers_tests.rs"]
+mod tests;

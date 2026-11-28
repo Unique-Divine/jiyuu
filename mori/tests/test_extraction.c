@@ -15859,10 +15859,6 @@ TEST(extraction_marker_round_trips_non_ascii_environment_path) {
 }
 #endif
 
-#ifdef CBM_ENABLE_TEST_SEAMS
-extern void suite_node_helpers(void);
-#endif
-
 SUITE(extraction) {
 #ifdef _WIN32
     RUN_TEST(extraction_marker_round_trips_non_ascii_environment_path);
@@ -15875,10 +15871,6 @@ SUITE(extraction) {
     RUN_TEST(extract_walk_truncated_when_a_node_budget_is_set);
     /* Initialize extraction library */
     cbm_init();
-
-#ifdef CBM_ENABLE_TEST_SEAMS
-    suite_node_helpers();
-#endif
 
     RUN_TEST(python_namespace_facts_preserve_order_and_import_provenance);
     RUN_TEST(python_namespace_facts_distinguish_all_operations_and_unknowns);
