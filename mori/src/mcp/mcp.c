@@ -54,6 +54,7 @@ enum {
 #include "mcp/mcp.h"
 #include "mcp/mcp_internal.h"
 #include "mcp/architecture_jobs.h"
+#include "mcp/detect_changes.h"
 #include "mcp/test_impact.h"
 #include "mcp/test_impact_engine.h"
 #include "store/graph_mem.h"
@@ -17284,40 +17285,6 @@ static mcp_scan_cause_t mcp_run_search_scan_argv(cbm_mcp_server_t *srv, bool use
 }
 #endif
 
-/* Does `node`'s line range overlap any recorded hunk for `file`? Used to scope
- * seed detection to the actually-changed lines rather than the whole file.
- * Non-static (declared in mcp_internal.h) so tests can exercise the overlap
- * logic directly, matching this file's existing white-box test hooks. */
-bool cbm_detect_node_in_hunks(const cbm_node_t *node, const cbm_changed_hunk_t *hunks,
-                              int hunk_count, const char *file) {
-    for (int h = 0; h < hunk_count; h++) {
-        if (strcmp(hunks[h].path, file) == 0 && node->start_line <= hunks[h].end_line &&
-            node->end_line >= hunks[h].start_line) {
-            return true;
-        }
-    }
-    return false;
-}
-
-/* Collect BFS seed ids for one changed file (everything but the structural
- * container labels — those have no CALLS edges). These anchor the
- * multi-source impact traversal.
- *
- * When `hunks` has at least one entry for `file`, only definitions whose line
- * range overlaps a hunk become seeds — a one-line edit inside a single
- * function no longer seeds every other definition in the file. When no hunk
- * is recorded for `file` (a brand-new/untracked file has no comparable
- * "before" state, or the hunk fetch failed/was skipped), every non-container
- * definition in the file is a seed — the previous, whole-file behavior — so
- * this is a precision improvement, not a new failure mode. */
-/* Structural container labels carry no CALLS edges and span the whole file, so
- * they are never seeds. Shared by the seeding loop and the overlap probe. */
-static bool detect_is_seedable_label(const char *lb) {
-    return lb && strcmp(lb, "File") != 0 && strcmp(lb, "Folder") != 0 &&
-           strcmp(lb, "Project") != 0 && strcmp(lb, "Module") != 0 && strcmp(lb, "Package") != 0 &&
-           strcmp(lb, "Section") != 0;
-}
-
 /* Seed presentation is optional. The default request retains its traversal,
  * ordering, output bytes and cursor identity. */
 typedef struct {
@@ -17328,25 +17295,6 @@ typedef struct {
     char cursor[80];
     char config_path[CBM_SZ_4K];
 } detect_seed_request_t;
-
-typedef struct {
-    const char *qn;
-    const char *label;
-    const char *file;
-    const char *reason;
-    int start;
-    int end;
-} detect_seed_row_t;
-
-typedef struct {
-    CBMArena arena;
-    detect_seed_row_t *rows;
-    int count;
-    int capacity;
-    bool failed;
-    bool config_failed;
-    cbm_test_config_t *config;
-} detect_seed_rows_t;
 
 static bool detect_seed_string(yyjson_val *value, const char **out) {
     *out = yyjson_get_str(value);
@@ -17406,7 +17354,7 @@ static void detect_seed_parse(const char *args, detect_seed_request_t *out, char
     yyjson_doc_free(doc);
 }
 
-static bool detect_seed_is_test(const cbm_node_t *node) {
+bool cbm_detect_seed_is_test(const cbm_node_t *node) {
     if (!node->properties_json)
         return false;
     yyjson_doc *doc = yyjson_read(node->properties_json, strlen(node->properties_json), 0);
@@ -17420,181 +17368,6 @@ static bool detect_seed_is_test(const cbm_node_t *node) {
                      strcmp(role_name, "helper") == 0));
     yyjson_doc_free(doc);
     return is_test;
-}
-
-static void detect_seed_add_row(detect_seed_rows_t *rows, const cbm_node_t *node, bool hunk) {
-    if (rows->failed)
-        return;
-    if (rows->count == rows->capacity) {
-        if (rows->capacity > INT_MAX / 2) {
-            rows->failed = true;
-            return;
-        }
-        int capacity = rows->capacity ? rows->capacity * 2 : 16;
-        if ((size_t)capacity > SIZE_MAX / sizeof(*rows->rows)) {
-            rows->failed = true;
-            return;
-        }
-        detect_seed_row_t *next = cbm_arena_alloc(&rows->arena, (size_t)capacity * sizeof(*next));
-        if (!next) {
-            rows->failed = true;
-            return;
-        }
-        if (rows->count)
-            memcpy(next, rows->rows, (size_t)rows->count * sizeof(*next));
-        rows->rows = next;
-        rows->capacity = capacity;
-    }
-    detect_seed_row_t *row = &rows->rows[rows->count++];
-    *row = (detect_seed_row_t){
-        .qn = cbm_arena_strdup(&rows->arena, node->qualified_name ? node->qualified_name : ""),
-        .label = cbm_arena_strdup(&rows->arena, node->label ? node->label : ""),
-        .file = cbm_arena_strdup(&rows->arena, node->file_path ? node->file_path : ""),
-        .reason = hunk ? "hunk" : "whole_file",
-        .start = node->start_line,
-        .end = node->end_line};
-    rows->failed = !row->qn || !row->label || !row->file;
-}
-
-static int detect_seed_row_compare(const void *left, const void *right) {
-    const detect_seed_row_t *a = left, *b = right;
-    int cmp = strcmp(a->qn, b->qn);
-    if (!cmp)
-        cmp = strcmp(a->file, b->file);
-    if (!cmp)
-        cmp = (a->start > b->start) - (a->start < b->start);
-    if (!cmp)
-        cmp = (a->end > b->end) - (a->end < b->end);
-    if (!cmp)
-        cmp = strcmp(a->label, b->label);
-    return cmp;
-}
-
-static void detect_collect_seeds(cbm_store_t *store, const char *project, const char *file,
-                                 const cbm_changed_hunk_t *hunks, int hunk_count, int64_t **seeds,
-                                 int *n, int *cap, const detect_seed_request_t *request,
-                                 detect_seed_rows_t *rows) {
-    cbm_node_t *nodes = NULL;
-    int ncount = 0;
-    if (cbm_store_find_nodes_by_file(store, project, file, &nodes, &ncount) != CBM_STORE_OK) {
-        rows->failed = true;
-        return;
-    }
-    bool file_is_test = request->product && cbm_test_config_is_test_file(rows->config, file);
-    bool scope_to_hunks = false;
-    for (int h = 0; h < hunk_count; h++) {
-        if (strcmp(hunks[h].path, file) == 0) {
-            scope_to_hunks = true;
-            break;
-        }
-    }
-    /* A file can have hunks yet no SEEDABLE definition overlapping any of them:
-     * an import-only edit, a module-level constant, or a change above the first
-     * definition all land outside every definition's line range. Scoping would
-     * then drop the file from the seed set entirely — strictly worse recall
-     * than the whole-file behavior this replaces. Probe for an overlap first
-     * and keep whole-file seeding for that file when there is none.
-     *
-     * The probe must apply the same label filter as the seeding loop below:
-     * container nodes span the whole file (a Module node is lines 1..EOF), so
-     * counting them would report an overlap for every hunk and defeat the
-     * fallback entirely. */
-    if (scope_to_hunks) {
-        bool any_overlap = false;
-        for (int i = 0; i < ncount && !any_overlap; i++) {
-            any_overlap = detect_is_seedable_label(nodes[i].label) &&
-                          cbm_detect_node_in_hunks(&nodes[i], hunks, hunk_count, file);
-        }
-        scope_to_hunks = any_overlap;
-    }
-    for (int i = 0; i < ncount; i++) {
-        if (detect_is_seedable_label(nodes[i].label)) {
-            if (scope_to_hunks && !cbm_detect_node_in_hunks(&nodes[i], hunks, hunk_count, file)) {
-                continue;
-            }
-            /* Probe overlap before filtering: a test-only hunk must not
-             * fall back onto untouched product definitions in this file. */
-            if (request->product && (file_is_test || detect_seed_is_test(&nodes[i]))) {
-                continue;
-            }
-            if (request->list) {
-                detect_seed_add_row(rows, &nodes[i], scope_to_hunks);
-            }
-            if (*n >= *cap) {
-                *cap = *cap ? *cap * 2 : 16;
-                *seeds = safe_realloc(*seeds, (size_t)*cap * sizeof(int64_t));
-            }
-            (*seeds)[(*n)++] = nodes[i].id;
-        }
-    }
-    cbm_store_free_nodes(nodes, ncount);
-}
-
-/* Module key for the impacted rollup = the first TWO path segments
- * ("src/mcp/mcp.c" -> "src/mcp"), a quotient of the blast radius coarse enough
- * to fit yet specific enough to localize (one segment collapses a whole tree
- * to "src"). Falls back to one segment, then the whole path. */
-static char *detect_module_of(const char *file) {
-    if (!file || !file[0]) {
-        return heap_strdup("(root)");
-    }
-    const char *s1 = strchr(file, '/');
-    if (!s1) {
-        return heap_strdup(file);
-    }
-    const char *s2 = strchr(s1 + 1, '/');
-    size_t len = s2 ? (size_t)(s2 - file) : strlen(file);
-    return cbm_strndup(file, len);
-}
-
-/* Aggregate the impact set into the 2-segment module rollup. Fills up to
- * DETECT_MODCAP (module, count) pairs; symbols beyond the cap land in
- * *overflow (surfaced as "(other)", never silently dropped). Shared by the
- * tree and json emitters so both encodings carry the same model. */
-enum { DETECT_MODCAP = 256 };
-
-typedef struct {
-    char *name;
-    int count;
-} detect_module_row_t;
-
-static int detect_module_rollup(const cbm_traverse_result_t *impact, detect_module_row_t *modules,
-                                int *overflow) {
-    int nmods = 0;
-    *overflow = 0;
-    for (int i = 0; i < impact->visited_count; i++) {
-        char *module = detect_module_of(impact->visited[i].node.file_path);
-        if (!module) {
-            (*overflow)++;
-            continue;
-        }
-        int j = 0;
-        for (; j < nmods; j++) {
-            if (strcmp(modules[j].name, module) == 0) {
-                modules[j].count++;
-                break;
-            }
-        }
-        if (j == nmods) {
-            if (nmods < DETECT_MODCAP) {
-                modules[nmods].name = module;
-                modules[nmods].count = 1;
-                nmods++;
-                module = NULL;
-            } else {
-                (*overflow)++;
-            }
-        }
-        free(module);
-    }
-    return nmods;
-}
-
-static void detect_module_rollup_free(detect_module_row_t *modules, int count) {
-    for (int i = 0; i < count; i++) {
-        free(modules[i].name);
-    }
-    free(modules);
 }
 
 /* Emit one losslessly pageable window of the impacted set. The visited array
@@ -17613,10 +17386,10 @@ static void detect_walk_via(const cbm_impact_walk_t *walk, int64_t id, const cha
 
 /* `via_walk` is the open impact walk when the request asked for `via`, and adds
  * the via_qn and via_edge columns; NULL keeps the four default columns. */
-static void detect_emit_impacted_tree(cbm_sb_t *sb, const cbm_traverse_result_t *tr, int start,
-                                      int count, bool engine_saturated,
+static void detect_emit_impacted_tree(cbm_sb_t *sb, const cbm_node_hop_t *impacted, int total,
+                                      int start, int count, bool engine_saturated,
                                       const cbm_impact_walk_t *via_walk) {
-    cbm_tree_scalar_int(sb, "impacted_total", tr->visited_count);
+    cbm_tree_scalar_int(sb, "impacted_total", total);
     cbm_tree_scalar_str(sb, "impacted_total_relation", engine_saturated ? "gte" : "eq");
     int shown = count;
     /* qn order for stable grouping, but keep hop-closeness: sort by (hop) is
@@ -17625,14 +17398,14 @@ static void detect_emit_impacted_tree(cbm_sb_t *sb, const cbm_traverse_result_t 
      * (hop,qn)-ordered from the impact walk. */
     cbm_tree_scalar_int(sb, "impacted_shown", shown);
     cbm_node_hop_t *selected = NULL;
-    const cbm_node_hop_t *rows = tr->visited;
+    const cbm_node_hop_t *rows = impacted;
     if (shown > 0) {
         selected = malloc((size_t)shown * sizeof(*selected));
         if (selected) {
-            memcpy(selected, tr->visited + start, (size_t)shown * sizeof(*selected));
+            memcpy(selected, impacted + start, (size_t)shown * sizeof(*selected));
             rows = selected;
         } else {
-            rows = tr->visited + start;
+            rows = impacted + start;
         }
     }
     if (shown > 1 && selected) {
@@ -17665,7 +17438,7 @@ static void detect_emit_impacted_tree(cbm_sb_t *sb, const cbm_traverse_result_t 
     free(hop_text);
     free(cells);
     free(selected);
-    bool has_more = start + shown < tr->visited_count;
+    bool has_more = start + shown < total;
     cbm_tree_scalar_bool(sb, "impacted_has_more", has_more);
     if (has_more && shown > 0) {
         cbm_tree_scalar_int(sb, "impacted_next_offset", start + shown);
@@ -18059,60 +17832,6 @@ static void detect_walk_types_text(const detect_walk_request_t *walk, char *out,
     }
 }
 
-/* Run the walk and hand its answer over in the traversal's shape, so paging,
- * the module rollup and the snapshot fingerprint are shared with the default
- * path. Seeds are left out, as in cbm_store_bfs_multi: a changed symbol is not
- * its own impact. Rows arrive in the walk's (hop, qualified name) order. The
- * walk stays open for the `via` columns; the caller closes it.
- *
- * false = the walk or a row could not be completed. Nothing shorter is handed
- * over: an incomplete impact set would read as "nothing else depends on this". */
-static bool detect_walk_run(cbm_store_t *store, const char *project,
-                            const detect_walk_request_t *req, int depth, const int64_t *seeds,
-                            int seed_count, cbm_traverse_result_t *impact,
-                            cbm_impact_walk_t **walk_out) {
-    const char *types[DETECT_WALK_TYPE_MAX];
-    for (int i = 0; i < req->type_count; i++) {
-        types[i] = req->types[i];
-    }
-    cbm_impact_policy_t policy = {.project = project,
-                                  .edge_types = types,
-                                  .edge_type_count = req->type_count,
-                                  .max_hops = req->fixpoint ? 0 : depth};
-    cbm_impact_walk_t *walk = NULL;
-    if (cbm_impact_walk_open(store, &policy, &walk) != CBM_STORE_OK) {
-        return false;
-    }
-    bool ok = cbm_impact_walk_run(walk, seeds, seed_count) == CBM_STORE_OK;
-    int total = ok ? cbm_impact_walk_count(walk) : 0;
-    const cbm_impact_hit_t *hits = cbm_impact_walk_hits(walk);
-    /* cbm_store_traverse_free owns and releases these rows. */
-    cbm_node_hop_t *rows = total > 0 ? safe_realloc(NULL, (size_t)total * sizeof(*rows)) : NULL;
-    ok = ok && (total == 0 || rows);
-    if (rows) {
-        memset(rows, 0, (size_t)total * sizeof(*rows));
-    }
-    int n = 0;
-    for (int i = 0; ok && i < total; i++) {
-        if (hits[i].hop == 0) {
-            continue;
-        }
-        ok = cbm_store_find_node_by_id(store, hits[i].id, &rows[n].node) == CBM_STORE_OK;
-        if (ok) {
-            rows[n++].hop = hits[i].hop;
-        }
-    }
-    impact->visited = rows;
-    impact->visited_count = n;
-    if (!ok) {
-        cbm_store_traverse_free(impact);
-        cbm_impact_walk_close(walk);
-        return false;
-    }
-    *walk_out = walk;
-    return true;
-}
-
 static void detect_cursor_encode(char stream, const char snapshot[33], uint64_t qhash, int offset,
                                  char out[80]) {
     snprintf(out, 80, "d1.%c.%s.%016llx.%d", stream, snapshot, (unsigned long long)qhash, offset);
@@ -18265,7 +17984,7 @@ static bool detect_snapshot_fingerprint(cbm_mcp_server_t *srv, const char *root_
                                         const char *head_oid, const char *base_oid,
                                         const char *merge_base, const char *generation,
                                         char **files, int file_count,
-                                        const cbm_traverse_result_t *impact,
+                                        const cbm_node_hop_t *impacted, int impacted_count,
                                         const detect_module_row_t *modules, int module_count,
                                         int module_overflow, char out[33]) {
     cbm_sha256_ctx hash;
@@ -18281,16 +18000,14 @@ static bool detect_snapshot_fingerprint(cbm_mcp_server_t *srv, const char *root_
             complete = false;
         }
     }
-    if (impact) {
-        for (int i = 0; i < impact->visited_count; i++) {
-            detect_snapshot_add_field(&hash, impact->visited[i].node.qualified_name);
-            detect_snapshot_add_field(&hash, impact->visited[i].node.label);
-            detect_snapshot_add_field(&hash, impact->visited[i].node.file_path);
-            char row_metadata[64];
-            snprintf(row_metadata, sizeof(row_metadata), "%d:%lld", impact->visited[i].hop,
-                     (long long)impact->visited[i].node.id);
-            detect_snapshot_add_field(&hash, row_metadata);
-        }
+    for (int i = 0; i < impacted_count; i++) {
+        detect_snapshot_add_field(&hash, impacted[i].node.qualified_name);
+        detect_snapshot_add_field(&hash, impacted[i].node.label);
+        detect_snapshot_add_field(&hash, impacted[i].node.file_path);
+        char row_metadata[64];
+        snprintf(row_metadata, sizeof(row_metadata), "%d:%lld", impacted[i].hop,
+                 (long long)impacted[i].node.id);
+        detect_snapshot_add_field(&hash, row_metadata);
     }
     for (int i = 0; i < module_count; i++) {
         detect_snapshot_add_field(&hash, modules[i].name);
@@ -18862,40 +18579,33 @@ static char *handle_detect_changes(cbm_mcp_server_t *srv, const char *args) {
         detect_qhash = cursor_fnv1a64("|seeds:list", detect_qhash);
     if (seed_req.product)
         detect_qhash = cursor_fnv1a64("|seed_filter:product", detect_qhash);
-    detect_seed_rows_t seed_rows = {0};
-    cbm_arena_init_lazy(&seed_rows.arena, 4096);
+    cbm_test_config_t *config = NULL;
+    bool config_failed = false;
     if (seed_req.product) {
+        CBMArena arena;
+        cbm_arena_init_lazy(&arena, 4096);
         const char *name = seed_req.config_path[0] ? seed_req.config_path : ".codebase-memory.json";
         char *config_file = NULL;
         if (repo_path_is_absolute(name))
-            config_file = cbm_arena_strdup(&seed_rows.arena, name);
+            config_file = cbm_arena_strdup(&arena, name);
         else {
             size_t a = strlen(root_path), b = strlen(name);
             if (a <= SIZE_MAX - b - 2) {
-                config_file = cbm_arena_alloc(&seed_rows.arena, a + b + 2);
+                config_file = cbm_arena_alloc(&arena, a + b + 2);
                 if (config_file)
                     snprintf(config_file, a + b + 2, "%s/%s", root_path, name);
             }
         }
-        seed_rows.config =
-            config_file ? cbm_test_config_load(config_file, !seed_req.config_path[0]) : NULL;
-        seed_rows.config_failed = !seed_rows.config;
-        seed_rows.failed = seed_rows.config_failed;
+        config = config_file ? cbm_test_config_load(config_file, !seed_req.config_path[0]) : NULL;
+        config_failed = !config;
+        cbm_arena_destroy(&arena);
         detect_qhash = cursor_fnv1a64("|test-config:", detect_qhash);
-        detect_qhash = cursor_fnv1a64(cbm_test_config_digest(seed_rows.config), detect_qhash);
+        detect_qhash = cursor_fnv1a64(cbm_test_config_digest(config), detect_qhash);
     }
 
-    /* Changed paths drive traversal seeds and both output encodings. */
-    int64_t *seeds = NULL;
-    int seed_count = 0;
-    int seed_cap = 0;
-
     /* Hunk line ranges (unified=0 diff), used to scope seed detection to the
-     * actually-changed lines instead of every definition in a changed file
-     * (see detect_collect_seeds). Best-effort: any failure here just leaves
-     * `hunks` empty and every file falls back to its previous whole-file
-     * seeding — this is a precision improvement, not a correctness
-     * dependency, so it is never treated as a request-level failure.
+     * actually-changed lines instead of every definition in a changed file.
+     * If the hunk fetch fails, the graph stage seeds the whole file.
      *
      * Coordinate systems: `base...HEAD` hunks carry HEAD-side line numbers,
      * the worktree diff carries worktree-side ones, and node line ranges come
@@ -18903,13 +18613,12 @@ static char *handle_detect_changes(cbm_mcp_server_t *srv, const char *args) {
      * watcher reindexes on HEAD movement and on a dirty tree — but a stale
      * index combined with insertions earlier in the file shifts the node lines
      * relative to the hunks and can mis-scope. The failure is bounded by
-     * detect_collect_seeds' zero-overlap fallback: a file whose definitions all
-     * miss reverts to whole-file seeding rather than dropping out.
+     * the whole-file fallback when every definition misses the hunks.
      * --relative keeps hunk paths in the same project-relative coordinates as
      * `files` when the project root is a repository subdirectory (#1951). */
     cbm_changed_hunk_t *hunks = NULL;
     int hunk_count = 0;
-    if (!seed_rows.failed && (want_symbols || seed_req.list)) {
+    if (!config_failed && (want_symbols || seed_req.list)) {
         char hunk_cmd[CBM_SZ_2K];
 #ifdef _WIN32
         snprintf(hunk_cmd, sizeof(hunk_cmd),
@@ -18962,70 +18671,65 @@ static char *handle_detect_changes(cbm_mcp_server_t *srv, const char *args) {
         if (hunk_output_path[0]) {
             (void)cbm_unlink(hunk_output_path);
         }
-        /* Hunk parsing is deliberately best-effort, but path collection is not.
-         * Seed after both are complete so every exact path uses the same scoping
-         * decision. */
-        for (int i = 0; i < file_count; i++) {
-            detect_collect_seeds(store, project, files[i], hunks, hunk_count, &seeds, &seed_count,
-                                 &seed_cap, &seed_req, &seed_rows);
-        }
     }
 
-    if (!seed_rows.failed && seed_rows.count > 1)
-        qsort(seed_rows.rows, (size_t)seed_rows.count, sizeof(*seed_rows.rows),
-              detect_seed_row_compare);
-
-    /* The impact traversal: ONE multi-source BFS over all seeds. */
-    cbm_traverse_result_t impact = {0};
-    bool engine_saturated = false;
-    /* The opt-in walk has no result ceiling, so it never saturates: it answers
-     * completely or the request fails. It stays open while `via` is rendered. */
-    cbm_impact_walk_t *impact_walk = NULL;
-    const char *walk_error =
-        seed_rows.config_failed
-            ? "config_invalid: could not read a valid project test configuration"
-        : seed_rows.failed ? "seed_collection_failed: no partial answer is returned"
-                           : NULL;
-    if (!walk_error && want_symbols && seed_count > 0 && walk_req.active) {
-        if (!detect_walk_run(store, project, &walk_req, depth, seeds, seed_count, &impact,
-                             &impact_walk)) {
-            walk_error = "impact_walk_failed: the impact walk could not be completed — no "
-                         "partial answer is returned; rerun, or drop edge_types, fixpoint and "
-                         "via for the bounded default traversal";
-        }
-    } else if (!walk_error && want_symbols && seed_count > 0) {
-        (void)cbm_store_bfs_multi(store, seeds, seed_count, direction, NULL, 0, depth,
-                                  MCP_BFS_LIMIT_MAX, &impact, &engine_saturated);
+    const char *types[DETECT_WALK_TYPE_MAX];
+    for (int i = 0; i < walk_req.type_count; i++) {
+        types[i] = walk_req.types[i];
     }
-    const cbm_impact_walk_t *via_walk = walk_req.via ? impact_walk : NULL;
+    cbm_impact_policy_t policy = {.project = project,
+                                  .edge_types = types,
+                                  .edge_type_count = walk_req.type_count,
+                                  .max_hops = walk_req.fixpoint ? 0 : depth};
+    detect_graph_view_t graph = {0};
+    detect_graph_t *graph_owner = NULL;
+    if (config_failed) {
+        graph.error = "config_invalid: could not read a valid project test configuration";
+    } else if (want_symbols || seed_req.list) {
+        detect_graph_request_t request = {
+            .store = store,
+            .project = project,
+            .files = (const char *const *)files,
+            .file_count = file_count,
+            .hunks = hunks,
+            .hunk_count = hunk_count,
+            .product_config = config,
+            .list_seeds = seed_req.list,
+            .want_symbols = want_symbols,
+            .direction = direction,
+            .depth = depth,
+            .bfs_limit = MCP_BFS_LIMIT_MAX,
+            .policy = walk_req.active ? &policy : NULL,
+            .via = walk_req.via,
+        };
+        graph_owner = cbm_rust_detect_graph(&request, &graph);
+    }
+    cbm_test_config_free(config);
+    free(hunks);
     char walk_types_text[DETECT_WALK_TYPE_MAX * DETECT_WALK_TYPE_LEN] = "";
     detect_walk_types_text(&walk_req, walk_types_text, sizeof(walk_types_text));
 
-    detect_module_row_t *modules = NULL;
-    int nmods = 0;
-    int module_overflow = 0;
-    if (want_symbols && impact.visited_count > 0) {
-        modules = calloc(DETECT_MODCAP, sizeof(*modules));
-        if (modules) {
-            nmods = detect_module_rollup(&impact, modules, &module_overflow);
-        }
-    }
+    const bool engine_saturated = graph.saturated;
+    const cbm_impact_walk_t *via_walk = graph.via_walk;
+    const detect_module_row_t *modules = graph.modules;
+    const int nmods = graph.module_count;
+    const int module_overflow = graph.module_overflow;
     /* Overflow is represented as one explicit aggregate row. This is the exact
      * number of pageable rollup rows for the materialized impact set; its
      * relation becomes `gte` if traversal hit the engine ceiling. */
     int module_total = nmods + (module_overflow > 0 ? 1 : 0);
-    const char *cursor_error = walk_error;
+    const char *cursor_error = graph.error;
     char detect_snapshot[33] = "";
     bool detect_snapshot_complete = detect_snapshot_fingerprint(
-        srv, root_path, head_oid, base_oid, merge_base, generation, files, file_count, &impact,
-        modules, nmods, module_overflow, detect_snapshot);
+        srv, root_path, head_oid, base_oid, merge_base, generation, files, file_count, graph.impacted,
+        graph.impacted_count, modules, nmods, module_overflow, detect_snapshot);
 
-    if (seed_req.list && !seed_rows.failed) {
+    if (seed_req.list && graph_owner) {
         cbm_sha256_ctx hash;
         cbm_sha256_init(&hash);
         detect_snapshot_add_field(&hash, detect_snapshot);
-        for (int i = 0; i < seed_rows.count; i++) {
-            detect_seed_row_t *row = &seed_rows.rows[i];
+        for (int i = 0; i < graph.seed_total; i++) {
+            const detect_seed_row_t *row = &graph.seeds[i];
             detect_snapshot_add_field(&hash, row->qn);
             detect_snapshot_add_field(&hash, row->label);
             detect_snapshot_add_field(&hash, row->file);
@@ -19098,17 +18802,11 @@ static char *handle_detect_changes(cbm_mcp_server_t *srv, const char *args) {
         }
     }
     if (cursor_error) {
-        cbm_test_config_free(seed_rows.config);
-        cbm_arena_destroy(&seed_rows.arena);
-        cbm_impact_walk_close(impact_walk);
-        cbm_store_traverse_free(&impact);
-        detect_module_rollup_free(modules, nmods);
+        cbm_rust_detect_graph_free(graph_owner);
         for (int i = 0; i < file_count; i++) {
             free(files[i]);
         }
         free(files);
-        free(seeds);
-        free(hunks);
         free(impact_cursor_arg);
         free(changed_cursor_arg);
         free(module_cursor_arg);
@@ -19120,8 +18818,8 @@ static char *handle_detect_changes(cbm_mcp_server_t *srv, const char *args) {
         return cbm_mcp_text_result(cursor_error, true);
     }
 
-    int seed_start = seed_req.offset < seed_rows.count ? seed_req.offset : seed_rows.count;
-    int seed_returned = seed_rows.count - seed_start;
+    int seed_start = seed_req.offset < graph.seed_total ? seed_req.offset : graph.seed_total;
+    int seed_returned = graph.seed_total - seed_start;
     if (seed_returned > seed_req.limit)
         seed_returned = seed_req.limit;
     int changed_start = changed_offset < file_count ? changed_offset : file_count;
@@ -19134,8 +18832,8 @@ static char *handle_detect_changes(cbm_mcp_server_t *srv, const char *args) {
     if (module_returned > module_limit) {
         module_returned = module_limit;
     }
-    int imp_start = impact_offset < impact.visited_count ? impact_offset : impact.visited_count;
-    int imp_returned = impact.visited_count - imp_start;
+    int imp_start = impact_offset < graph.impacted_count ? impact_offset : graph.impacted_count;
+    int imp_returned = graph.impacted_count - imp_start;
     if (imp_returned > imp_limit) {
         imp_returned = imp_limit;
     }
@@ -19146,7 +18844,7 @@ static char *handle_detect_changes(cbm_mcp_server_t *srv, const char *args) {
     char *out_str = NULL;
 
 render_detect_output:;
-    bool seed_has_more = seed_req.list && seed_start + seed_returned < seed_rows.count;
+    bool seed_has_more = seed_req.list && seed_start + seed_returned < graph.seed_total;
     char seed_next_cursor[80] = "";
     if (seed_has_more && seed_returned > 0 && detect_snapshot_complete)
         detect_cursor_encode('s', detect_snapshot, detect_qhash, seed_start + seed_returned,
@@ -19155,7 +18853,7 @@ render_detect_output:;
                                         ? "seed_continuation_requires_positive_limit"
                                         : "seed_continuation_requires_higher_budget";
     bool changed_has_more = changed_start + changed_returned < file_count;
-    bool impacted_has_more = want_symbols && imp_start + imp_returned < impact.visited_count;
+    bool impacted_has_more = want_symbols && imp_start + imp_returned < graph.impacted_count;
     bool module_has_more = want_symbols && module_start + module_returned < module_total;
     bool response_truncated = engine_saturated || output_budget_hit || changed_has_more ||
                               impacted_has_more || module_has_more || seed_has_more;
@@ -19220,9 +18918,9 @@ render_detect_output:;
             cbm_tree_scalar_str(&sb, "changed_files_render_error", "out_of_memory");
         }
         free(changed_cells);
-        cbm_tree_scalar_int(&sb, "seed_symbols", seed_count);
+        cbm_tree_scalar_int(&sb, "seed_symbols", graph.seed_count);
         if (seed_req.list) {
-            cbm_tree_scalar_int(&sb, "seed_total", seed_rows.count);
+            cbm_tree_scalar_int(&sb, "seed_total", graph.seed_total);
             cbm_tree_scalar_int(&sb, "seed_returned", seed_returned);
             cbm_tree_scalar_bool(&sb, "seed_has_more", seed_has_more);
             if (seed_has_more && seed_returned > 0) {
@@ -19235,7 +18933,7 @@ render_detect_output:;
                                                   "start", "end",   "seed_reason"};
             cbm_tree_table_header(&sb, "seeds", seed_returned, columns, 6);
             for (int i = seed_start; i < seed_start + seed_returned; i++) {
-                const detect_seed_row_t *row = &seed_rows.rows[i];
+                const detect_seed_row_t *row = &graph.seeds[i];
                 cbm_tree_row_begin(&sb);
                 cbm_tree_cell_str(&sb, row->qn, true);
                 cbm_tree_cell_str(&sb, row->label, false);
@@ -19247,9 +18945,9 @@ render_detect_output:;
             }
         }
         if (want_symbols) {
-            detect_emit_impacted_tree(&sb, &impact, imp_start, imp_returned, engine_saturated,
-                                      via_walk);
-            if (detect_snapshot_complete && imp_start + imp_returned < impact.visited_count &&
+            detect_emit_impacted_tree(&sb, graph.impacted, graph.impacted_count, imp_start,
+                                      imp_returned, engine_saturated, via_walk);
+            if (detect_snapshot_complete && imp_start + imp_returned < graph.impacted_count &&
                 imp_returned > 0) {
                 char cursor[80];
                 detect_cursor_encode('i', detect_snapshot, detect_qhash, imp_start + imp_returned,
@@ -19365,9 +19063,9 @@ render_detect_output:;
             yyjson_mut_arr_add_strcpy(doc, cf, files[i]);
         }
         yyjson_mut_obj_add_val(doc, root_obj, "changed_files", cf);
-        yyjson_mut_obj_add_int(doc, root_obj, "seed_symbols", seed_count);
+        yyjson_mut_obj_add_int(doc, root_obj, "seed_symbols", graph.seed_count);
         if (seed_req.list) {
-            yyjson_mut_obj_add_int(doc, root_obj, "seed_total", seed_rows.count);
+            yyjson_mut_obj_add_int(doc, root_obj, "seed_total", graph.seed_total);
             yyjson_mut_obj_add_int(doc, root_obj, "seed_returned", seed_returned);
             yyjson_mut_obj_add_bool(doc, root_obj, "seed_has_more", seed_has_more);
             if (seed_has_more && seed_returned > 0) {
@@ -19379,7 +19077,7 @@ render_detect_output:;
                 yyjson_mut_obj_add_bool(doc, root_obj, seed_continuation, true);
             yyjson_mut_val *seed_array = yyjson_mut_arr(doc);
             for (int i = seed_start; i < seed_start + seed_returned; i++) {
-                const detect_seed_row_t *row = &seed_rows.rows[i];
+                const detect_seed_row_t *row = &graph.seeds[i];
                 yyjson_mut_val *item = yyjson_mut_obj(doc);
                 yyjson_mut_obj_add_strcpy(doc, item, "qn", row->qn);
                 yyjson_mut_obj_add_strcpy(doc, item, "label", row->label);
@@ -19391,26 +19089,27 @@ render_detect_output:;
             }
             yyjson_mut_obj_add_val(doc, root_obj, "seeds", seed_array);
         }
-        yyjson_mut_obj_add_int(doc, root_obj, "impacted_total", impact.visited_count);
+        yyjson_mut_obj_add_int(doc, root_obj, "impacted_total", graph.impacted_count);
         yyjson_mut_obj_add_str(doc, root_obj, "impacted_total_relation",
                                engine_saturated ? "gte" : "eq");
         yyjson_mut_obj_add_int(doc, root_obj, "impacted_shown", imp_returned);
         yyjson_mut_val *imp = yyjson_mut_arr(doc);
         for (int i = imp_start; i < imp_start + imp_returned; i++) {
+            const cbm_node_hop_t *row = &graph.impacted[i];
             yyjson_mut_val *o = yyjson_mut_obj(doc);
             yyjson_mut_obj_add_strcpy(
                 doc, o, "qn",
-                impact.visited[i].node.qualified_name ? impact.visited[i].node.qualified_name : "");
+                row->node.qualified_name ? row->node.qualified_name : "");
             yyjson_mut_obj_add_strcpy(
-                doc, o, "label", impact.visited[i].node.label ? impact.visited[i].node.label : "");
+                doc, o, "label", row->node.label ? row->node.label : "");
             yyjson_mut_obj_add_strcpy(
                 doc, o, "file",
-                impact.visited[i].node.file_path ? impact.visited[i].node.file_path : "");
-            yyjson_mut_obj_add_int(doc, o, "hop", impact.visited[i].hop);
+                row->node.file_path ? row->node.file_path : "");
+            yyjson_mut_obj_add_int(doc, o, "hop", row->hop);
             if (via_walk) {
                 const char *via_qn = "";
                 const char *via_edge = "";
-                detect_walk_via(via_walk, impact.visited[i].node.id, &via_qn, &via_edge);
+                detect_walk_via(via_walk, row->node.id, &via_qn, &via_edge);
                 yyjson_mut_obj_add_strcpy(doc, o, "via_qn", via_qn);
                 yyjson_mut_obj_add_strcpy(doc, o, "via_edge", via_edge);
             }
@@ -19535,17 +19234,11 @@ render_detect_output:;
 
 detect_output_done:
 
-    cbm_test_config_free(seed_rows.config);
-    cbm_arena_destroy(&seed_rows.arena);
-    cbm_impact_walk_close(impact_walk);
-    cbm_store_traverse_free(&impact);
-    detect_module_rollup_free(modules, nmods);
+    cbm_rust_detect_graph_free(graph_owner);
     for (int i = 0; i < file_count; i++) {
         free(files[i]);
     }
     free(files);
-    free(seeds);
-    free(hunks);
     free(impact_cursor_arg);
     free(changed_cursor_arg);
     free(module_cursor_arg);

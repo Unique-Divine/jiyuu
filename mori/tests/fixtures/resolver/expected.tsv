@@ -1,0 +1,44 @@
+# Source path, caller, target, target label, raw byte range(s), source text, graph callee
+# Qualified names are relative to the fixture file module.
+# Collision sites share a numeric span across buffers in the legacy fixtures.
+# The C expansion lands at 180:186, and the C++ and CUDA expansions at 162:180.
+# Macro rows below give the invocation range in the raw file for graph line checks.
+# clsp_c_preprocessed_coordinate_collision_isolated
+collision_c/main.c	occurrence_probe	alpha_target	Function	180:186	fp ( )	fp
+collision_c/main.c	occurrence_probe	bravo_target	Function	247:263	HIDDEN_FP_CALL()	fp
+# clsp_cpp_preprocessed_coordinate_collision_isolated
+collision_cpp/main.cpp	occurrence_probe	Alpha.render	Method	162:180	alpha . render ( )	alpha . render
+collision_cpp/main.cpp	occurrence_probe	Bravo.render	Method	226:246	HIDDEN_RENDER(bravo)	bravo . render
+# clsp_cuda_preprocessed_coordinate_collision_isolated
+collision_cu/main.cu	occurrence_probe	Alpha.render	Method	162:180	alpha . render ( )	alpha . render
+collision_cu/main.cu	occurrence_probe	Bravo.render	Method	226:246	HIDDEN_RENDER(bravo)	bravo . render
+# clsp_cpp_new_expression_joins_exact_occurrence
+construction/main.cpp	occurrence_probe	Widget.Widget	Method	67:79	new Widget()	Widget
+# clsp_c_global_initializer_does_not_inherit_previous_function_caller
+global/main.c		helper	Function	73:81	helper()	helper
+# perllsp_repeated_target_calls_join_by_exact_site
+perl/main.pl	occurrence_probe	render	Function	82:98,104:120	Widget->render()	render
+# perllsp_repeated_inherited_method_calls_join_by_exact_site
+perl_inherited/main.pl	inherited_occurrence_probe	greet	Function	211:226,232:247	$child->greet()	greet
+# phplsp_ordinary_same_leaf_calls_join_by_exact_site
+php/main.php	OccurrenceProbe.run	Alpha.render	Method	195:211	$alpha->render()	$alpha.render
+php/main.php	OccurrenceProbe.run	Beta.render	Method	221:236	$beta->render()	$beta.render
+# clsp_c_reassigned_function_pointer_calls_join_exact_occurrences
+reassigned/main.c	occurrence_probe	alpha_target	Function	169:173	fp()	fp
+reassigned/main.c	occurrence_probe	bravo_target	Function	217:221	fp()	fp
+# clsp_cpp_repeated_same_leaf_calls_join_exact_occurrences
+repeated_cpp/main.cpp	occurrence_probe	Alpha.render	Method	160:174	alpha.render()	alpha.render
+repeated_cpp/main.cpp	occurrence_probe	Bravo.render	Method	177:191	bravo.render()	bravo.render
+# clsp_cuda_repeated_same_leaf_calls_join_exact_occurrences
+repeated_cu/main.cu	occurrence_probe	Alpha.render	Method	160:174	alpha.render()	alpha.render
+repeated_cu/main.cu	occurrence_probe	Bravo.render	Method	177:191	bravo.render()	bravo.render
+# rubylsp_compact_class_name_exact
+ruby/main.rb	Admin::User.shout	Admin::User.name	Method	82:91	self.name	self.name
+ruby/main.rb	Outside.probe	Admin::User	Class	136:151	Admin::User.new	Admin::User
+ruby/main.rb	Outside.probe	Admin::User.name	Method	156:162	u.name	u.name
+# rubylsp_block_param_shadows_local
+ruby_shadow/main.rb	Worker.run	Foo	Class	67:74	Foo.new	Foo
+ruby_shadow/main.rb	Worker.run	Foo.bar	Method	231:236	a.bar	a.bar
+# clsp_c_nested_function_pointer_shadow_restores_outer_target
+shadowed/main.c	occurrence_probe	bravo_target	Function	234:238	fp()	fp
+shadowed/main.c	occurrence_probe	alpha_target	Function	265:269	fp()	fp

@@ -93,7 +93,6 @@ typedef struct {
     int reach_count;
     cbm_test_suite_trigger_t *triggers;
     int trigger_count;
-    int trigger_cap;
     bool static_complete;
 
     cbm_test_selection_t *selection;
@@ -140,9 +139,5 @@ bool te_coverage_ids(te_ctx_t *c);
 void te_artifact_receipt(te_ctx_t *c, cbm_test_result_coverage_receipt_t *r,
                          cbm_test_result_oid_t (*oid)(const te_ctx_t *, const char *));
 bool te_publish(te_ctx_t *c, const cbm_test_impact_publish_t *p);
-
-/* test_impact_engine_reach.c */
-bool te_fixtures(te_ctx_t *c, int64_t **extra_seeds, int *extra_count, bool **fixture_cases);
-bool te_reach(te_ctx_t *c);
 
 #endif /* CBM_TEST_IMPACT_ENGINE_INTERNAL_H */
