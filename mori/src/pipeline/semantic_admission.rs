@@ -150,10 +150,7 @@ mod tests {
             pair(3, 5, 1, 0.0, false),
         ];
         let mut counts = [0; 6];
-        assert_eq!(
-            admit(&pairs, 1, &mut counts),
-            [true, false, true, false]
-        );
+        assert_eq!(admit(&pairs, 1, &mut counts), [true, false, true, false]);
         assert_eq!(counts, [1, 0, 1, 1, 1, 0]);
     }
 
