@@ -92,7 +92,7 @@
  *   GREEN for Go with a struct + interface pair in the same index.
  *
  * TESTS (function-level test->production function):
- *   pass_tests.c creates this.  Existing P6 covers Go.  This suite adds Python
+ *   test_edges.rs creates this.  Existing P6 covers Go.  This suite adds Python
  *   and TypeScript cross-file variants.
  *
  * ════════════════════════════════════════════════════════════════════
@@ -908,7 +908,7 @@ TEST(es_data_flows_crossfile_python) {
 /* ══════════════════════════════════════════════════════════════════
  * FAMILY 9: TESTS cross-file (additional languages beyond Go)
  *
- * pass_tests.c creates TESTS edges from test functions to production
+ * test_edges.rs creates TESTS edges from test functions to production
  * functions when a *_test file calls a function in a non-test file.
  * Existing P6 covers Go.  This suite adds Python and TypeScript.
  * ══════════════════════════════════════════════════════════════════ */

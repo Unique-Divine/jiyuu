@@ -536,7 +536,6 @@ PIPELINE_SRCS = \
     src/pipeline/pass_lsp_cross.c \
     src/pipeline/pass_usages.c \
     src/pipeline/pass_semantic.c \
-    src/pipeline/pass_tests.c \
     src/pipeline/pass_githistory.c \
     src/pipeline/pass_gitdiff.c \
     src/pipeline/pass_configures.c \
@@ -571,7 +570,6 @@ PIPELINE_SRCS = \
     src/pipeline/pass_similarity_bridge.c \
     src/pipeline/pass_semantic_edges.c \
     src/pipeline/pass_complexity_bridge.c \
-    src/pipeline/pass_importance.c \
     src/pipeline/pass_cross_repo.c \
     src/pipeline/artifact.c \
     src/pipeline/pass_ensemble_routing.c \
