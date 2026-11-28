@@ -749,6 +749,12 @@ void mori_pipeline_diagram_parent_edge(cbm_gbuf_t *gbuf, const char *label,
 /* The DIAGRAM_ARROW edges of one file's diagrams. */
 void mori_pipeline_diagram_arrows(cbm_gbuf_t *gbuf, const CBMDiagramArrow *arrows, int count);
 
+/* The C reference of the two functions above (pass_diagrams.c), kept only
+ * for the Rust parity test in tests/test_diagrams.c. */
+void cbm_pipeline_diagram_parent_edge(cbm_pipeline_ctx_t *ctx, const CBMDefinition *def,
+                                      int64_t node_id);
+void cbm_pipeline_diagram_arrows(cbm_pipeline_ctx_t *ctx, const CBMFileResult *result);
+
 /* Get the current pipeline's package map (NULL if none). */
 CBMHashTable *cbm_pipeline_get_pkgmap(void);
 void cbm_pipeline_set_pkgmap(CBMHashTable *map);
