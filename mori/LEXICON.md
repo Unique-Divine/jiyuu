@@ -24,7 +24,7 @@ _See_ C entry point `src/main.c::main` and build target `cbm` in
 
 The `mori` binary built from crate `jiyuu-mori`.
 
-_See_ Rust entry point `jiyuu-mori/src/main.rs::main`.
+_See_ Rust entry point `src/main.rs::main`.
 
 ### Reference
 
@@ -63,7 +63,7 @@ rebuild.
 _Avoid_: route, run kind
 
 _See_ function `src/pipeline/pipeline.c::route_existing_stage` and its opt-in
-Rust counterpart `jiyuu-mori/src/index_route.rs::route_existing`.
+Rust counterpart `src/mcp/index_route.rs::route_existing`.
 
 ### No-op
 
@@ -156,7 +156,7 @@ _See_ function `src/pipeline/pipeline_delta.c::delta_edge_type_is_recomputed` fo
 A graph node for an entry point that other code can call, such as an HTTP path
 or a GraphQL field. Written with a capital.
 
-_See_ Rust function `jiyuu-mori/src/graphql_ffi.rs::write_graphql_route` for GraphQL Routes.
+_See_ Rust function `src/pipeline/graphql_ffi.rs::write_graphql_route` for GraphQL Routes.
 
 ### Field path
 
@@ -170,7 +170,7 @@ _See_ function `internal/cbm/service_patterns.c::cbm_service_pattern_graphql_sig
 
 A Route with more than one candidate handler and no single winner.
 
-_See_ Rust function `jiyuu-mori/src/route_writer.rs::route_properties`, which sets the route property `ambiguous`.
+_See_ Rust function `src/pipeline/route_writer.rs::route_properties`, which sets the route property `ambiguous`.
 
 ## Resolve Paths
 
