@@ -580,7 +580,7 @@ mod tests {
         let scopes: Vec<&[u8]> = enclosing_scopes(b"p.m.f.g").collect();
         assert_eq!(scopes, [&b"p.m.f"[..], b"p.m", b"p"]);
         assert_eq!(enclosing_scopes(b"plain").count(), 0);
-        let long = [b'a', b'.'].repeat(SCOPE_LIMIT / 2);
+        let long = b"a.".repeat(SCOPE_LIMIT / 2);
         assert_eq!(enclosing_scopes(&long).count(), 0);
         let fits = &long[..SCOPE_LIMIT - 1];
         assert!(enclosing_scopes(fits).count() > 0);
