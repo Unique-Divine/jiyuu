@@ -3,6 +3,11 @@
 #[path = "daemon/ipc/mod.rs"]
 pub mod ipc;
 
+#[cfg(feature = "native-engine-abi")]
+#[doc(hidden)]
+#[path = "cypher/cypher_scalar.rs"]
+pub mod cypher_scalar;
+
 #[cfg(any(feature = "native-engine-abi", test))]
 #[path = "mcp/stdio/mod.rs"]
 mod stdio;
