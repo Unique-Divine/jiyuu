@@ -50,6 +50,19 @@ static int en_compare(const en_node_t *nodes, int count, const char *what, int *
     return rc;
 }
 
+/* The properties of `name` after the Rust pass on the whole fixture. */
+static int en_props_are(const cbm_gbuf_t *gb, const char *name, const char *want) {
+    char qn[128];
+    snprintf(qn, sizeof(qn), "p.mod.%s", name);
+    const cbm_gbuf_node_t *n = cbm_gbuf_find_by_qn(gb, qn);
+    const char *got = n ? n->properties_json : "(no node)";
+    if (strcmp(got, want) != 0) {
+        printf("  %s: got  %s\n  %*s  want %s\n", name, got, (int)strlen(name), "", want);
+        return 1;
+    }
+    return 0;
+}
+
 /* A decorator of `len` bytes: "@shared" and then `fill` repeated, so its
  * 255-byte cut falls where the caller chose. */
 static void en_long_decorator(char *out, size_t cap, const char *fill, size_t len) {
@@ -137,7 +150,66 @@ TEST(decorator_tags_rust_matches_c) {
     int count = (int)(sizeof(nodes) / sizeof(nodes[0]));
     int tagged = 0;
     ASSERT_EQ(en_compare(nodes, count, "full fixture", &tagged), 0);
-    ASSERT_GTE(tagged, 20);
+    ASSERT_EQ(tagged, 23);
+    cbm_gbuf_t *full = en_graph(nodes, count);
+    ASSERT_EQ(mori_pipeline_pass_decorator_tags(full, "p"), 23);
+    int wrong = 0;
+    wrong += en_props_are(full, "get_order",
+                          "{\"decorators\":[\"@login_required\"],\"x\":1,\"decorator_tags\":["
+                          "\"login\",\"required\"]}");
+    wrong += en_props_are(full, "special", "{\"decorators\":[\"@unique_helper\"]}");
+    wrong +=
+        en_props_are(full, "updateOwner",
+                     "{\"decorators\":[\"@Transactional\",\"@PostMapping(\\\"/owners/{id}\\\")\"],"
+                     "\"decorator_tags\":[\"mapping\",\"post\"]}");
+    wrong += en_props_are(full, "Point",
+                          "{\"decorators\":[\"#[derive(Debug, Clone)]\",\"#[test]\"],"
+                          "\"decorator_tags\":[\"derive\"]}");
+    wrong += en_props_are(full, "route",
+                          "{\"decorators\":[\"@app.get(\\\"/api\\\")\",\"@x\",\"@router.post\"],"
+                          "\"decorator_tags\":[\"post\"]}");
+    wrong += en_props_are(full, "retagged",
+                          "{\"a\":{\"k\":[1,2]},\"decorators\":[\"@cache\"],\"z\":null,"
+                          "\"decorator_tags\":[\"cache\"]}");
+    wrong += en_props_are(
+        full, "numbers",
+        "{\"decorators\":[\"@cache\"],\"n0\":0,\"n1\":-0.0,\"n2\":100.0,\"n3\":0.0,"
+        "\"n4\":18446744073709552000.0,\"n5\":-9223372036854775808,\"n6\":0.1,\"n7\":1e21,"
+        "\"n8\":123456.789,\"n9\":2500.0,"
+        "\"s\":\"\xc3\xa9/\\u001F\\b\\f\xe2\x80\xa8\xf0\x9f\x98\x80\",\"t\":true,\"f\":false,"
+        "\"decorator_tags\":[\"cache\"]}");
+    wrong += en_props_are(full, "nul_cut",
+                          "{\"decorators\":[\"@cache\\u0000Ignored\",\"@nul_cut\"],"
+                          "\"decorator_tags\":[\"cache\"]}");
+    wrong += en_props_are(full, "dup_key",
+                          "{\"decorators\":[1,\"@cache\"],\"decorators\":[\"@login\"],"
+                          "\"decorator_tags\":[\"cache\"]}");
+    wrong += en_props_are(full, "first_wrong",
+                          "{\"decorators\":\"@cache\",\"decorators\":[\"@cache\"]}");
+    wrong +=
+        en_props_are(full, "lone_surrogate", "{\"decorators\":[\"@cache\"],\"s\":\"\\ud800\"}");
+    wrong += en_props_are(full, "var", "{\"decorators\":[\"@cache\",\"@login_required\"]}");
+    wrong += en_props_are(full, "long_utf8_a", long_utf8_a);
+    wrong += en_props_are(
+        full, "utf8_b", "{\"decorators\":[\"@Caf\xc3\xa9\"],\"decorator_tags\":[\"caf\xc3\xa9\"]}");
+    wrong += en_props_are(
+        full, "many_camel_a",
+        "{\"decorators\":[\"@aaBbCcDdEeFfGgHhIiJjKkLlMmNnOoPpQqRr\"],\"decorator_tags\":[\"aa\","
+        "\"bb\",\"cc\",\"dd\",\"ee\",\"ff\",\"gg\",\"hh\",\"ii\",\"jj\",\"kk\",\"ll\",\"mm\","
+        "\"nn\","
+        "\"oo\",\"pp\"]}");
+    /* the shared word of the long ASCII decorators: its first 255 bytes */
+    char want_long[1024];
+    char word[300] = "shared";
+    for (size_t i = strlen(word); i < 254; i += 2) {
+        memcpy(word + i, "ab", 2);
+    }
+    word[254] = '\0';
+    snprintf(want_long, sizeof(want_long), "%.*s,\"decorator_tags\":[\"%s\"]}",
+             (int)strlen(long_ascii_a) - 1, long_ascii_a, word);
+    wrong += en_props_are(full, "long_ascii_a", want_long);
+    ASSERT_EQ(wrong, 0);
+    cbm_gbuf_free(full);
     /* each prefix: the tag vocabulary changes as nodes join */
     for (int k = 0; k < count; k++) {
         char what[64];
