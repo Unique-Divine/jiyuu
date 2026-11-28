@@ -1646,7 +1646,7 @@ int cbm_pipeline_importance_recompute_store(cbm_store_t *store, const char *proj
  * Runs before the importance rescore. 0 on success. */
 int cbm_pipeline_complexity_recompute_store(cbm_store_t *store, const char *project);
 
-/* Work counters for the importance pass (pass_importance.c). Deltas are read
+/* Work counters for the importance pass (importance.rs). Deltas are read
  * by the complexity suite's linearity gate; never reset by the pass itself, so
  * nested/repeated runs compose. g_importance_name_visits counts same-name-group
  * member visits during distinct-file counting — the quantity that goes
@@ -1656,15 +1656,6 @@ extern _Atomic uint64_t g_importance_name_visits;
 /* Rows rescored by the SQL-level store recompute. Lets a test prove the
  * closure-delta route actually took that path instead of passing vacuously. */
 extern _Atomic uint64_t g_importance_store_rows;
-
-#if defined(CBM_ENABLE_TEST_SEAMS) && CBM_ENABLE_TEST_SEAMS
-/* The C importance reference for the Rust parity suite. */
-void cbm_pipeline_pass_importance_c_ref(cbm_pipeline_ctx_t *ctx);
-double cbm_pipeline_importance_score_c_ref(const cbm_importance_inputs_t *in);
-char *cbm_pipeline_importance_set_prop_c_ref(const char *json, double score);
-void cbm_pipeline_importance_append_prop_c_ref(cbm_gbuf_node_t *node, double score);
-int cbm_pipeline_importance_recompute_store_c_ref(cbm_store_t *store, const char *project);
-#endif
 
 /* Work counters of the infra resolvers, gated by the complexity suite:
  * candidate objects the K8s pass examines for references, selectors and

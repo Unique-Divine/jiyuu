@@ -32,6 +32,7 @@
 #include "foundation/compat.h"
 #include "foundation/log.h"
 
+#include <ctype.h>
 #include <float.h>
 #include <limits.h>
 #include <math.h>
@@ -878,7 +879,7 @@ TEST(importance_distinct_file_count_is_linear_in_group_size) {
     PASS();
 }
 
-/* ── Parity: the Rust pass (importance.rs) against the C reference ───── */
+/* ── Regression cases from the C comparison ────────────────────────── */
 
 #define IMP_FNV_SEED UINT64_C(14695981039346656037)
 
@@ -1014,72 +1015,74 @@ static double imp_generated_score(uint32_t *state, int iteration) {
     return (double)value / (double)(1U << shift);
 }
 
-static int imp_lines_diff(const imp_lines_t *a, const imp_lines_t *b) {
-    if (a->count != b->count) {
-        printf("    node count c=%d rust=%d\n", a->count, b->count);
-        return -1;
-    }
-    for (int i = 0; i < a->count; i++) {
-        if (strcmp(a->lines[i], b->lines[i]) != 0) {
-            printf("    c=%s\n    rust=%s\n", a->lines[i], b->lines[i]);
-            return i + 1;
+/* The score formula from the C reference. */
+static double imp_reference_score(const cbm_importance_inputs_t *in) {
+    const char *name = in->name;
+    bool private_name = name && name[0] == '_';
+    bool distinctive = false;
+    if (name && strlen(name) >= 8) {
+        distinctive = strchr(name, '_') != NULL;
+        for (size_t i = 1; name[i] && !distinctive; i++) {
+            distinctive = islower((unsigned char)name[i - 1]) && isupper((unsigned char)name[i]);
         }
     }
-    return 0;
+    double score = sqrt((double)(in->num_refs > 0 ? in->num_refs : 0));
+    if (private_name) {
+        score *= 0.1;
+    }
+    if (in->name_distinct_files >= 5) {
+        score *= 0.1;
+    }
+    if (distinctive) {
+        score *= 10.0;
+    }
+    if (cbm_is_test_path(in->file_path) || in->tests_target) {
+        score *= 0.1;
+    }
+    return score;
 }
 
-/* The writer and the rule agree on every blob, score and input set. Scores
- * include exact printf rounding ties, signed zero, values too wide for the
- * writer's buffer, infinities and NaN. */
-TEST(importance_writer_and_rule_rust_match_c) {
+/* Replay the C writer's output on the fixed property cases. Check generated
+ * values against printf and score multipliers against the reference formula. */
+TEST(importance_writer_and_rule_regression) {
     static const double scores[] = {
-        0.0,     -0.0,      1.5,       42.25,           0.0078125, 0.0000005,
-        2.5e-7,  1.0 / 3.0, 0x1.6a09e667f3bcdp+0, 1234567.8912345, 1e20, 1e24,
-        1e25,    1e40,      -3.75,     INFINITY,        -INFINITY, NAN,
+        0.0,     -0.0,      1.5,                  42.25,           0.0078125, 0.0000005,
+        2.5e-7,  1.0 / 3.0, 0x1.6a09e667f3bcdp+0, 1234567.8912345, 1e20,      1e24,
+        1e25,    1e40,      -3.75,                INFINITY,        -INFINITY, NAN,
         DBL_MAX, DBL_MIN,   4.9e-324,
     };
     uint64_t digest = IMP_FNV_SEED;
     for (int p = 0; p < IMP_PROP_COUNT; p++) {
         for (size_t k = 0; k < sizeof(scores) / sizeof(scores[0]); k++) {
-            char *c_out = cbm_pipeline_importance_set_prop_c_ref(kImpProps[p], scores[k]);
-            char *rust_out = cbm_pipeline_importance_set_prop(kImpProps[p], scores[k]);
-            if ((c_out == NULL) != (rust_out == NULL) || (c_out && strcmp(c_out, rust_out) != 0)) {
-                printf("    props=%s score=%g c=%s rust=%s\n", kImpProps[p], scores[k],
-                       c_out ? c_out : "(null)", rust_out ? rust_out : "(null)");
-            }
-            ASSERT_EQ(c_out == NULL, rust_out == NULL);
-            if (c_out) {
-                ASSERT_STR_EQ(c_out, rust_out);
-            }
-            const char *text = c_out ? c_out : "(null)";
+            char *out = cbm_pipeline_importance_set_prop(kImpProps[p], scores[k]);
+            const char *text = out ? out : "(null)";
             digest = imp_fnv(digest, text, strlen(text) + 1);
-            free(c_out);
-            free(rust_out);
+            free(out);
         }
     }
-    printf("  importance writer C digest %016llx\n", (unsigned long long)digest);
-    char *c_null = cbm_pipeline_importance_set_prop_c_ref(NULL, 2.0);
-    char *rust_null = cbm_pipeline_importance_set_prop(NULL, 2.0);
-    ASSERT_STR_EQ(c_null, rust_null);
-    free(c_null);
-    free(rust_null);
+    ASSERT_EQ(digest, UINT64_C(0x759febcb2386a01b));
+    char *from_null = cbm_pipeline_importance_set_prop(NULL, 2.0);
+    ASSERT_STR_EQ(from_null, "{\"importance\":2.000000}");
+    free(from_null);
+    char *tie = cbm_pipeline_importance_set_prop("{}", 0.0078125);
+    ASSERT_STR_EQ(tie, "{\"importance\":0.007812}");
+    free(tie);
+    ASSERT_NULL(cbm_pipeline_importance_set_prop("{}", 1e25));
 
     /* Generated scores: sqrt of a count times the multipliers, as the pass
      * writes them, plus arbitrary doubles. */
     uint32_t state = 0x1a2b3c4dU;
     for (int t = 0; t < 20000; t++) {
         double score = imp_generated_score(&state, t);
-        char *c_out = cbm_pipeline_importance_set_prop_c_ref("{}", score);
-        char *rust_out = cbm_pipeline_importance_set_prop("{}", score);
-        if (!c_out || !rust_out || strcmp(c_out, rust_out) != 0) {
-            printf("    score=%.17g c=%s rust=%s\n", score, c_out ? c_out : "(null)",
-                   rust_out ? rust_out : "(null)");
+        char want[CBM_SZ_64];
+        snprintf(want, sizeof(want), "{\"importance\":%.6f}", score);
+        char *got = cbm_pipeline_importance_set_prop("{}", score);
+        ASSERT_NOT_NULL(got);
+        if (strcmp(got, want) != 0) {
+            printf("    score=%.17g want=%s got=%s\n", score, want, got);
         }
-        ASSERT_NOT_NULL(c_out);
-        ASSERT_NOT_NULL(rust_out);
-        ASSERT_STR_EQ(c_out, rust_out);
-        free(c_out);
-        free(rust_out);
+        ASSERT_STR_EQ(got, want);
+        free(got);
     }
 
     static const char *const names[] = {NULL,       "",         "_plain",   "_long_key",
@@ -1101,116 +1104,104 @@ TEST(importance_writer_and_rule_rust_match_c) {
                             .name_distinct_files = files[d],
                             .tests_target = tests != 0,
                         };
-                        double c_score = cbm_pipeline_importance_score_c_ref(&in);
-                        double rust_score = cbm_pipeline_importance_score(&in);
-                        ASSERT_EQ(memcmp(&c_score, &rust_score, sizeof(double)), 0);
+                        double want = imp_reference_score(&in);
+                        double got = cbm_pipeline_importance_score(&in);
+                        ASSERT_EQ(memcmp(&want, &got, sizeof(double)), 0);
                     }
                 }
             }
         }
     }
-    ASSERT_EQ(cbm_pipeline_importance_score_c_ref(NULL), cbm_pipeline_importance_score(NULL));
+    ASSERT_EQ(cbm_pipeline_importance_score(NULL), 0);
     PASS();
 }
 
-/* The Rust pass writes byte-identical properties to the C reference on the
- * same graphs and does the same counted work. */
-TEST(importance_pass_rust_matches_c) {
-    for (uint32_t seed = 1; seed <= 12; seed++) {
-        cbm_gbuf_t *c_graph = cbm_gbuf_new("imp-proj", "/tmp/imp");
-        cbm_gbuf_t *rust_graph = cbm_gbuf_new("imp-proj", "/tmp/imp");
-        ASSERT_NOT_NULL(c_graph);
-        ASSERT_NOT_NULL(rust_graph);
-        imp_build(c_graph, seed * 2246822519U);
-        imp_build(rust_graph, seed * 2246822519U);
+/* Sorted graph rows and work counts captured from the C pass. */
+TEST(importance_pass_regression) {
+    static const struct {
+        uint64_t digest;
+        uint64_t nodes;
+        uint64_t visits;
+    } expected[] = {
+        {UINT64_C(0xbd5e09bd86786a27), 159, 240},
+        {UINT64_C(0x67c518ff4e818813), 153, 240},
+        {UINT64_C(0x930853fe5eae2d36), 150, 240},
+        {UINT64_C(0x545d15ff43eaf4df), 150, 240},
+        {UINT64_C(0x6989cabc16ebd535), 142, 240},
+        {UINT64_C(0xdac544c588b59c7b), 145, 240},
+        {UINT64_C(0x306fb10d1d29bc89), 149, 240},
+        {UINT64_C(0x3f13a401c113dc10), 147, 240},
+        {UINT64_C(0x46ccfffa4e28e382), 151, 240},
+        {UINT64_C(0x0c19f95a7b60093c), 152, 240},
+        {UINT64_C(0x9a283571d45b9359), 143, 240},
+        {UINT64_C(0x8b50c5fe40aaaa27), 135, 240},
+    };
+    for (size_t i = 0; i < sizeof(expected) / sizeof(expected[0]); i++) {
+        uint32_t seed = (uint32_t)i + 1;
+        cbm_gbuf_t *graph = cbm_gbuf_new("imp-proj", "/tmp/imp");
+        ASSERT_NOT_NULL(graph);
+        imp_build(graph, seed * 2246822519U);
+        uint64_t nodes = atomic_load_explicit(&g_importance_nodes, memory_order_relaxed);
+        uint64_t visits = atomic_load_explicit(&g_importance_name_visits, memory_order_relaxed);
+        mori_pipeline_pass_importance(graph);
+        ASSERT_EQ(atomic_load_explicit(&g_importance_nodes, memory_order_relaxed) - nodes,
+                  expected[i].nodes);
+        ASSERT_EQ(atomic_load_explicit(&g_importance_name_visits, memory_order_relaxed) - visits,
+                  expected[i].visits);
 
-        atomic_int cancelled = 0;
-        cbm_pipeline_ctx_t ctx = {
-            .project_name = "imp-proj",
-            .repo_path = "/tmp/imp",
-            .gbuf = c_graph,
-            .cancelled = &cancelled,
-        };
-        uint64_t nodes0 = atomic_load_explicit(&g_importance_nodes, memory_order_relaxed);
-        uint64_t visits0 = atomic_load_explicit(&g_importance_name_visits, memory_order_relaxed);
-        cbm_pipeline_pass_importance_c_ref(&ctx);
-        uint64_t nodes1 = atomic_load_explicit(&g_importance_nodes, memory_order_relaxed);
-        uint64_t visits1 = atomic_load_explicit(&g_importance_name_visits, memory_order_relaxed);
-        mori_pipeline_pass_importance(rust_graph);
-        uint64_t nodes2 = atomic_load_explicit(&g_importance_nodes, memory_order_relaxed);
-        uint64_t visits2 = atomic_load_explicit(&g_importance_name_visits, memory_order_relaxed);
-        ASSERT_GT((long long)(nodes1 - nodes0), 0);
-        ASSERT_EQ((long long)(nodes2 - nodes1), (long long)(nodes1 - nodes0));
-        ASSERT_EQ((long long)(visits2 - visits1), (long long)(visits1 - visits0));
+        imp_lines_t lines;
+        imp_gbuf_lines(graph, &lines);
+        ASSERT_EQ(imp_lines_digest(&lines), expected[i].digest);
+        imp_lines_free(&lines);
 
-        imp_lines_t c_lines;
-        imp_lines_t rust_lines;
-        imp_gbuf_lines(c_graph, &c_lines);
-        imp_gbuf_lines(rust_graph, &rust_lines);
-        int diff = imp_lines_diff(&c_lines, &rust_lines);
-        if (diff != 0) {
-            printf("  importance parity seed %u differs (%d)\n", seed, diff);
-        }
-        ASSERT_EQ(diff, 0);
-        printf("  importance graph C seed %u digest %016llx nodes %llu visits %llu\n", seed,
-               (unsigned long long)imp_lines_digest(&c_lines),
-               (unsigned long long)(nodes1 - nodes0), (unsigned long long)(visits1 - visits0));
-
-        /* A second run overwrites in place on both sides. */
-        cbm_pipeline_pass_importance_c_ref(&ctx);
-        mori_pipeline_pass_importance(rust_graph);
-        imp_lines_free(&c_lines);
-        imp_lines_free(&rust_lines);
-        imp_gbuf_lines(c_graph, &c_lines);
-        imp_gbuf_lines(rust_graph, &rust_lines);
-        ASSERT_EQ(imp_lines_diff(&c_lines, &rust_lines), 0);
-
-        imp_lines_free(&c_lines);
-        imp_lines_free(&rust_lines);
-        cbm_gbuf_free(c_graph);
-        cbm_gbuf_free(rust_graph);
+        mori_pipeline_pass_importance(graph);
+        imp_gbuf_lines(graph, &lines);
+        ASSERT_EQ(imp_lines_digest(&lines), expected[i].digest);
+        imp_lines_free(&lines);
+        cbm_gbuf_free(graph);
     }
     mori_pipeline_pass_importance(NULL);
     PASS();
 }
 
-/* The SQL recompute of the closure-delta route rescores a store the same
- * way through either side's functions. */
-TEST(importance_store_recompute_rust_matches_c) {
-    for (uint32_t seed = 1; seed <= 6; seed++) {
-        cbm_store_t *stores[2];
-        for (int side = 0; side < 2; side++) {
-            cbm_gbuf_t *gb = cbm_gbuf_new("imp-proj", "/tmp/imp");
-            ASSERT_NOT_NULL(gb);
-            imp_build(gb, seed * 3266489917U);
-            stores[side] = cbm_store_open_memory();
-            ASSERT_NOT_NULL(stores[side]);
-            ASSERT_EQ(cbm_gbuf_flush_to_store(gb, stores[side]), 0);
-            cbm_gbuf_free(gb);
-        }
-        uint64_t rows0 = atomic_load_explicit(&g_importance_store_rows, memory_order_relaxed);
-        ASSERT_EQ(cbm_pipeline_importance_recompute_store_c_ref(stores[0], "imp-proj"), 0);
-        uint64_t rows1 = atomic_load_explicit(&g_importance_store_rows, memory_order_relaxed);
-        ASSERT_EQ(cbm_pipeline_importance_recompute_store(stores[1], "imp-proj"), 0);
-        uint64_t rows2 = atomic_load_explicit(&g_importance_store_rows, memory_order_relaxed);
-        ASSERT_GT((long long)(rows1 - rows0), 0);
-        ASSERT_EQ((long long)(rows2 - rows1), (long long)(rows1 - rows0));
+/* Graph content digests and row counts captured from the C SQL recompute. */
+TEST(importance_store_recompute_regression) {
+    static const struct {
+        const char *digest;
+        uint64_t rows;
+    } expected[] = {
+        {"8f1ba659a16cf6bf4842d28b85150ea15cd046203513753c32fb759883e2994b", 154},
+        {"b6b962503cc0ef3f251dc78da82595edf3291957becfe4886b0824d311e4dcba", 151},
+        {"ba6c71c6f73fcb3136e60875c6e419a9e9f047c58cc11073e4687cb754d32424", 144},
+        {"b4b9930e423853e74616a4f1ab304b9a0f93812680358bc4a8ba9ba7c95320f1", 158},
+        {"3c668dca33202b1bdec96f2f664088e1cc25f5587c8b2ed761ab153b8ef42e8e", 141},
+        {"1e17f8d74bb628b9926080ba13682385b3e67f8de01cacfff673bb4687212167", 138},
+    };
+    for (size_t i = 0; i < sizeof(expected) / sizeof(expected[0]); i++) {
+        uint32_t seed = (uint32_t)i + 1;
+        cbm_gbuf_t *graph = cbm_gbuf_new("imp-proj", "/tmp/imp");
+        ASSERT_NOT_NULL(graph);
+        imp_build(graph, seed * 3266489917U);
+        cbm_store_t *store = cbm_store_open_memory();
+        ASSERT_NOT_NULL(store);
+        ASSERT_EQ(cbm_gbuf_flush_to_store(graph, store), 0);
+        cbm_gbuf_free(graph);
 
-        unsigned char c_digest[32];
-        unsigned char rust_digest[32];
-        ASSERT_EQ(cbm_store_graph_content_digest(stores[0], "imp-proj", c_digest), CBM_STORE_OK);
-        ASSERT_EQ(cbm_store_graph_content_digest(stores[1], "imp-proj", rust_digest), CBM_STORE_OK);
-        ASSERT_EQ(memcmp(c_digest, rust_digest, sizeof(c_digest)), 0);
-        printf("  importance store C seed %u digest ", seed);
-        for (size_t i = 0; i < sizeof(c_digest); i++) {
-            printf("%02x", (unsigned)c_digest[i]);
+        uint64_t rows = atomic_load_explicit(&g_importance_store_rows, memory_order_relaxed);
+        ASSERT_EQ(cbm_pipeline_importance_recompute_store(store, "imp-proj"), 0);
+        ASSERT_EQ(atomic_load_explicit(&g_importance_store_rows, memory_order_relaxed) - rows,
+                  expected[i].rows);
+
+        unsigned char digest[32];
+        char hex[2 * sizeof(digest) + 1];
+        ASSERT_EQ(cbm_store_graph_content_digest(store, "imp-proj", digest), CBM_STORE_OK);
+        for (size_t j = 0; j < sizeof(digest); j++) {
+            snprintf(hex + 2 * j, 3, "%02x", (unsigned)digest[j]);
         }
-        printf(" rows %llu\n", (unsigned long long)(rows1 - rows0));
-        cbm_store_close(stores[0]);
-        cbm_store_close(stores[1]);
+        ASSERT_STR_EQ(hex, expected[i].digest);
+        cbm_store_close(store);
     }
     ASSERT_EQ(cbm_pipeline_importance_recompute_store(NULL, "imp-proj"), -1);
-    ASSERT_EQ(cbm_pipeline_importance_recompute_store_c_ref(NULL, "imp-proj"), -1);
     PASS();
 }
 
@@ -1241,7 +1232,7 @@ SUITE(importance) {
     RUN_TEST(importance_distinct_file_count_is_linear_in_group_size);
 
     /* Parity — the Rust pass against the C reference. */
-    RUN_TEST(importance_writer_and_rule_rust_match_c);
-    RUN_TEST(importance_pass_rust_matches_c);
-    RUN_TEST(importance_store_recompute_rust_matches_c);
+    RUN_TEST(importance_writer_and_rule_regression);
+    RUN_TEST(importance_pass_regression);
+    RUN_TEST(importance_store_recompute_regression);
 }

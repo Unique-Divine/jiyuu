@@ -63,7 +63,6 @@ src/pipeline/pass_definitions.c	11
 src/pipeline/pass_enrichment.c	15
 src/pipeline/pass_ensemble_routing.c	10
 src/pipeline/pass_githistory.c	27
-src/pipeline/pass_importance.c	4
 src/pipeline/pass_infrascan.c	2
 src/pipeline/pass_k8s.c	6
 src/pipeline/pass_lsp_cross.c	49

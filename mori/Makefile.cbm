@@ -573,7 +573,6 @@ PIPELINE_SRCS = \
     src/pipeline/pass_similarity_bridge.c \
     src/pipeline/pass_semantic_edges.c \
     src/pipeline/pass_complexity_bridge.c \
-    src/pipeline/pass_importance.c \
     src/pipeline/pass_cross_repo.c \
     src/pipeline/artifact.c \
     src/pipeline/pass_ensemble_routing.c \
