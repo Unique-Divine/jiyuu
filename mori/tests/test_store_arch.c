@@ -1823,6 +1823,62 @@ TEST(leiden_resolution_controls_granularity) {
     PASS();
 }
 
+static int check_leiden_generated_partition(const int64_t *nodes, int node_count,
+                                            const cbm_louvain_edge_t *edges, int edge_count,
+                                            const int *expected) {
+    cbm_louvain_result_t *result = NULL;
+    int count = 0;
+    ASSERT_EQ(cbm_leiden(nodes, node_count, edges, edge_count, 1.0, &result, &count), CBM_STORE_OK);
+    ASSERT_EQ(count, node_count);
+    for (int i = 0; i < count; i++) {
+        ASSERT_EQ(result[i].node_id, nodes[i]);
+        for (int j = 0; j < i; j++) {
+            ASSERT_EQ(result[i].community == result[j].community, expected[i] == expected[j]);
+        }
+    }
+    cbm_leiden_free(result);
+    PASS();
+}
+
+TEST(leiden_disconnected_partition) {
+    int64_t nodes[] = {21, 8, 13, 34, 55, 89, 144};
+    cbm_louvain_edge_t edges[8];
+    int edge_count = 0;
+    for (int base = 0; base < 6; base += 3) {
+        for (int i = base; i < base + 3; i++) {
+            for (int j = i + 1; j < base + 3; j++) {
+                edges[edge_count++] = (cbm_louvain_edge_t){nodes[i], nodes[j]};
+            }
+        }
+    }
+    edges[edge_count++] = (cbm_louvain_edge_t){nodes[1], nodes[0]};
+    edges[edge_count++] = (cbm_louvain_edge_t){nodes[6], nodes[6]};
+    const int expected[] = {0, 0, 0, 1, 1, 1, 2};
+    return check_leiden_generated_partition(nodes, 7, edges, edge_count, expected);
+}
+
+TEST(leiden_singleton_partition) {
+    const int64_t nodes[] = {42};
+    const cbm_louvain_edge_t edges[] = {{42, 42}};
+    const int expected[] = {0};
+    return check_leiden_generated_partition(nodes, 1, edges, 1, expected);
+}
+
+TEST(leiden_tied_partition) {
+    const int64_t nodes[] = {30, 10, 40, 20};
+    cbm_louvain_edge_t cycle[4];
+    cbm_louvain_edge_t reversed[4];
+    for (int i = 0; i < 4; i++) {
+        cycle[i] = (cbm_louvain_edge_t){nodes[i], nodes[(i + 1) % 4]};
+        reversed[3 - i] = cycle[i];
+    }
+    /* Reversing the edge order reverses which neighbor wins the equal gain. */
+    const int forward[] = {0, 0, 1, 1};
+    const int backward[] = {0, 1, 1, 0};
+    ASSERT_EQ(check_leiden_generated_partition(nodes, 4, cycle, 4, forward), 0);
+    return check_leiden_generated_partition(nodes, 4, reversed, 4, backward);
+}
+
 /* get_architecture "clusters" aspect: Leiden communities surfaced compactly. */
 TEST(arch_clusters_basic) {
     cbm_store_t *s = cbm_store_open_memory();
@@ -2100,6 +2156,9 @@ SUITE(store_arch) {
     RUN_TEST(leiden_result_memory_core_ownership);
     RUN_TEST(leiden_multilevel_collapses_noise);
     RUN_TEST(leiden_resolution_controls_granularity);
+    RUN_TEST(leiden_disconnected_partition);
+    RUN_TEST(leiden_singleton_partition);
+    RUN_TEST(leiden_tied_partition);
     RUN_TEST(arch_clusters_basic);
 
     /* Helpers */
