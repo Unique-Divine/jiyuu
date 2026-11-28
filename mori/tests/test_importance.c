@@ -880,6 +880,16 @@ TEST(importance_distinct_file_count_is_linear_in_group_size) {
 
 /* ── Parity: the Rust pass (importance.rs) against the C reference ───── */
 
+#define IMP_FNV_SEED UINT64_C(14695981039346656037)
+
+static uint64_t imp_fnv(uint64_t hash, const void *data, size_t size) {
+    const unsigned char *bytes = data;
+    for (size_t i = 0; i < size; i++) {
+        hash = (hash ^ bytes[i]) * UINT64_C(1099511628211);
+    }
+    return hash;
+}
+
 static uint32_t imp_next(uint32_t *state) {
     *state = *state * 1664525U + 1013904223U;
     return *state >> 8;
@@ -925,9 +935,10 @@ static void imp_build(cbm_gbuf_t *gb, uint32_t seed) {
         char qn[CBM_SZ_64];
         const char *name = names[imp_next(&state) % (sizeof(names) / sizeof(names[0]))];
         snprintf(qn, sizeof(qn), "imp.%s.%d", name, i);
-        ids[i] = cbm_gbuf_upsert_node(gb, labels[imp_next(&state) % 5], name, qn,
-                                      files[imp_next(&state) % (sizeof(files) / sizeof(files[0]))],
-                                      1, 1, kImpProps[imp_next(&state) % IMP_PROP_COUNT]);
+        const char *label = labels[imp_next(&state) % 5];
+        const char *file = files[imp_next(&state) % (sizeof(files) / sizeof(files[0]))];
+        const char *props = kImpProps[imp_next(&state) % IMP_PROP_COUNT];
+        ids[i] = cbm_gbuf_upsert_node(gb, label, name, qn, file, 1, 1, props);
     }
     for (int e = 0; e < IMP_EDGES; e++) {
         int64_t a = ids[imp_next(&state) % IMP_NODES];
@@ -942,16 +953,26 @@ typedef struct {
     int cap;
 } imp_lines_t;
 
-static void imp_collect_node(const cbm_gbuf_node_t *n, void *data) {
-    imp_lines_t *lines = data;
+static void imp_add_line(imp_lines_t *lines, const char *line) {
     if (lines->count == lines->cap) {
         lines->cap = lines->cap ? lines->cap * 2 : 256;
         lines->lines = realloc(lines->lines, (size_t)lines->cap * sizeof(char *));
     }
-    size_t len = strlen(n->qualified_name) + strlen(n->properties_json) + 2;
-    char *line = malloc(len);
-    snprintf(line, len, "%s %s", n->qualified_name, n->properties_json);
-    lines->lines[lines->count++] = line;
+    lines->lines[lines->count++] = strdup(line);
+}
+
+static void imp_collect_node(const cbm_gbuf_node_t *n, void *data) {
+    char line[CBM_SZ_1K];
+    snprintf(line, sizeof(line), "node %s %s %s %s %d %d %s", n->qualified_name, n->label,
+             n->name, n->file_path, n->start_line, n->end_line, n->properties_json);
+    imp_add_line(data, line);
+}
+
+static void imp_collect_edge(const cbm_gbuf_edge_t *edge, void *data) {
+    char line[CBM_SZ_256];
+    snprintf(line, sizeof(line), "edge %s %lld %lld %s", edge->type, (long long)edge->source_id,
+             (long long)edge->target_id, edge->properties_json);
+    imp_add_line(data, line);
 }
 
 static int imp_cmp_line(const void *a, const void *b) {
@@ -969,29 +990,28 @@ static void imp_lines_free(imp_lines_t *lines) {
 static void imp_gbuf_lines(const cbm_gbuf_t *gb, imp_lines_t *out) {
     memset(out, 0, sizeof(*out));
     cbm_gbuf_foreach_node(gb, imp_collect_node, out);
+    cbm_gbuf_foreach_edge(gb, imp_collect_edge, out);
     qsort(out->lines, (size_t)out->count, sizeof(char *), imp_cmp_line);
 }
 
-static void imp_store_lines(cbm_store_t *s, const char *project, imp_lines_t *out) {
-    static const char *const labels[] = {"Function", "Method", "Class", "File", "Variable"};
-    memset(out, 0, sizeof(*out));
-    for (int li = 0; li < 5; li++) {
-        cbm_node_t *nodes = NULL;
-        int n = 0;
-        if (cbm_store_find_nodes_by_label(s, project, labels[li], &nodes, &n) != CBM_STORE_OK) {
-            continue;
-        }
-        for (int i = 0; i < n; i++) {
-            cbm_gbuf_node_t view = {.qualified_name = (char *)nodes[i].qualified_name,
-                                    .properties_json = (char *)nodes[i].properties_json};
-            if (!view.properties_json) {
-                view.properties_json = "(null)";
-            }
-            imp_collect_node(&view, out);
-        }
-        cbm_store_free_nodes(nodes, n);
+static uint64_t imp_lines_digest(const imp_lines_t *lines) {
+    uint64_t digest = IMP_FNV_SEED;
+    for (int i = 0; i < lines->count; i++) {
+        digest = imp_fnv(digest, lines->lines[i], strlen(lines->lines[i]) + 1);
     }
-    qsort(out->lines, (size_t)out->count, sizeof(char *), imp_cmp_line);
+    return digest;
+}
+
+static double imp_generated_score(uint32_t *state, int iteration) {
+    if (iteration % 2) {
+        double base = sqrt((double)(imp_next(state) % 100000));
+        double penalty = imp_next(state) % 2 ? 0.1 : 1.0;
+        double bonus = imp_next(state) % 2 ? 10.0 : 1.0;
+        return base * penalty * bonus;
+    }
+    uint32_t value = imp_next(state);
+    unsigned shift = imp_next(state) % 24;
+    return (double)value / (double)(1U << shift);
 }
 
 static int imp_lines_diff(const imp_lines_t *a, const imp_lines_t *b) {
@@ -1014,10 +1034,11 @@ static int imp_lines_diff(const imp_lines_t *a, const imp_lines_t *b) {
 TEST(importance_writer_and_rule_rust_match_c) {
     static const double scores[] = {
         0.0,     -0.0,      1.5,       42.25,           0.0078125, 0.0000005,
-        2.5e-7,  1.0 / 3.0, sqrt(2.0), 1234567.8912345, 1e20,      1e24,
+        2.5e-7,  1.0 / 3.0, 0x1.6a09e667f3bcdp+0, 1234567.8912345, 1e20, 1e24,
         1e25,    1e40,      -3.75,     INFINITY,        -INFINITY, NAN,
         DBL_MAX, DBL_MIN,   4.9e-324,
     };
+    uint64_t digest = IMP_FNV_SEED;
     for (int p = 0; p < IMP_PROP_COUNT; p++) {
         for (size_t k = 0; k < sizeof(scores) / sizeof(scores[0]); k++) {
             char *c_out = cbm_pipeline_importance_set_prop_c_ref(kImpProps[p], scores[k]);
@@ -1030,10 +1051,13 @@ TEST(importance_writer_and_rule_rust_match_c) {
             if (c_out) {
                 ASSERT_STR_EQ(c_out, rust_out);
             }
+            const char *text = c_out ? c_out : "(null)";
+            digest = imp_fnv(digest, text, strlen(text) + 1);
             free(c_out);
             free(rust_out);
         }
     }
+    printf("  importance writer C digest %016llx\n", (unsigned long long)digest);
     char *c_null = cbm_pipeline_importance_set_prop_c_ref(NULL, 2.0);
     char *rust_null = cbm_pipeline_importance_set_prop(NULL, 2.0);
     ASSERT_STR_EQ(c_null, rust_null);
@@ -1044,10 +1068,7 @@ TEST(importance_writer_and_rule_rust_match_c) {
      * writes them, plus arbitrary doubles. */
     uint32_t state = 0x1a2b3c4dU;
     for (int t = 0; t < 20000; t++) {
-        double score = t % 2 ? sqrt((double)(imp_next(&state) % 100000)) *
-                                   (imp_next(&state) % 2 ? 0.1 : 1.0) *
-                                   (imp_next(&state) % 2 ? 10.0 : 1.0)
-                             : (double)imp_next(&state) / (double)(1U << (imp_next(&state) % 24));
+        double score = imp_generated_score(&state, t);
         char *c_out = cbm_pipeline_importance_set_prop_c_ref("{}", score);
         char *rust_out = cbm_pipeline_importance_set_prop("{}", score);
         if (!c_out || !rust_out || strcmp(c_out, rust_out) != 0) {
@@ -1131,6 +1152,9 @@ TEST(importance_pass_rust_matches_c) {
             printf("  importance parity seed %u differs (%d)\n", seed, diff);
         }
         ASSERT_EQ(diff, 0);
+        printf("  importance graph C seed %u digest %016llx nodes %llu visits %llu\n", seed,
+               (unsigned long long)imp_lines_digest(&c_lines),
+               (unsigned long long)(nodes1 - nodes0), (unsigned long long)(visits1 - visits0));
 
         /* A second run overwrites in place on both sides. */
         cbm_pipeline_pass_importance_c_ref(&ctx);
@@ -1172,18 +1196,16 @@ TEST(importance_store_recompute_rust_matches_c) {
         ASSERT_GT((long long)(rows1 - rows0), 0);
         ASSERT_EQ((long long)(rows2 - rows1), (long long)(rows1 - rows0));
 
-        imp_lines_t c_lines;
-        imp_lines_t rust_lines;
-        imp_store_lines(stores[0], "imp-proj", &c_lines);
-        imp_store_lines(stores[1], "imp-proj", &rust_lines);
-        ASSERT_GT(c_lines.count, 0);
-        int diff = imp_lines_diff(&c_lines, &rust_lines);
-        if (diff != 0) {
-            printf("  store parity seed %u differs (%d)\n", seed, diff);
+        unsigned char c_digest[32];
+        unsigned char rust_digest[32];
+        ASSERT_EQ(cbm_store_graph_content_digest(stores[0], "imp-proj", c_digest), CBM_STORE_OK);
+        ASSERT_EQ(cbm_store_graph_content_digest(stores[1], "imp-proj", rust_digest), CBM_STORE_OK);
+        ASSERT_EQ(memcmp(c_digest, rust_digest, sizeof(c_digest)), 0);
+        printf("  importance store C seed %u digest ", seed);
+        for (size_t i = 0; i < sizeof(c_digest); i++) {
+            printf("%02x", (unsigned)c_digest[i]);
         }
-        ASSERT_EQ(diff, 0);
-        imp_lines_free(&c_lines);
-        imp_lines_free(&rust_lines);
+        printf(" rows %llu\n", (unsigned long long)(rows1 - rows0));
         cbm_store_close(stores[0]);
         cbm_store_close(stores[1]);
     }
