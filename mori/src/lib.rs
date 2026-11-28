@@ -22,6 +22,9 @@ mod complexity;
 #[cfg(feature = "native-engine-abi")]
 #[path = "pipeline/csharp_doc_links/mod.rs"]
 mod csharp_doc_links;
+#[cfg(any(feature = "native-engine-abi", test))]
+#[path = "pipeline/definition_props.rs"]
+mod definition_props;
 #[cfg(feature = "native-engine-abi")]
 #[path = "pipeline/doc_file_links.rs"]
 mod doc_file_links;
@@ -31,6 +34,9 @@ mod docker_image;
 #[cfg(any(feature = "native-engine-abi", test))]
 #[path = "pipeline/explicit_override/mod.rs"]
 mod explicit_override;
+#[cfg(any(feature = "native-engine-abi", test))]
+#[path = "pipeline/extraction_schedule.rs"]
+mod extraction_schedule;
 #[cfg(any(feature = "native-engine-abi", test))]
 #[path = "foundation/ffi_output.rs"]
 mod ffi_output;
@@ -276,6 +282,9 @@ mod store_digest;
 #[cfg(any(feature = "native-engine-abi", test))]
 #[path = "pipeline/full_build_driver.rs"]
 mod full_build_driver;
+#[cfg(any(feature = "native-engine-abi", test))]
+#[path = "pipeline/incremental_execute.rs"]
+mod incremental_execute;
 #[cfg(feature = "native-engine-abi")]
 #[path = "pipeline/source_publish.rs"]
 mod source_publish;
