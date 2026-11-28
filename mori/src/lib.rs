@@ -60,6 +60,9 @@ mod ffi_output;
 #[cfg(feature = "native-engine-abi")]
 #[path = "graph_buffer/graph_buffer_merge.rs"]
 mod graph_buffer_merge;
+#[cfg(any(feature = "native-engine-abi", test))]
+#[path = "pipeline/importance.rs"]
+mod importance;
 #[cfg(feature = "native-engine-abi")]
 #[path = "pipeline/jvm_doc_links/mod.rs"]
 mod jvm_doc_links;
@@ -137,6 +140,9 @@ mod swift_signature_index;
 #[cfg(feature = "native-engine-abi")]
 #[path = "pipeline/terraform.rs"]
 mod terraform;
+#[cfg(any(feature = "native-engine-abi", test))]
+#[path = "pipeline/test_edges.rs"]
+mod test_edges;
 #[cfg(feature = "native-engine-abi")]
 #[path = "cli/test_impact_cli.rs"]
 mod test_impact_cli;
